@@ -1,0 +1,128 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  GO_VERSION: '1.24.5'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Create Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref }}
+        release_name: Release ${{ github.ref }}
+        draft: false
+        prerelease: false
+        body: |
+          ## Changes in this release
+          
+          Claude Code Tools - Go implementations of smart hooks for Claude Code
+          
+          ## Installation
+          
+          Download the appropriate binaries for your platform below and make them executable:
+          
+          ```bash
+          tar -xzf cc-tools-*.tar.gz
+          chmod +x smart-lint smart-test statusline
+          # Move to your PATH, e.g.:
+          mv smart-lint smart-test statusline ~/bin/
+          ```
+
+  build-and-upload:
+    name: Build and Upload
+    needs: release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          # Linux builds
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            suffix: linux-amd64
+          - os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            suffix: linux-arm64
+          - os: ubuntu-latest
+            goos: linux
+            goarch: arm
+            goarm: 7
+            suffix: linux-armv7
+          
+          # macOS builds
+          - os: macos-latest
+            goos: darwin
+            goarch: amd64
+            suffix: darwin-amd64
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+            suffix: darwin-arm64
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Build binaries
+      env:
+        GOOS: ${{ matrix.goos }}
+        GOARCH: ${{ matrix.goarch }}
+        GOARM: ${{ matrix.goarm }}
+      run: |
+        go build -v -ldflags "-s -w -X main.version=${{ github.ref_name }}" -o smart-lint ./cmd/smart-lint
+        go build -v -ldflags "-s -w -X main.version=${{ github.ref_name }}" -o smart-test ./cmd/smart-test
+        go build -v -ldflags "-s -w -X main.version=${{ github.ref_name }}" -o statusline ./cmd/statusline
+
+    - name: Create archive
+      run: |
+        tar -czf cc-tools-${{ matrix.suffix }}.tar.gz smart-lint smart-test statusline
+
+    - name: Generate checksums
+      run: |
+        sha256sum cc-tools-${{ matrix.suffix }}.tar.gz > cc-tools-${{ matrix.suffix }}.tar.gz.sha256
+
+    - name: Upload Release Asset (Archive)
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.release.outputs.upload_url }}
+        asset_path: ./cc-tools-${{ matrix.suffix }}.tar.gz
+        asset_name: cc-tools-${{ matrix.suffix }}.tar.gz
+        asset_content_type: application/gzip
+
+    - name: Upload Release Asset (Checksum)
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.release.outputs.upload_url }}
+        asset_path: ./cc-tools-${{ matrix.suffix }}.tar.gz.sha256
+        asset_name: cc-tools-${{ matrix.suffix }}.tar.gz.sha256
+        asset_content_type: text/plain

@@ -1,0 +1,29 @@
+# Build artifacts
+/build/
+/dist/
+
+# Test coverage
+coverage.out
+coverage.html
+*.test
+
+# Go workspace
+go.work
+go.work.sum
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Debug
+*.log
+/logs/
+
+# Binary outputs (just in case)
+/smart-lint
+/smart-test
+/statusline

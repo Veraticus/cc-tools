@@ -1,0 +1,226 @@
+package shared
+
+import (
+	"fmt"
+	"path/filepath"
+	"strings"
+)
+
+// ProjectHelper provides project-related functions with dependency injection.
+type ProjectHelper struct {
+	deps *Dependencies
+}
+
+// NewProjectHelper creates a new project helper with dependencies.
+func NewProjectHelper(deps *Dependencies) *ProjectHelper {
+	if deps == nil {
+		deps = NewDefaultDependencies()
+	}
+	return &ProjectHelper{deps: deps}
+}
+
+// FindProjectRootWithDeps walks up from the current directory to find the project root.
+// It looks for common project markers like .git, go.mod, package.json, etc.
+func FindProjectRootWithDeps(startDir string, deps *Dependencies) (string, error) {
+	if deps == nil {
+		deps = NewDefaultDependencies()
+	}
+
+	dir := startDir
+	if dir == "" {
+		var err error
+		dir, err = deps.FS.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("getting working directory: %w", err)
+		}
+	}
+
+	// Convert to absolute path
+	absDir, err := deps.FS.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("getting absolute path: %w", err)
+	}
+
+	for {
+		// Check for project root markers
+		markers := []string{
+			".git",
+			"go.mod",
+			"package.json",
+			"Cargo.toml",
+			"setup.py",
+			"pyproject.toml",
+			"Makefile",
+			"justfile",
+			"Justfile",
+		}
+
+		for _, marker := range markers {
+			path := filepath.Join(absDir, marker)
+			if _, statErr := deps.FS.Stat(path); statErr == nil {
+				return absDir, nil
+			}
+		}
+
+		// Move up one directory
+		parent := filepath.Dir(absDir)
+		if parent == absDir {
+			// Reached root of filesystem
+			break
+		}
+		absDir = parent
+	}
+
+	// No project root found, return original directory
+	return dir, nil
+}
+
+// FindProjectRoot is a convenience wrapper that uses default dependencies.
+func FindProjectRoot(startDir string) (string, error) {
+	return FindProjectRootWithDeps(startDir, nil)
+}
+
+// DetectProjectTypeWithDeps analyzes the project directory to determine its type.
+func DetectProjectTypeWithDeps(projectDir string, deps *Dependencies) []string {
+	if deps == nil {
+		deps = NewDefaultDependencies()
+	}
+
+	types := []string{}
+
+	// Go project
+	if fileExistsWithDeps(filepath.Join(projectDir, "go.mod"), deps) ||
+		fileExistsWithDeps(filepath.Join(projectDir, "go.sum"), deps) {
+		types = append(types, "go")
+	}
+
+	// Python project
+	if fileExistsWithDeps(filepath.Join(projectDir, "pyproject.toml"), deps) ||
+		fileExistsWithDeps(filepath.Join(projectDir, "setup.py"), deps) ||
+		fileExistsWithDeps(filepath.Join(projectDir, "requirements.txt"), deps) {
+		types = append(types, "python")
+	}
+
+	// JavaScript/TypeScript project
+	if fileExistsWithDeps(filepath.Join(projectDir, "package.json"), deps) ||
+		fileExistsWithDeps(filepath.Join(projectDir, "tsconfig.json"), deps) {
+		types = append(types, "javascript")
+	}
+
+	// Rust project
+	if fileExistsWithDeps(filepath.Join(projectDir, "Cargo.toml"), deps) {
+		types = append(types, "rust")
+	}
+
+	// Nix project
+	if fileExistsWithDeps(filepath.Join(projectDir, "flake.nix"), deps) ||
+		fileExistsWithDeps(filepath.Join(projectDir, "default.nix"), deps) ||
+		fileExistsWithDeps(filepath.Join(projectDir, "shell.nix"), deps) {
+		types = append(types, "nix")
+	}
+
+	if len(types) == 0 {
+		types = append(types, "unknown")
+	}
+
+	return types
+}
+
+// DetectProjectType is a convenience wrapper that uses default dependencies.
+func DetectProjectType(projectDir string) []string {
+	return DetectProjectTypeWithDeps(projectDir, nil)
+}
+
+// GetPackageManagerWithDeps detects the package manager for JavaScript projects.
+func GetPackageManagerWithDeps(projectDir string, deps *Dependencies) string {
+	if deps == nil {
+		deps = NewDefaultDependencies()
+	}
+
+	if fileExistsWithDeps(filepath.Join(projectDir, "yarn.lock"), deps) {
+		return "yarn"
+	}
+	if fileExistsWithDeps(filepath.Join(projectDir, "pnpm-lock.yaml"), deps) {
+		return "pnpm"
+	}
+	if fileExistsWithDeps(filepath.Join(projectDir, "bun.lockb"), deps) {
+		return "bun"
+	}
+	// Default to npm
+	return "npm"
+}
+
+// GetPackageManager is a convenience wrapper that uses default dependencies.
+func GetPackageManager(projectDir string) string {
+	return GetPackageManagerWithDeps(projectDir, nil)
+}
+
+// fileExistsWithDeps checks if a file exists using dependencies.
+func fileExistsWithDeps(path string, deps *Dependencies) bool {
+	_, err := deps.FS.Stat(path)
+	return err == nil
+}
+
+// fileExists is a convenience wrapper that uses default dependencies.
+func fileExists(path string) bool {
+	return fileExistsWithDeps(path, NewDefaultDependencies())
+}
+
+// ShouldSkipFile determines if a file should be skipped based on common patterns.
+// This function doesn't need dependency injection as it only does string manipulation.
+func ShouldSkipFile(filePath string) bool {
+	// Built-in patterns to always skip
+	skipPatterns := []string{
+		"/vendor/",
+		"/node_modules/",
+		"/build/",
+		"/.git/",
+		"/dist/",
+		"/__pycache__/",
+		"/.cache/",
+		"/target/", // Rust
+		"/.next/",  // Next.js
+	}
+
+	for _, pattern := range skipPatterns {
+		if strings.Contains(filePath, pattern) {
+			return true
+		}
+	}
+
+	// Skip test files for linting/formatting hooks
+	testSuffixes := []string{
+		"_test.go",
+		"_test.py",
+		".test.js",
+		".test.ts",
+		".spec.js",
+		".spec.ts",
+		".test.jsx",
+		".test.tsx",
+		".spec.jsx",
+		".spec.tsx",
+	}
+
+	for _, suffix := range testSuffixes {
+		if strings.HasSuffix(filePath, suffix) {
+			return true
+		}
+	}
+
+	// Skip generated files
+	generatedSuffixes := []string{
+		".generated.go",
+		".pb.go",
+		".gen.go",
+		"_gen.go",
+	}
+
+	for _, suffix := range generatedSuffixes {
+		if strings.HasSuffix(filePath, suffix) {
+			return true
+		}
+	}
+
+	return false
+}
