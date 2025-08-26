@@ -86,6 +86,9 @@ func main() {
 		// Clear cache
 		exec.Command("rm", "-f", "/dev/shm/claude_statusline_*").Run()
 		
+		// Set terminal width for statusline commands
+		os.Setenv("CLAUDE_STATUSLINE_WIDTH", strconv.Itoa(termWidth))
+		
 		// Run Go statusline
 		fmt.Print("Go:   ")
 		runStatusline("./build/statusline", input)
@@ -177,16 +180,32 @@ func runStatusline(command string, input string) {
 }
 
 func getTerminalWidth() int {
+	// Check COLUMNS env var first
+	if columns := os.Getenv("COLUMNS"); columns != "" {
+		if width, err := strconv.Atoi(columns); err == nil && width > 0 {
+			return width
+		}
+	}
+	
+	// Check if we're in tmux and get width directly from tmux
+	if tmux := os.Getenv("TMUX"); tmux != "" {
+		cmd := exec.Command("tmux", "display-message", "-p", "#{window_width}")
+		if output, err := cmd.Output(); err == nil {
+			if width, err := strconv.Atoi(strings.TrimSpace(string(output))); err == nil && width > 0 {
+				return width
+			}
+		}
+	}
+	
+	// Try tput
 	cmd := exec.Command("tput", "cols")
 	output, err := cmd.Output()
-	if err != nil {
-		return 80 // Default
+	if err == nil {
+		if width, err := strconv.Atoi(strings.TrimSpace(string(output))); err == nil && width > 0 {
+			return width
+		}
 	}
 	
-	width, err := strconv.Atoi(strings.TrimSpace(string(output)))
-	if err != nil {
-		return 80
-	}
-	
-	return width
+	// Default fallback
+	return 200
 }

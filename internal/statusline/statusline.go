@@ -103,14 +103,12 @@ type Statusline struct {
 	deps   *Dependencies
 	colors CatppuccinMocha
 	input  *Input
-	cache  *Cache
 }
 
 // New creates a new Statusline instance
 func New(deps *Dependencies) *Statusline {
 	return &Statusline{
-		deps:  deps,
-		cache: NewCache(deps.CacheDir, deps.CacheDuration, deps.FileReader),
+		deps: deps,
 	}
 }
 
@@ -121,22 +119,11 @@ func (s *Statusline) Generate(reader io.Reader) (string, error) {
 		return "", fmt.Errorf("parsing input: %w", err)
 	}
 
-	// Get current directory for cache key
+	// Get current directory
 	currentDir := s.getCurrentDir()
 
-	// Check cache
-	cacheKey := s.generateCacheKey(currentDir)
-	cached, found := s.cache.Get(cacheKey)
-
-	var data *CachedData
-	if found {
-		data = cached
-	} else {
-		// Compute all data
-		data = s.computeData(currentDir)
-		// Save to cache
-		s.cache.Set(cacheKey, data)
-	}
+	// Always compute data fresh (no caching)
+	data := s.computeData(currentDir)
 
 	// Build and return the statusline
 	return s.buildStatusline(data), nil
@@ -501,12 +488,6 @@ func (s *Statusline) buildStatusline(data *CachedData) string {
 	availableWidth := termWidth - compactMessageWidth
 	spaceForMiddle := availableWidth - leftLength - rightLength
 	
-	// Debug output
-	if os.Getenv("DEBUG_CONTEXT") == "1" {
-		debug := fmt.Sprintf("DEBUG buildStatusline: termWidth=%d, leftLength=%d, rightLength=%d, spaceForMiddle=%d, contextLength=%d\n", 
-			termWidth, leftLength, rightLength, spaceForMiddle, data.ContextLength)
-		os.WriteFile("/tmp/statusline_debug.txt", []byte(debug), 0644)
-	}
 
 	// Create middle section (context bar or spacing)
 	middleSection := s.createMiddleSection(data, spaceForMiddle)
@@ -607,10 +588,6 @@ func (s *Statusline) buildRightSide(data *CachedData, hostnameMaxLen, branchMaxL
 }
 
 func (s *Statusline) createMiddleSection(data *CachedData, spaceForMiddle int) string {
-	// Debug
-	if os.Getenv("DEBUG_CONTEXT") == "1" {
-		fmt.Fprintf(os.Stderr, "DEBUG: ContextLength=%d, spaceForMiddle=%d\n", data.ContextLength, spaceForMiddle)
-	}
 	if data.ContextLength > 0 && spaceForMiddle > 20 {
 		// Create context bar
 		paddingTotal := 10
