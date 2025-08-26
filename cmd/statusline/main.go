@@ -18,10 +18,10 @@ func main() {
 		CacheDir:      getCacheDir(),
 		CacheDuration: getCacheDuration(),
 	}
-	
+
 	// Create statusline generator
 	sl := statusline.New(deps)
-	
+
 	// Generate statusline from stdin
 	result, err := sl.Generate(os.Stdin)
 	if err != nil {
@@ -29,7 +29,7 @@ func main() {
 		fmt.Print(" > ")
 		os.Exit(0)
 	}
-	
+
 	// Output without newline (statusline should fill exact width)
 	fmt.Print(result)
 }

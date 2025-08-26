@@ -11,8 +11,8 @@ import (
 
 // Cache provides caching functionality for statusline data
 type Cache struct {
-	dir       string
-	duration  time.Duration
+	dir        string
+	duration   time.Duration
 	fileReader FileReader
 }
 
@@ -34,40 +34,40 @@ func NewCache(dir string, duration time.Duration, fileReader FileReader) *Cache 
 // Get retrieves cached data for a given key
 func (c *Cache) Get(key string) (*CachedData, bool) {
 	cacheFile := filepath.Join(c.dir, fmt.Sprintf("claude_statusline_%s", key))
-	
+
 	// Check if file exists
 	if !c.fileReader.Exists(cacheFile) {
 		return nil, false
 	}
-	
+
 	// Check age
 	modTime, err := c.fileReader.ModTime(cacheFile)
 	if err != nil {
 		return nil, false
 	}
-	
+
 	if time.Since(modTime) > c.duration {
 		return nil, false
 	}
-	
+
 	// Read and parse
 	content, err := c.fileReader.ReadFile(cacheFile)
 	if err != nil {
 		return nil, false
 	}
-	
+
 	var data CachedData
 	if err := json.Unmarshal(content, &data); err != nil {
 		return nil, false
 	}
-	
+
 	return &data, true
 }
 
 // Set stores data in the cache
 func (c *Cache) Set(key string, data *CachedData) error {
 	cacheFile := filepath.Join(c.dir, fmt.Sprintf("claude_statusline_%s", key))
-	
+
 	// Write in bash-compatible format (like the bash version does)
 	var content strings.Builder
 	content.WriteString("# Cached statusline data\n")
@@ -84,6 +84,6 @@ func (c *Cache) Set(key string, data *CachedData) error {
 	content.WriteString(fmt.Sprintf("DEVSPACE=\"%s\"\n", data.Devspace))
 	content.WriteString(fmt.Sprintf("DEVSPACE_SYMBOL=\"%s\"\n", data.DevspaceSymbol))
 	content.WriteString(fmt.Sprintf("RAW_TERM_WIDTH=\"%d\"\n", data.TermWidth))
-	
+
 	return os.WriteFile(cacheFile, []byte(content.String()), 0600)
 }

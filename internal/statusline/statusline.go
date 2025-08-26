@@ -125,8 +125,8 @@ func (s *Statusline) Generate(reader io.Reader) (string, error) {
 	// Always compute data fresh (no caching)
 	data := s.computeData(currentDir)
 
-	// Build and return the statusline
-	return s.buildStatusline(data), nil
+	// Build and return the statusline with guaranteed fixed width
+	return s.Render(data), nil
 }
 
 func (s *Statusline) parseInput(reader io.Reader) error {
@@ -182,7 +182,7 @@ func (s *Statusline) computeData(currentDir string) *CachedData {
 		data.InputTokens = metrics.InputTokens
 		data.OutputTokens = metrics.OutputTokens
 		data.ContextLength = metrics.ContextLength
-		
+
 		// Debug
 		if os.Getenv("DEBUG_CONTEXT") == "1" {
 			debug := fmt.Sprintf("DEBUG computeData: TranscriptPath=%s, InputTokens=%d, OutputTokens=%d, ContextLength=%d\n",
@@ -408,7 +408,7 @@ func (s *Statusline) getDevspace() (string, string) {
 	return symbol + " " + tmuxDevspace, symbol
 }
 
-func (s *Statusline) buildStatusline(data *CachedData) string {
+func (s *Statusline) buildStatuslineOld(data *CachedData) string {
 	var sb strings.Builder
 
 	// Select random model icon
@@ -487,7 +487,6 @@ func (s *Statusline) buildStatusline(data *CachedData) string {
 
 	availableWidth := termWidth - compactMessageWidth
 	spaceForMiddle := availableWidth - leftLength - rightLength
-	
 
 	// Create middle section (context bar or spacing)
 	middleSection := s.createMiddleSection(data, spaceForMiddle)
@@ -613,7 +612,7 @@ func (s *Statusline) createMiddleSection(data *CachedData, spaceForMiddle int) s
 	return fmt.Sprintf("%*s", spaceForMiddle, "")
 }
 
-func (s *Statusline) createContextBar(contextLength, barWidth int) string {
+func (s *Statusline) createContextBarOld(contextLength, barWidth int) string {
 	// Calculate percentage (160k is auto-compact threshold)
 	percentage := float64(contextLength) * 100.0 / 160000.0
 	if percentage > 100 {

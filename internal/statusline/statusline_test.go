@@ -103,7 +103,7 @@ func TestStatuslineGenerate(t *testing.T) {
 				deps.EnvReader.(*MockEnvReader).vars["HOME"] = "/home/user"
 			},
 			contains: []string{
-				"~/project", // Directory
+				"~/project",     // Directory
 				"Claude 3 Opus", // Model name
 			},
 		},
@@ -187,22 +187,22 @@ func TestStatuslineGenerate(t *testing.T) {
 				CacheDir:      "/tmp",
 				CacheDuration: 0, // Disable cache for tests
 			}
-			
+
 			// Apply test-specific setup
 			if tt.setup != nil {
 				tt.setup(deps)
 			}
-			
+
 			// Create statusline
 			sl := New(deps)
-			
+
 			// Generate output
 			reader := bytes.NewReader([]byte(tt.input))
 			output, err := sl.Generate(reader)
 			if err != nil {
 				t.Fatalf("Generate() error = %v", err)
 			}
-			
+
 			// Check that output contains expected strings
 			for _, expected := range tt.contains {
 				if !strings.Contains(output, expected) {
@@ -224,14 +224,14 @@ func TestFormatPath(t *testing.T) {
 		{"/usr/local/bin", "/home/user", "/usr/local/bin"},
 		{"/a/b/c/d/e/f", "/home/user", "…/e/f"},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
 			// Set HOME env var temporarily
 			oldHome := os.Getenv("HOME")
 			os.Setenv("HOME", tt.home)
 			defer os.Setenv("HOME", oldHome)
-			
+
 			result := formatPath(tt.input)
 			if result != tt.expected {
 				t.Errorf("formatPath(%q) = %q, want %q", tt.input, result, tt.expected)
@@ -251,7 +251,7 @@ func TestTruncateText(t *testing.T) {
 		{"test", 4, "test"},
 		{"testing", 4, "tes…"},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.text, func(t *testing.T) {
 			result := truncateText(tt.text, tt.maxLength)
@@ -273,7 +273,7 @@ func TestFormatTokens(t *testing.T) {
 		{1000000, "1.0M"},
 		{2500000, "2.5M"},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.expected, func(t *testing.T) {
 			result := formatTokens(tt.count)
@@ -293,9 +293,9 @@ func TestContextBar(t *testing.T) {
 		CacheDir:      "/tmp",
 		CacheDuration: 0,
 	}
-	
+
 	sl := New(deps)
-	
+
 	tests := []struct {
 		contextLength int
 		barWidth      int
@@ -322,17 +322,17 @@ func TestContextBar(t *testing.T) {
 			shouldContain: []string{"100.0%", "Context"},
 		},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.shouldContain[0], func(t *testing.T) {
 			result := sl.createContextBar(tt.contextLength, tt.barWidth)
-			
+
 			for _, expected := range tt.shouldContain {
 				if !strings.Contains(result, expected) {
 					t.Errorf("Context bar doesn't contain %q\nGot: %q", expected, result)
 				}
 			}
-			
+
 			// Check that ANSI codes are present
 			if !strings.Contains(result, "\033[") {
 				t.Error("Context bar doesn't contain ANSI escape codes")
@@ -347,21 +347,21 @@ func TestGitInfo(t *testing.T) {
 		FileReader: fr,
 	}
 	sl := New(deps)
-	
+
 	// Test with main branch
 	fr.files["/project/.git/HEAD"] = []byte("ref: refs/heads/main\n")
 	info := sl.getGitInfo("/project")
 	if info.Branch != "main" {
 		t.Errorf("Expected branch 'main', got %q", info.Branch)
 	}
-	
+
 	// Test with detached HEAD
 	fr.files["/project/.git/HEAD"] = []byte("a1b2c3d4e5f6789012345678901234567890abcd\n")
 	info = sl.getGitInfo("/project")
 	if info.Branch != "a1b2c3d" {
 		t.Errorf("Expected short hash 'a1b2c3d', got %q", info.Branch)
 	}
-	
+
 	// Test with recent index modification
 	fr.files["/project/.git/index"] = []byte("index")
 	fr.times["/project/.git/index"] = time.Now()
@@ -377,7 +377,7 @@ func TestDevspace(t *testing.T) {
 		EnvReader: env,
 	}
 	sl := New(deps)
-	
+
 	tests := []struct {
 		devspace       string
 		expectedText   string
@@ -391,7 +391,7 @@ func TestDevspace(t *testing.T) {
 		{"custom", "● custom", "●"},
 		{"", "", ""},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.devspace, func(t *testing.T) {
 			env.vars["TMUX_DEVSPACE"] = tt.devspace

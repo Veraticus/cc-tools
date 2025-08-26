@@ -11,12 +11,12 @@ import (
 // formatPath formats a directory path similar to starship truncation
 func formatPath(path string) string {
 	home := os.Getenv("HOME")
-	
+
 	// Replace home with ~
 	if home != "" && strings.HasPrefix(path, home) {
 		path = "~" + strings.TrimPrefix(path, home)
 	}
-	
+
 	// Remove empty parts from splitting
 	var parts []string
 	for _, part := range strings.Split(path, "/") {
@@ -24,17 +24,17 @@ func formatPath(path string) string {
 			parts = append(parts, part)
 		}
 	}
-	
+
 	// Handle root path
 	if path == "/" {
 		return "/"
 	}
-	
+
 	// If starts with /, add empty part at beginning for absolute path
 	if strings.HasPrefix(path, "/") && (len(parts) == 0 || parts[0] != "") {
 		parts = append([]string{""}, parts...)
 	}
-	
+
 	// If path is longer than 3 directories, truncate with …
 	if len(parts) > 3 {
 		// Keep first part (~ or /), last 2 parts
@@ -43,7 +43,7 @@ func formatPath(path string) string {
 		}
 		return fmt.Sprintf("…/%s/%s", parts[len(parts)-2], parts[len(parts)-1])
 	}
-	
+
 	return path
 }
 
@@ -54,7 +54,7 @@ func truncateText(text string, maxWidth int) string {
 	if width <= maxWidth {
 		return text
 	}
-	
+
 	// Truncate to fit within maxWidth including ellipsis
 	return runewidth.Truncate(text, maxWidth-1, "") + "…"
 }
@@ -72,13 +72,13 @@ func formatTokens(count int) string {
 
 // calculateLeftLength calculates the display width of the left section
 func calculateLeftLength(dirPath, tokenInfo, modelIcon string) int {
-	leftLength := 1                                        // Left curve (powerline)
-	leftLength += 1                                        // Space before directory  
-	leftLength += runewidth.StringWidth(dirPath)          // Directory text
-	leftLength += 1                                        // Space after directory
-	leftLength += 1                                        // Chevron to model section
-	leftLength += runewidth.StringWidth(tokenInfo)         // Model section with icon and text
-	leftLength += 1                                        // End chevron
+	leftLength := 1                                // Left curve (powerline)
+	leftLength += 1                                // Space before directory
+	leftLength += runewidth.StringWidth(dirPath)   // Directory text
+	leftLength += 1                                // Space after directory
+	leftLength += 1                                // Chevron to model section
+	leftLength += runewidth.StringWidth(tokenInfo) // Model section with icon and text
+	leftLength += 1                                // End chevron
 	return leftLength
 }
 

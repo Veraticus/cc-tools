@@ -1,0 +1,405 @@
+package statusline
+
+import (
+	"fmt"
+	"math/rand"
+	"os"
+	"strings"
+	
+	"github.com/mattn/go-runewidth"
+)
+
+// Render renders the statusline with lipgloss styling and guaranteed fixed width
+func (s *Statusline) Render(data *CachedData) string {
+	termWidth := data.TermWidth
+	if termWidth == 0 {
+		termWidth = 200
+	}
+	
+	// Initialize colors
+	s.colors = CatppuccinMocha{}
+	
+	// Select random model icon
+	icons := []rune(ModelIcons)
+	modelIcon := string(icons[rand.Intn(len(icons))])
+	
+	// Format directory path
+	dirPath := formatPath(data.CurrentDir)
+	
+	// Determine if we're in compact mode
+	isCompact := data.ContextLength >= 128000
+	
+	// In compact mode, we work with less available width
+	// Reserve 41 chars for "     Context left until auto-compact: XX%"
+	effectiveWidth := termWidth
+	if isCompact {
+		effectiveWidth = termWidth - 41
+	}
+	
+	// Debug terminal width
+	if os.Getenv("DEBUG_WIDTH") == "1" {
+		fmt.Fprintf(os.Stderr, "Render: data.TermWidth=%d, isCompact=%v, effectiveWidth=%d\n", 
+			data.TermWidth, isCompact, effectiveWidth)
+	}
+	
+	// Build components with proper sizing and styling
+	leftSection := s.buildLeftSection(dirPath, data.ModelDisplay, modelIcon, data, isCompact)
+	rightSection := s.buildRightSection(data, isCompact)
+	
+	// Calculate actual widths (stripping ANSI)
+	leftWidth := runewidth.StringWidth(stripAnsi(leftSection))
+	rightWidth := runewidth.StringWidth(stripAnsi(rightSection))
+	
+	// Calculate middle section width using the effective width
+	middleWidth := effectiveWidth - leftWidth - rightWidth
+	if middleWidth < 0 {
+		middleWidth = 0
+	}
+	
+	// Debug
+	if os.Getenv("DEBUG_WIDTH") == "1" {
+		fmt.Fprintf(os.Stderr, "effectiveWidth=%d, leftWidth=%d, rightWidth=%d, middleWidth=%d\n", 
+			effectiveWidth, leftWidth, rightWidth, middleWidth)
+	}
+	
+	// Create middle section (context bar or spacing)
+	middleSection := s.buildMiddleSection(data, middleWidth, isCompact)
+	
+	// Combine all sections
+	result := leftSection + middleSection + rightSection
+	
+	// Debug each section
+	if os.Getenv("DEBUG_WIDTH") == "1" {
+		fmt.Fprintf(os.Stderr, "Final section widths: left=%d, middle=%d, right=%d, total=%d\n",
+			runewidth.StringWidth(stripAnsi(leftSection)),
+			runewidth.StringWidth(stripAnsi(middleSection)),
+			runewidth.StringWidth(stripAnsi(rightSection)),
+			runewidth.StringWidth(stripAnsi(leftSection))+runewidth.StringWidth(stripAnsi(middleSection))+runewidth.StringWidth(stripAnsi(rightSection)))
+	}
+	
+	// Ensure exact width by padding
+	// In compact mode, we pad to effectiveWidth, not termWidth
+	targetWidth := termWidth
+	if isCompact {
+		targetWidth = effectiveWidth
+	}
+	
+	actualWidth := runewidth.StringWidth(stripAnsi(result))
+	if actualWidth < targetWidth {
+		if os.Getenv("DEBUG_WIDTH") == "1" {
+			fmt.Fprintf(os.Stderr, "Adding padding: actualWidth=%d, targetWidth=%d, padding=%d\n", 
+				actualWidth, targetWidth, targetWidth-actualWidth)
+		}
+		result += strings.Repeat(" ", targetWidth-actualWidth)
+	}
+	
+	return result
+}
+
+func (s *Statusline) buildLeftSection(dirPath, modelDisplay, modelIcon string, data *CachedData, isCompact bool) string {
+	// Truncation lengths based on mode
+	var dirMaxLen, modelMaxLen int
+	if isCompact {
+		dirMaxLen, modelMaxLen = 15, 20
+	} else {
+		dirMaxLen, modelMaxLen = 20, 30
+	}
+	
+	dirPath = truncateText(dirPath, dirMaxLen)
+	modelDisplay = truncateText(modelDisplay, modelMaxLen)
+	
+	var sb strings.Builder
+	
+	// Left curve
+	sb.WriteString(s.colors.LavenderFG())
+	sb.WriteString(LeftCurve)
+	
+	// Directory section
+	sb.WriteString(s.colors.LavenderBG())
+	sb.WriteString(s.colors.BaseFG())
+	sb.WriteString(" ")
+	sb.WriteString(dirPath)
+	sb.WriteString(" ")
+	sb.WriteString(s.colors.NC())
+	
+	// Chevron to model section
+	sb.WriteString(s.colors.SkyBG())
+	sb.WriteString(s.colors.LavenderFG())
+	sb.WriteString(LeftChevron)
+	sb.WriteString(s.colors.NC())
+	
+	// Model section
+	sb.WriteString(s.colors.SkyBG())
+	sb.WriteString(s.colors.BaseFG())
+	sb.WriteString(" ")
+	sb.WriteString(modelIcon)
+	sb.WriteString(" ")
+	sb.WriteString(modelDisplay)
+	
+	// Add tokens if present
+	if data.InputTokens > 0 || data.OutputTokens > 0 {
+		sb.WriteString(fmt.Sprintf(" ↑%s ↓%s",
+			formatTokens(data.InputTokens),
+			formatTokens(data.OutputTokens)))
+	}
+	
+	sb.WriteString(" ")
+	sb.WriteString(s.colors.NC())
+	
+	// End chevron
+	sb.WriteString(s.colors.SkyFG())
+	sb.WriteString(LeftChevron)
+	sb.WriteString(s.colors.NC())
+	
+	return sb.String()
+}
+
+func (s *Statusline) buildRightSection(data *CachedData, isCompact bool) string {
+	// Component max lengths
+	var hostnameMaxLen, branchMaxLen, awsMaxLen, k8sMaxLen, devspaceMaxLen int
+	if isCompact {
+		hostnameMaxLen, branchMaxLen = 15, 20
+		awsMaxLen, k8sMaxLen, devspaceMaxLen = 15, 15, 10
+	} else {
+		hostnameMaxLen, branchMaxLen = 25, 30
+		awsMaxLen, k8sMaxLen, devspaceMaxLen = 25, 25, 20
+	}
+	
+	var components []Component
+	
+	// Add devspace
+	if data.Devspace != "" {
+		devspace := truncateText(data.Devspace, devspaceMaxLen)
+		components = append(components, Component{"mauve", devspace})
+	}
+	
+	// Add hostname
+	if data.Hostname != "" {
+		hostname := truncateText(data.Hostname, hostnameMaxLen)
+		text := HostnameIcon + hostname
+		components = append(components, Component{"rosewater", text})
+	}
+	
+	// Add git
+	if data.GitBranch != "" {
+		branch := truncateText(data.GitBranch, branchMaxLen)
+		text := GitIcon + branch
+		if data.GitStatus != "" {
+			text += " " + data.GitStatus
+		}
+		components = append(components, Component{"sky", text})
+	}
+	
+	// Add AWS
+	awsProfile := s.deps.EnvReader.Get("AWS_PROFILE")
+	awsProfile = strings.TrimPrefix(awsProfile, "export AWS_PROFILE=")
+	if awsProfile != "" {
+		awsProfile = truncateText(awsProfile, awsMaxLen)
+		components = append(components, Component{"peach", AwsIcon + awsProfile})
+	}
+	
+	// Add K8s
+	if data.K8sContext != "" {
+		k8s := data.K8sContext
+		k8s = strings.TrimPrefix(k8s, "arn:aws:eks:*:*:cluster/")
+		k8s = strings.TrimPrefix(k8s, "gke_*_*_")
+		k8s = truncateText(k8s, k8sMaxLen)
+		components = append(components, Component{"teal", K8sIcon + k8s})
+	}
+	
+	// Build with powerline separators
+	var sb strings.Builder
+	var prevColor string
+	
+	for i, comp := range components {
+		// Add separator
+		if i == 0 {
+			// First component
+			sb.WriteString(s.getColorFG(comp.Color))
+			sb.WriteString(RightChevron)
+			sb.WriteString(s.colors.NC())
+		} else {
+			// Between components
+			sb.WriteString(s.getColorBG(prevColor))
+			sb.WriteString(s.getColorFG(comp.Color))
+			sb.WriteString(RightChevron)
+			sb.WriteString(s.colors.NC())
+		}
+		
+		// Add content
+		sb.WriteString(s.getColorBG(comp.Color))
+		sb.WriteString(s.colors.BaseFG())
+		sb.WriteString(" ")
+		sb.WriteString(comp.Text)
+		sb.WriteString(" ")
+		sb.WriteString(s.colors.NC())
+		
+		prevColor = comp.Color
+	}
+	
+	// Add end curve
+	if prevColor != "" {
+		sb.WriteString(s.getColorFG(prevColor))
+		sb.WriteString(RightCurve)
+		sb.WriteString(s.colors.NC())
+	}
+	
+	return sb.String()
+}
+
+func (s *Statusline) buildMiddleSection(data *CachedData, width int, isCompact bool) string {
+	if width <= 0 {
+		return ""
+	}
+	
+	// If we have context and enough space, show context bar
+	if data.ContextLength > 0 && width > 20 {
+		return s.createContextBar(data.ContextLength, width)
+	}
+	
+	// Otherwise just spaces
+	return strings.Repeat(" ", width)
+}
+
+func (s *Statusline) createContextBar(contextLength, barWidth int) string {
+	// Calculate percentage (160k is auto-compact threshold)
+	percentage := float64(contextLength) * 100.0 / 160000.0
+	if percentage > 100 {
+		percentage = 100
+	}
+	
+	// Choose colors based on percentage
+	var bgColor, fgColor, fgLightBg string
+	if percentage < 40 {
+		bgColor = s.colors.GreenBG()
+		fgColor = s.colors.GreenFG()
+		fgLightBg = s.colors.GreenLightBG()
+	} else if percentage < 60 {
+		bgColor = s.colors.YellowBG()
+		fgColor = s.colors.YellowFG()
+		fgLightBg = s.colors.YellowLightBG()
+	} else if percentage < 80 {
+		bgColor = s.colors.PeachBG()
+		fgColor = s.colors.PeachFG()
+		fgLightBg = s.colors.PeachLightBG()
+	} else {
+		bgColor = s.colors.RedBG()
+		fgColor = s.colors.RedFG()
+		fgLightBg = s.colors.RedLightBG()
+	}
+	
+	label := ContextIcon + "Context "
+	percentText := fmt.Sprintf(" %.1f%%", percentage)
+	textLength := runewidth.StringWidth(label) + runewidth.StringWidth(percentText)
+	
+	// Debug context bar calculations
+	if os.Getenv("DEBUG_WIDTH") == "1" {
+		fmt.Fprintf(os.Stderr, "createContextBar: barWidth=%d, label='%s' width=%d, percentText='%s' width=%d, textLength=%d\n",
+			barWidth, label, runewidth.StringWidth(label), percentText, runewidth.StringWidth(percentText), textLength)
+	}
+	
+	fillWidth := barWidth - textLength - 2 // -2 for curves
+	if fillWidth < 4 {
+		return strings.Repeat(" ", barWidth)
+	}
+	
+	// Calculate filled portion
+	filledWidth := int(float64(fillWidth) * percentage / 100.0)
+	
+	// Build the progress bar with proper characters
+	var bar strings.Builder
+	for i := 0; i < fillWidth; i++ {
+		var char string
+		if i == 0 {
+			if filledWidth > 0 {
+				char = ProgressLeftFull
+			} else {
+				char = ProgressLeftEmpty
+			}
+		} else if i == fillWidth-1 {
+			if i < filledWidth {
+				char = ProgressRightFull
+			} else {
+				char = ProgressRightEmpty
+			}
+		} else {
+			if i < filledWidth {
+				char = ProgressMidFull
+			} else {
+				char = ProgressMidEmpty
+			}
+		}
+		
+		// Apply colors based on filled/empty
+		if i < filledWidth {
+			bar.WriteString(bgColor)
+			bar.WriteString(fgColor)
+		} else {
+			bar.WriteString(fgLightBg)
+			bar.WriteString(fgColor)
+		}
+		bar.WriteString(char)
+		bar.WriteString(s.colors.NC())
+	}
+	
+	// Build complete context bar with padding
+	var result strings.Builder
+	
+	// Calculate padding for centering
+	totalBarWidth := textLength + fillWidth + 2
+	leftPad := (barWidth - totalBarWidth) / 2
+	rightPad := barWidth - totalBarWidth - leftPad
+	
+	// Debug padding calculations
+	if os.Getenv("DEBUG_WIDTH") == "1" {
+		fmt.Fprintf(os.Stderr, "  fillWidth=%d, totalBarWidth=%d, leftPad=%d, rightPad=%d\n",
+			fillWidth, totalBarWidth, leftPad, rightPad)
+	}
+	
+	// Add left padding
+	if leftPad > 0 {
+		result.WriteString(strings.Repeat(" ", leftPad))
+	}
+	
+	// Start curve
+	result.WriteString(fgColor)
+	result.WriteString(LeftCurve)
+	result.WriteString(s.colors.NC())
+	
+	// Label
+	result.WriteString(bgColor)
+	result.WriteString(s.colors.BaseFG())
+	result.WriteString(label)
+	result.WriteString(s.colors.NC())
+	
+	// Progress bar
+	result.WriteString(bar.String())
+	
+	// Percentage
+	result.WriteString(bgColor)
+	result.WriteString(s.colors.BaseFG())
+	result.WriteString(percentText)
+	result.WriteString(s.colors.NC())
+	
+	// End curve
+	result.WriteString(fgColor)
+	result.WriteString(RightCurve)
+	result.WriteString(s.colors.NC())
+	
+	// Add right padding
+	if rightPad > 0 {
+		result.WriteString(strings.Repeat(" ", rightPad))
+	}
+	
+	// Debug final result
+	finalResult := result.String()
+	if os.Getenv("DEBUG_WIDTH") == "1" {
+		finalWidth := runewidth.StringWidth(stripAnsi(finalResult))
+		fmt.Fprintf(os.Stderr, "  context bar final width=%d (should be %d)\n", finalWidth, barWidth)
+		if finalWidth != barWidth {
+			fmt.Fprintf(os.Stderr, "  WARNING: Context bar width mismatch!\n")
+		}
+	}
+	
+	return result.String()
+}
