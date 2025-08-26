@@ -1,27 +1,55 @@
-// Package main implements the statusline CLI tool for Claude Code.
 package main
 
 import (
 	"fmt"
 	"os"
+	"time"
 
-	"github.com/Veraticus/cc-tools/internal/hooks"
 	"github.com/Veraticus/cc-tools/internal/statusline"
 )
 
 func main() {
-	// Read statusline input from stdin
-	input, err := hooks.ReadStatusLineInput()
+	// Create dependencies with default implementations
+	deps := &statusline.Dependencies{
+		FileReader:    &statusline.DefaultFileReader{},
+		CommandRunner: &statusline.DefaultCommandRunner{},
+		EnvReader:     &statusline.DefaultEnvReader{},
+		TerminalWidth: &statusline.DefaultTerminalWidth{},
+		CacheDir:      getCacheDir(),
+		CacheDuration: getCacheDuration(),
+	}
+	
+	// Create statusline generator
+	sl := statusline.New(deps)
+	
+	// Generate statusline from stdin
+	result, err := sl.Generate(os.Stdin)
 	if err != nil {
-		// If no input, output a simple default statusline
-		fmt.Println("[Claude Code]") //nolint:forbidigo // Statusline must output to stdout
+		// On error, output a simple fallback
+		fmt.Print(" > ")
 		os.Exit(0)
 	}
+	
+	// Output without newline (statusline should fill exact width)
+	fmt.Print(result)
+}
 
-	// Create formatter and generate statusline
-	formatter := statusline.NewFormatter(input)
-	output := formatter.Format()
+func getCacheDir() string {
+	if dir := os.Getenv("CLAUDE_STATUSLINE_CACHE_DIR"); dir != "" {
+		return dir
+	}
+	return "/dev/shm"
+}
 
-	// Output the statusline (first line only as per spec)
-	fmt.Println(output) //nolint:forbidigo // Statusline must output to stdout
+func getCacheDuration() time.Duration {
+	// Check for debug mode - disable cache
+	if os.Getenv("DEBUG_CONTEXT") == "1" {
+		return 0
+	}
+	if seconds := os.Getenv("CLAUDE_STATUSLINE_CACHE_SECONDS"); seconds != "" {
+		if duration, err := time.ParseDuration(seconds + "s"); err == nil {
+			return duration
+		}
+	}
+	return 20 * time.Second
 }

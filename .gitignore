@@ -22,6 +22,7 @@ go.work.sum
 # Debug
 *.log
 /logs/
+/reference/
 
 # Binary outputs (just in case)
 /smart-lint

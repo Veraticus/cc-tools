@@ -96,7 +96,7 @@ func (ce *CommandExecutor) ExecuteForHook(cmd *DiscoveredCommand, hookType Comma
 	result := ce.Execute(cmd)
 
 	if result.TimedOut {
-		message := shared.ErrorStyle.Render(
+		message := shared.RawErrorStyle.Render(
 			fmt.Sprintf("⛔ BLOCKING: Command timed out after %v", ce.timeout))
 		return 2, message //nolint:mnd // Exit code 2 signals blocking error to Claude
 	}
@@ -107,11 +107,11 @@ func (ce *CommandExecutor) ExecuteForHook(cmd *DiscoveredCommand, hookType Comma
 			var message string
 			switch hookType {
 			case CommandTypeLint:
-				message = shared.WarningStyle.Render("👉 Lints pass. Continue with your task.")
+				message = shared.RawWarningStyle.Render("👉 Lints pass. Continue with your task.")
 			case CommandTypeTest:
-				message = shared.WarningStyle.Render("👉 Tests pass. Continue with your task.")
+				message = shared.RawWarningStyle.Render("👉 Tests pass. Continue with your task.")
 			default:
-				message = shared.SuccessStyle.Render("✓ Command succeeded")
+				message = shared.RawSuccessStyle.Render("✓ Command succeeded")
 			}
 			return 2, message //nolint:mnd // Exit code 2 shows message to Claude
 		}
@@ -123,15 +123,15 @@ func (ce *CommandExecutor) ExecuteForHook(cmd *DiscoveredCommand, hookType Comma
 	var message string
 	switch hookType {
 	case CommandTypeLint:
-		message = shared.ErrorStyle.Render(
+		message = shared.RawErrorStyle.Render(
 			fmt.Sprintf("⛔ BLOCKING: Run 'cd %s && %s' to fix lint failures",
 				cmd.WorkingDir, cmdStr))
 	case CommandTypeTest:
-		message = shared.ErrorStyle.Render(
+		message = shared.RawErrorStyle.Render(
 			fmt.Sprintf("⛔ BLOCKING: Run 'cd %s && %s' to fix test failures",
 				cmd.WorkingDir, cmdStr))
 	default:
-		message = shared.ErrorStyle.Render(
+		message = shared.RawErrorStyle.Render(
 			fmt.Sprintf("⛔ BLOCKING: Command failed: %s", cmdStr))
 	}
 
@@ -164,9 +164,8 @@ func RunSmartHookWithDeps(hookType CommandType, debug bool, timeoutSecs int, coo
 
 	// Check if file should be skipped
 	if shared.ShouldSkipFile(filePath) {
-		if debug {
-			_, _ = fmt.Fprintf(deps.Stderr, "Skipping file: %s\n", filePath)
-		}
+		// Only output in debug mode when CLAUDE_HOOKS_DEBUG is set
+		// This matches bash behavior where log_debug checks the env var
 		return 0
 	}
 

@@ -2,7 +2,43 @@
 package shared
 
 import (
+	"fmt"
+
 	"github.com/charmbracelet/lipgloss"
+)
+
+// Raw ANSI escape codes matching the bash hooks.
+const (
+	ANSIRed    = "\033[0;31m"
+	ANSIGreen  = "\033[0;32m"
+	ANSIYellow = "\033[0;33m"
+	ANSIBlue   = "\033[0;34m"
+	ANSICyan   = "\033[0;36m"
+	ANSIReset  = "\033[0m"
+)
+
+// RawANSIStyle provides raw ANSI formatting matching bash hooks exactly.
+type RawANSIStyle struct {
+	color string
+}
+
+// NewRawANSIStyle creates a raw ANSI style.
+func NewRawANSIStyle(color string) RawANSIStyle {
+	return RawANSIStyle{color: color}
+}
+
+// Render applies the ANSI color codes to text.
+func (s RawANSIStyle) Render(text string) string {
+	return fmt.Sprintf("%s%s%s", s.color, text, ANSIReset)
+}
+
+// Raw ANSI styles matching bash hooks exactly.
+var (
+	RawErrorStyle   = NewRawANSIStyle(ANSIRed)
+	RawSuccessStyle = NewRawANSIStyle(ANSIGreen)
+	RawWarningStyle = NewRawANSIStyle(ANSIYellow)
+	RawInfoStyle    = NewRawANSIStyle(ANSIBlue)
+	RawDebugStyle   = NewRawANSIStyle(ANSICyan)
 )
 
 // Standard color definitions.

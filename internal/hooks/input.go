@@ -32,6 +32,7 @@ type StatusLineInput struct {
 	Version        string          `json:"version"`
 	OutputStyle    OutputStyleInfo `json:"output_style"`
 	Cost           CostInfo        `json:"cost"`
+	GitInfo        GitInfo         `json:"git_info"`
 }
 
 // ModelInfo contains model information.
@@ -58,6 +59,15 @@ type CostInfo struct {
 	TotalAPIDurationMS int64   `json:"total_api_duration_ms"`
 	TotalLinesAdded    int     `json:"total_lines_added"`
 	TotalLinesRemoved  int     `json:"total_lines_removed"`
+}
+
+// GitInfo contains git repository information.
+type GitInfo struct {
+	Branch       string `json:"branch"`
+	IsGitRepo    bool   `json:"is_git_repo"`
+	HasUntracked bool   `json:"has_untracked"`
+	HasModified  bool   `json:"has_modified"`
+	HasStaged    bool   `json:"has_staged"`
 }
 
 // ReadHookInput reads and parses hook input from stdin.
