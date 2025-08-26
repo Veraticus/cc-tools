@@ -98,17 +98,43 @@ type TerminalWidth interface {
 	GetWidth() int
 }
 
+// Config contains configuration for the statusline
+type Config struct {
+	// LeftSpacerWidth is the width of the left spacer (default: 1)
+	LeftSpacerWidth int
+	// RightSpacerWidth is the width of the right spacer (default: 1, only shown when not in compact mode)
+	RightSpacerWidth int
+}
+
+// DefaultConfig returns the default configuration
+func DefaultConfig() *Config {
+	return &Config{
+		LeftSpacerWidth:  1,
+		RightSpacerWidth: 1,
+	}
+}
+
 // Statusline is the main statusline generator
 type Statusline struct {
 	deps   *Dependencies
 	colors CatppuccinMocha
 	input  *Input
+	config *Config
 }
 
 // New creates a new Statusline instance
 func New(deps *Dependencies) *Statusline {
+	return NewWithConfig(deps, DefaultConfig())
+}
+
+// NewWithConfig creates a new Statusline instance with custom configuration
+func NewWithConfig(deps *Dependencies, config *Config) *Statusline {
+	if config == nil {
+		config = DefaultConfig()
+	}
 	return &Statusline{
-		deps: deps,
+		deps:   deps,
+		config: config,
 	}
 }
 

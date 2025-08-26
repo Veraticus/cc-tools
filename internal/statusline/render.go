@@ -36,19 +36,63 @@ func (s *Statusline) Render(data *CachedData) string {
 		effectiveWidth = termWidth - 41
 	}
 	
-	// Debug terminal width
-	if os.Getenv("DEBUG_WIDTH") == "1" {
-		fmt.Fprintf(os.Stderr, "Render: data.TermWidth=%d, isCompact=%v, effectiveWidth=%d\n", 
-			data.TermWidth, isCompact, effectiveWidth)
+	// Calculate spacer widths
+	leftSpacerWidth := 0
+	if s.config.LeftSpacerWidth > 0 {
+		leftSpacerWidth = s.config.LeftSpacerWidth
 	}
 	
-	// Build components with proper sizing and styling
-	leftSection := s.buildLeftSection(dirPath, data.ModelDisplay, modelIcon, data, isCompact)
-	rightSection := s.buildRightSection(data, isCompact)
+	rightSpacerWidth := 0
+	// Only add right spacer when not in compact mode
+	if !isCompact && s.config.RightSpacerWidth > 0 {
+		rightSpacerWidth = s.config.RightSpacerWidth
+	}
+	
+	// Calculate available width for content after accounting for spacers
+	contentWidth := effectiveWidth - leftSpacerWidth - rightSpacerWidth
+	
+	// Ensure we have at least some width for content
+	if contentWidth < 20 {
+		// Extreme case: spacers are taking up too much space
+		// Force a minimum content width and reduce spacers if necessary
+		contentWidth = 20
+		totalSpacerBudget := effectiveWidth - contentWidth
+		if totalSpacerBudget < leftSpacerWidth + rightSpacerWidth {
+			// Scale down spacers proportionally
+			if totalSpacerBudget > 0 {
+				leftSpacerWidth = totalSpacerBudget * leftSpacerWidth / (leftSpacerWidth + rightSpacerWidth)
+				rightSpacerWidth = totalSpacerBudget - leftSpacerWidth
+			} else {
+				leftSpacerWidth = 0
+				rightSpacerWidth = 0
+			}
+		}
+	}
+	
+	// Debug terminal width
+	if os.Getenv("DEBUG_WIDTH") == "1" {
+		fmt.Fprintf(os.Stderr, "Render: termWidth=%d, isCompact=%v, effectiveWidth=%d, spacers(L:%d,R:%d), contentWidth=%d\n", 
+			data.TermWidth, isCompact, effectiveWidth, leftSpacerWidth, rightSpacerWidth, contentWidth)
+	}
+	
+	// Build components with proper sizing that accounts for spacers
+	leftSection := s.buildLeftSection(dirPath, data.ModelDisplay, modelIcon, data, isCompact, contentWidth)
+	rightSection := s.buildRightSection(data, isCompact, contentWidth)
+	
+	// Create spacers
+	leftSpacer := ""
+	if leftSpacerWidth > 0 {
+		leftSpacer = strings.Repeat(" ", leftSpacerWidth)
+	}
+	
+	rightSpacer := ""
+	if rightSpacerWidth > 0 {
+		rightSpacer = strings.Repeat(" ", rightSpacerWidth)
+	}
 	
 	// Calculate actual widths (stripping ANSI)
-	leftWidth := runewidth.StringWidth(stripAnsi(leftSection))
-	rightWidth := runewidth.StringWidth(stripAnsi(rightSection))
+	leftWidth := runewidth.StringWidth(stripAnsi(leftSection)) + leftSpacerWidth
+	rightWidth := runewidth.StringWidth(stripAnsi(rightSection)) + rightSpacerWidth
 	
 	// Calculate middle section width using the effective width
 	middleWidth := effectiveWidth - leftWidth - rightWidth
@@ -65,16 +109,18 @@ func (s *Statusline) Render(data *CachedData) string {
 	// Create middle section (context bar or spacing)
 	middleSection := s.buildMiddleSection(data, middleWidth, isCompact)
 	
-	// Combine all sections
-	result := leftSection + middleSection + rightSection
+	// Combine all sections with spacers
+	result := leftSpacer + leftSection + middleSection + rightSection + rightSpacer
 	
 	// Debug each section
 	if os.Getenv("DEBUG_WIDTH") == "1" {
-		fmt.Fprintf(os.Stderr, "Final section widths: left=%d, middle=%d, right=%d, total=%d\n",
+		fmt.Fprintf(os.Stderr, "Final section widths: leftSpacer=%d, left=%d, middle=%d, right=%d, rightSpacer=%d, total=%d\n",
+			len(leftSpacer),
 			runewidth.StringWidth(stripAnsi(leftSection)),
 			runewidth.StringWidth(stripAnsi(middleSection)),
 			runewidth.StringWidth(stripAnsi(rightSection)),
-			runewidth.StringWidth(stripAnsi(leftSection))+runewidth.StringWidth(stripAnsi(middleSection))+runewidth.StringWidth(stripAnsi(rightSection)))
+			len(rightSpacer),
+			len(leftSpacer)+runewidth.StringWidth(stripAnsi(leftSection))+runewidth.StringWidth(stripAnsi(middleSection))+runewidth.StringWidth(stripAnsi(rightSection))+len(rightSpacer))
 	}
 	
 	// Ensure exact width by padding
@@ -96,13 +142,63 @@ func (s *Statusline) Render(data *CachedData) string {
 	return result
 }
 
-func (s *Statusline) buildLeftSection(dirPath, modelDisplay, modelIcon string, data *CachedData, isCompact bool) string {
-	// Truncation lengths based on mode
+func (s *Statusline) buildLeftSection(dirPath, modelDisplay, modelIcon string, data *CachedData, isCompact bool, availableWidth int) string {
+	// Calculate proportional truncation lengths based on available width
+	// Default allocations when width is sufficient
 	var dirMaxLen, modelMaxLen int
+	
+	// Base minimum sizes
+	minDirLen := 10
+	minModelLen := 10
+	
 	if isCompact {
+		// In compact mode, use tighter defaults
 		dirMaxLen, modelMaxLen = 15, 20
 	} else {
+		// Normal mode defaults
 		dirMaxLen, modelMaxLen = 20, 30
+	}
+	
+	// If available width is very constrained, scale down proportionally
+	// Reserve space for: curves(2) + chevrons(2) + spaces(6) + icon(2) + tokens(~10) = ~22 chars overhead
+	overhead := 22
+	if data.InputTokens > 0 || data.OutputTokens > 0 {
+		overhead += 10 // Extra space for token display
+	}
+	
+	// Ensure we don't exceed available width
+	// Reserve at least 1/3 for middle section and 1/3 for right section
+	maxLeftWidth := availableWidth / 3
+	if maxLeftWidth < 20 {
+		maxLeftWidth = 20 // Absolute minimum for left section
+	}
+	
+	availableForText := maxLeftWidth
+	if availableForText < overhead + minDirLen + minModelLen {
+		// Very constrained - use minimum sizes but ensure we fit
+		totalMin := overhead + minDirLen + minModelLen
+		if totalMin > availableForText {
+			// Even minimums don't fit - scale them down
+			scaleRatio := float64(availableForText - overhead) / float64(minDirLen + minModelLen)
+			dirMaxLen = int(float64(minDirLen) * scaleRatio)
+			modelMaxLen = int(float64(minModelLen) * scaleRatio)
+			if dirMaxLen < 5 { dirMaxLen = 5 }
+			if modelMaxLen < 5 { modelMaxLen = 5 }
+		} else {
+			dirMaxLen = minDirLen
+			modelMaxLen = minModelLen
+		}
+	} else if availableForText < overhead + dirMaxLen + modelMaxLen {
+		// Scale down proportionally
+		textBudget := availableForText - overhead
+		dirMaxLen = textBudget * 40 / 100  // 40% for directory
+		modelMaxLen = textBudget * 60 / 100 // 60% for model
+		if dirMaxLen < minDirLen {
+			dirMaxLen = minDirLen
+		}
+		if modelMaxLen < minModelLen {
+			modelMaxLen = minModelLen
+		}
 	}
 	
 	dirPath = truncateText(dirPath, dirMaxLen)
@@ -154,15 +250,69 @@ func (s *Statusline) buildLeftSection(dirPath, modelDisplay, modelIcon string, d
 	return sb.String()
 }
 
-func (s *Statusline) buildRightSection(data *CachedData, isCompact bool) string {
-	// Component max lengths
+func (s *Statusline) buildRightSection(data *CachedData, isCompact bool, availableWidth int) string {
+	// Calculate proportional max lengths based on available width
 	var hostnameMaxLen, branchMaxLen, awsMaxLen, k8sMaxLen, devspaceMaxLen int
+	
+	// Base minimum sizes
+	minHostnameLen := 8
+	minBranchLen := 10
+	minAwsLen := 8
+	minK8sLen := 8
+	minDevspaceLen := 6
+	
 	if isCompact {
 		hostnameMaxLen, branchMaxLen = 15, 20
 		awsMaxLen, k8sMaxLen, devspaceMaxLen = 15, 15, 10
 	} else {
 		hostnameMaxLen, branchMaxLen = 25, 30
 		awsMaxLen, k8sMaxLen, devspaceMaxLen = 25, 25, 20
+	}
+	
+	// If available width is constrained, scale down proportionally
+	// Allocate roughly 1/3 of total width to right section
+	availableForRight := availableWidth / 3
+	if availableForRight < 20 {
+		availableForRight = 20 // Absolute minimum
+	}
+	
+	// Count how many components we'll show
+	componentCount := 0
+	if data.Devspace != "" { componentCount++ }
+	if data.Hostname != "" { componentCount++ }
+	if data.GitBranch != "" { componentCount++ }
+	awsProfile := s.deps.EnvReader.Get("AWS_PROFILE")
+	if awsProfile != "" { componentCount++ }
+	if data.K8sContext != "" { componentCount++ }
+	
+	if componentCount > 0 {
+		// Reserve space for separators, curves, spaces, and icons
+		overhead := componentCount * 5 + 4 // Roughly 5 chars per component for formatting + 4 for curves
+		
+		availableForText := availableForRight - overhead
+		if availableForText < 30 { // Very constrained
+			// Use minimum sizes
+			hostnameMaxLen = minHostnameLen
+			branchMaxLen = minBranchLen
+			awsMaxLen = minAwsLen
+			k8sMaxLen = minK8sLen
+			devspaceMaxLen = minDevspaceLen
+		} else if availableForText < (hostnameMaxLen + branchMaxLen + awsMaxLen + k8sMaxLen + devspaceMaxLen) {
+			// Scale down proportionally
+			perComponent := availableForText / componentCount
+			hostnameMaxLen = perComponent
+			branchMaxLen = perComponent
+			awsMaxLen = perComponent
+			k8sMaxLen = perComponent
+			devspaceMaxLen = perComponent
+			
+			// Ensure minimums
+			if hostnameMaxLen < minHostnameLen { hostnameMaxLen = minHostnameLen }
+			if branchMaxLen < minBranchLen { branchMaxLen = minBranchLen }
+			if awsMaxLen < minAwsLen { awsMaxLen = minAwsLen }
+			if k8sMaxLen < minK8sLen { k8sMaxLen = minK8sLen }
+			if devspaceMaxLen < minDevspaceLen { devspaceMaxLen = minDevspaceLen }
+		}
 	}
 	
 	var components []Component
@@ -191,7 +341,6 @@ func (s *Statusline) buildRightSection(data *CachedData, isCompact bool) string 
 	}
 	
 	// Add AWS
-	awsProfile := s.deps.EnvReader.Get("AWS_PROFILE")
 	awsProfile = strings.TrimPrefix(awsProfile, "export AWS_PROFILE=")
 	if awsProfile != "" {
 		awsProfile = truncateText(awsProfile, awsMaxLen)
@@ -262,6 +411,16 @@ func (s *Statusline) buildMiddleSection(data *CachedData, width int, isCompact b
 }
 
 func (s *Statusline) createContextBar(contextLength, barWidth int) string {
+	// Always reserve 4 spaces padding on each side
+	const contextBarPadding = 4
+	
+	// Calculate available width for the actual bar after padding
+	availableForBar := barWidth - (contextBarPadding * 2) // 4 spaces left, 4 spaces right
+	if availableForBar < 15 { // Minimum sensible bar size
+		// Not enough space for a meaningful context bar
+		return strings.Repeat(" ", barWidth)
+	}
+	
 	// Calculate percentage (160k is auto-compact threshold)
 	percentage := float64(contextLength) * 100.0 / 160000.0
 	if percentage > 100 {
@@ -294,12 +453,14 @@ func (s *Statusline) createContextBar(contextLength, barWidth int) string {
 	
 	// Debug context bar calculations
 	if os.Getenv("DEBUG_WIDTH") == "1" {
-		fmt.Fprintf(os.Stderr, "createContextBar: barWidth=%d, label='%s' width=%d, percentText='%s' width=%d, textLength=%d\n",
-			barWidth, label, runewidth.StringWidth(label), percentText, runewidth.StringWidth(percentText), textLength)
+		fmt.Fprintf(os.Stderr, "createContextBar: barWidth=%d, availableForBar=%d, label='%s' width=%d, percentText='%s' width=%d, textLength=%d\n",
+			barWidth, availableForBar, label, runewidth.StringWidth(label), percentText, runewidth.StringWidth(percentText), textLength)
 	}
 	
-	fillWidth := barWidth - textLength - 2 // -2 for curves
+	// Calculate fill width from available bar space
+	fillWidth := availableForBar - textLength - 2 // -2 for curves
 	if fillWidth < 4 {
+		// Not enough space for progress bar
 		return strings.Repeat(" ", barWidth)
 	}
 	
@@ -342,24 +503,21 @@ func (s *Statusline) createContextBar(contextLength, barWidth int) string {
 		bar.WriteString(s.colors.NC())
 	}
 	
-	// Build complete context bar with padding
+	// Build complete context bar with fixed padding
 	var result strings.Builder
 	
-	// Calculate padding for centering
-	totalBarWidth := textLength + fillWidth + 2
-	leftPad := (barWidth - totalBarWidth) / 2
-	rightPad := barWidth - totalBarWidth - leftPad
+	// Always use exactly 4 spaces of padding on each side
+	leftPad := contextBarPadding
+	rightPad := contextBarPadding
 	
 	// Debug padding calculations
 	if os.Getenv("DEBUG_WIDTH") == "1" {
-		fmt.Fprintf(os.Stderr, "  fillWidth=%d, totalBarWidth=%d, leftPad=%d, rightPad=%d\n",
-			fillWidth, totalBarWidth, leftPad, rightPad)
+		fmt.Fprintf(os.Stderr, "  fillWidth=%d, leftPad=%d, rightPad=%d\n",
+			fillWidth, leftPad, rightPad)
 	}
 	
-	// Add left padding
-	if leftPad > 0 {
-		result.WriteString(strings.Repeat(" ", leftPad))
-	}
+	// Add left padding (always 4 spaces)
+	result.WriteString(strings.Repeat(" ", leftPad))
 	
 	// Start curve
 	result.WriteString(fgColor)
@@ -386,10 +544,8 @@ func (s *Statusline) createContextBar(contextLength, barWidth int) string {
 	result.WriteString(RightCurve)
 	result.WriteString(s.colors.NC())
 	
-	// Add right padding
-	if rightPad > 0 {
-		result.WriteString(strings.Repeat(" ", rightPad))
-	}
+	// Add right padding (always 4 spaces)
+	result.WriteString(strings.Repeat(" ", rightPad))
 	
 	// Debug final result
 	finalResult := result.String()
