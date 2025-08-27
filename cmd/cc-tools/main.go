@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/Veraticus/cc-tools/internal/hooks"
@@ -151,9 +152,21 @@ func runStatuslineWithServer() {
 	fmt.Print(result) //nolint:forbidigo // CLI output
 }
 
+func isResourceLockedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Check if the error message contains "Resource locked"
+	return strings.Contains(err.Error(), "Resource locked")
+}
+
 func runLintWithServer() {
 	_, err := server.TryCallWithFallback("lint", runLintDirect)
 	if err != nil {
+		// Return exit code 0 if resource is locked to match direct execution behavior
+		if isResourceLockedError(err) {
+			os.Exit(0)
+		}
 		os.Exit(1)
 	}
 }
@@ -161,6 +174,10 @@ func runLintWithServer() {
 func runTestWithServer() {
 	_, err := server.TryCallWithFallback("test", runTestDirect)
 	if err != nil {
+		// Return exit code 0 if resource is locked to match direct execution behavior
+		if isResourceLockedError(err) {
+			os.Exit(0)
+		}
 		os.Exit(1)
 	}
 }

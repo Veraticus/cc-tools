@@ -341,6 +341,13 @@ func (s *Statusline) getTokenMetrics(transcriptPath string) TokenMetrics {
 	// Parse JSONL transcript file
 	lines := strings.Split(string(content), "\n")
 	metrics := TokenMetrics{}
+	
+	// Track the most recent main chain entry for context length calculation
+	var mostRecentMainChainUsage struct {
+		InputTokens              int
+		CacheReadInputTokens     int
+		CacheCreationInputTokens int
+	}
 
 	for _, line := range lines {
 		if line == "" {
@@ -356,18 +363,30 @@ func (s *Statusline) getTokenMetrics(transcriptPath string) TokenMetrics {
 					CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 				} `json:"usage"`
 			} `json:"message"`
+			IsSidechain bool `json:"isSidechain"`
 		}
 
 		unmarshalErr := json.Unmarshal([]byte(line), &msg)
 		if unmarshalErr == nil && msg.Message.Usage.InputTokens > 0 {
+			// Accumulate totals for all messages
 			metrics.InputTokens += msg.Message.Usage.InputTokens
 			metrics.OutputTokens += msg.Message.Usage.OutputTokens
 			metrics.CachedTokens += msg.Message.Usage.CacheReadInputTokens
+			
+			// Track the most recent main chain entry (not sidechain) for context length
+			if !msg.IsSidechain {
+				mostRecentMainChainUsage.InputTokens = msg.Message.Usage.InputTokens
+				mostRecentMainChainUsage.CacheReadInputTokens = msg.Message.Usage.CacheReadInputTokens
+				mostRecentMainChainUsage.CacheCreationInputTokens = msg.Message.Usage.CacheCreationInputTokens
+			}
 		}
 	}
 
-	// Context length is the total of all input and output tokens
-	metrics.ContextLength = metrics.InputTokens + metrics.OutputTokens
+	// Context length is calculated from the most recent main chain entry
+	// It's the sum of input_tokens + cache_read_input_tokens + cache_creation_input_tokens
+	metrics.ContextLength = mostRecentMainChainUsage.InputTokens + 
+		mostRecentMainChainUsage.CacheReadInputTokens + 
+		mostRecentMainChainUsage.CacheCreationInputTokens
 
 	return metrics
 }

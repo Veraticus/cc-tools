@@ -338,7 +338,7 @@ invalid line
 			expected: TokenMetrics{
 				InputTokens:   300,
 				OutputTokens:  150,
-				ContextLength: 450,
+				ContextLength: 200, // Last main chain entry's input_tokens only
 			},
 		},
 		{
@@ -348,7 +348,19 @@ invalid line
 				InputTokens:   100,
 				OutputTokens:  50,
 				CachedTokens:  25,
-				ContextLength: 150,
+				ContextLength: 125, // input_tokens (100) + cache_read_input_tokens (25)
+			},
+		},
+		{
+			name: "with sidechain entries",
+			content: `{"message": {"usage": {"input_tokens": 100, "output_tokens": 50}}}
+{"message": {"usage": {"input_tokens": 200, "output_tokens": 100}}, "isSidechain": true}
+{"message": {"usage": {"input_tokens": 300, "output_tokens": 150, "cache_read_input_tokens": 50, "cache_creation_input_tokens": 25}}}`,
+			expected: TokenMetrics{
+				InputTokens:   600, // All entries count for totals
+				OutputTokens:  300,
+				CachedTokens:  50,
+				ContextLength: 375, // Last main chain: 300 + 50 + 25
 			},
 		},
 	}
