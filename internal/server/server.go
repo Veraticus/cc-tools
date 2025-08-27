@@ -227,6 +227,11 @@ func (s *Server) processRequest(req Request) Response {
 	return resp
 }
 
+// ExitCodeProvider is an interface for runners that can provide exit codes.
+type ExitCodeProvider interface {
+	ExitCode() int
+}
+
 // handleRunner processes runner requests (lint/test).
 func (s *Server) handleRunner(req Request, runner interface {
 	Run(context.Context, io.Reader) (io.Reader, error)
@@ -272,7 +277,24 @@ func (s *Server) handleRunner(req Request, runner interface {
 		return NewErrorResponse(req.ID, InternalError, fmt.Sprintf("Read output: %v", err))
 	}
 
-	return NewSuccessResponseWithMeta(req.ID, string(outputBytes), map[string]string{"via": "server"})
+	// Get exit code if runner supports it
+	exitCode := 0
+	if provider, ok := runner.(ExitCodeProvider); ok {
+		exitCode = provider.ExitCode()
+	}
+
+	// Create result with exit code
+	result := &Result{
+		Output:   string(outputBytes),
+		ExitCode: exitCode,
+		Meta:     map[string]string{"via": "server"},
+	}
+
+	return Response{
+		JSONRPC: jsonRPCVersion,
+		ID:      req.ID,
+		Result:  result,
+	}
 }
 
 // handleLint processes lint requests.

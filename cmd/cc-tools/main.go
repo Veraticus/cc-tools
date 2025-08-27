@@ -27,6 +27,9 @@ var (
 )
 
 func main() {
+	// Debug logging - log all invocations to a file
+	debugLog()
+	
 	if len(os.Args) < minArgs {
 		printUsage()
 		os.Exit(1)
@@ -92,7 +95,7 @@ func runStatus() {
 
 	// Try to connect and get stats
 	client := server.NewClient(socketPath)
-	stats, _, err := client.Call("stats", "")
+	stats, _, _, err := client.Call("stats", "")
 	if err != nil {
 		// Print status to stdout as intended output
 		fmt.Printf("Server: ERROR\nSocket: %s\nError: %v\n", socketPath, err) //nolint:forbidigo // CLI output
@@ -179,7 +182,18 @@ func isResourceLockedError(err error) bool {
 }
 
 func runLintWithServer() {
-	_, err := server.TryCallWithFallback("lint", runLintDirect)
+	result, exitCode, err := server.TryCallWithFallback("lint", runLintDirect)
+	
+	// Debug log the result
+	if debugFile, err := os.OpenFile("/tmp/cc-tools.debug", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+		defer debugFile.Close()
+		fmt.Fprintf(debugFile, "Lint result: %s\n", result)
+		fmt.Fprintf(debugFile, "Lint exit code: %d\n", exitCode)
+		if err != nil {
+			fmt.Fprintf(debugFile, "Lint error: %v\n", err)
+		}
+	}
+	
 	if err != nil {
 		// Return exit code 0 if resource is locked to match direct execution behavior
 		if isResourceLockedError(err) {
@@ -187,10 +201,18 @@ func runLintWithServer() {
 		}
 		os.Exit(1)
 	}
+	
+	// Print result to stdout if any
+	if result != "" {
+		fmt.Print(result)
+	}
+	
+	// Exit with the exit code from the server/hook
+	os.Exit(exitCode)
 }
 
 func runTestWithServer() {
-	_, err := server.TryCallWithFallback("test", runTestDirect)
+	result, exitCode, err := server.TryCallWithFallback("test", runTestDirect)
 	if err != nil {
 		// Return exit code 0 if resource is locked to match direct execution behavior
 		if isResourceLockedError(err) {
@@ -198,6 +220,14 @@ func runTestWithServer() {
 		}
 		os.Exit(1)
 	}
+	
+	// Print result to stdout if any
+	if result != "" {
+		fmt.Print(result)
+	}
+	
+	// Exit with the exit code from the server/hook
+	os.Exit(exitCode)
 }
 
 func runStatuslineDirect() (string, error) {
@@ -279,4 +309,61 @@ func getCacheDuration() time.Duration {
 	}
 	const defaultCacheSeconds = 20
 	return defaultCacheSeconds * time.Second
+}
+
+// Global variable to store stdin for debugging
+var stdinDebugData []byte
+
+func debugLog() {
+	// Create or append to debug log file
+	debugFile := "/tmp/cc-tools.debug"
+	f, err := os.OpenFile(debugFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return // Silently fail if we can't write debug log
+	}
+	defer f.Close()
+
+	// Read stdin and save it for both debug and actual use
+	if stat, _ := os.Stdin.Stat(); (stat.Mode() & os.ModeCharDevice) == 0 {
+		// There's data in stdin
+		stdinDebugData, _ = io.ReadAll(os.Stdin)
+		// Create a new reader from the data we just read
+		// This will be used by the actual commands
+		os.Stdin, _ = os.Open("/dev/stdin") // Reset stdin
+		// Actually, we need to pipe it back - create a temp file
+		if tmpFile, err := os.CreateTemp("", "cc-tools-stdin-"); err == nil {
+			tmpFile.Write(stdinDebugData)
+			tmpFile.Seek(0, 0)
+			os.Stdin = tmpFile
+		}
+	}
+
+	// Log the invocation details
+	timestamp := time.Now().Format("2006-01-02 15:04:05.000")
+	fmt.Fprintf(f, "\n========================================\n")
+	fmt.Fprintf(f, "[%s] cc-tools invoked\n", timestamp)
+	fmt.Fprintf(f, "Args: %v\n", os.Args)
+	fmt.Fprintf(f, "Environment:\n")
+	fmt.Fprintf(f, "  CC_TOOLS_SOCKET: %s\n", os.Getenv("CC_TOOLS_SOCKET"))
+	fmt.Fprintf(f, "  CC_TOOLS_NO_SERVER: %s\n", os.Getenv("CC_TOOLS_NO_SERVER"))
+	fmt.Fprintf(f, "  CLAUDE_HOOKS_DEBUG: %s\n", os.Getenv("CLAUDE_HOOKS_DEBUG"))
+	fmt.Fprintf(f, "  Working Dir: %s\n", func() string {
+		if wd, err := os.Getwd(); err == nil {
+			return wd
+		}
+		return "unknown"
+	}())
+	
+	if len(stdinDebugData) > 0 {
+		fmt.Fprintf(f, "Stdin: %s\n", string(stdinDebugData))
+	} else {
+		fmt.Fprintf(f, "Stdin: (no data available)\n")
+	}
+	
+	fmt.Fprintf(f, "Command: %s\n", func() string {
+		if len(os.Args) > 1 {
+			return os.Args[1]
+		}
+		return "(none)"
+	}())
 }

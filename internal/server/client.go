@@ -53,25 +53,25 @@ func DefaultSocketPath() string {
 	return filepath.Join(os.TempDir(), fmt.Sprintf("cc-tools-%d.sock", os.Getuid()))
 }
 
-// Call executes a method on the server and returns the result.
-func (c *Client) Call(method string, input string) (string, map[string]string, error) {
+// Call executes a method on the server and returns the result with exit code.
+func (c *Client) Call(method string, input string) (string, int, map[string]string, error) {
 	// Check if socket exists
 	if _, err := os.Stat(c.socketPath); os.IsNotExist(err) {
-		return "", nil, fmt.Errorf("server not running (socket not found: %s)", c.socketPath)
+		return "", 0, nil, fmt.Errorf("server not running (socket not found: %s)", c.socketPath)
 	}
 
 	// Connect to server
 	d := &net.Dialer{Timeout: c.dialTimeout}
 	conn, err := d.DialContext(context.Background(), "unix", c.socketPath)
 	if err != nil {
-		return "", nil, fmt.Errorf("connect to server: %w", err)
+		return "", 0, nil, fmt.Errorf("connect to server: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
 
 	// Set read/write deadline based on dial timeout
 	deadline := time.Now().Add(c.dialTimeout)
 	if deadlineErr := conn.SetDeadline(deadline); deadlineErr != nil {
-		return "", nil, fmt.Errorf("set deadline: %w", deadlineErr)
+		return "", 0, nil, fmt.Errorf("set deadline: %w", deadlineErr)
 	}
 
 	// Prepare request
@@ -81,7 +81,7 @@ func (c *Client) Call(method string, input string) (string, map[string]string, e
 
 	paramsJSON, err := json.Marshal(params)
 	if err != nil {
-		return "", nil, fmt.Errorf("marshal params: %w", err)
+		return "", 0, nil, fmt.Errorf("marshal params: %w", err)
 	}
 
 	req := Request{
@@ -94,35 +94,41 @@ func (c *Client) Call(method string, input string) (string, map[string]string, e
 	// Send request
 	encoder := json.NewEncoder(conn)
 	if encErr := encoder.Encode(req); encErr != nil {
-		return "", nil, fmt.Errorf("send request: %w", encErr)
+		return "", 0, nil, fmt.Errorf("send request: %w", encErr)
 	}
 
 	// Read response
 	decoder := json.NewDecoder(conn)
 	var resp Response
 	if decErr := decoder.Decode(&resp); decErr != nil {
-		return "", nil, fmt.Errorf("read response: %w", decErr)
+		return "", 0, nil, fmt.Errorf("read response: %w", decErr)
 	}
 
 	// Check for error
 	if resp.Error != nil {
-		return "", nil, fmt.Errorf("server error %d: %s", resp.Error.Code, resp.Error.Message)
+		return "", 0, nil, fmt.Errorf("server error %d: %s", resp.Error.Code, resp.Error.Message)
 	}
 
 	// Extract result
 	if resp.Result == nil {
-		return "", nil, fmt.Errorf("no result in response")
+		return "", 0, nil, fmt.Errorf("no result in response")
 	}
 
-	return resp.Result.Output, resp.Result.Meta, nil
+	return resp.Result.Output, resp.Result.ExitCode, resp.Result.Meta, nil
 }
 
 // TryCallWithFallback attempts to call the server, falling back to direct execution.
-func TryCallWithFallback(method string, directFunc func() (string, error)) (string, error) {
+// Returns the output and exit code.
+func TryCallWithFallback(method string, directFunc func() (string, error)) (string, int, error) {
 	// Check if server mode is disabled
 	if os.Getenv("CC_TOOLS_NO_SERVER") == "1" {
 		fmt.Fprintf(os.Stderr, "[CC-TOOLS] ✗ Server disabled, using direct mode for %s\n", method)
-		return directFunc()
+		result, err := directFunc()
+		// Direct mode doesn't return exit codes, so we infer from error
+		if err != nil {
+			return "", 1, err
+		}
+		return result, 0, nil
 	}
 
 	// Try custom socket path if specified
@@ -136,22 +142,27 @@ func TryCallWithFallback(method string, directFunc func() (string, error)) (stri
 	// Read stdin for input
 	input, err := io.ReadAll(os.Stdin)
 	if err != nil {
-		return "", fmt.Errorf("read stdin: %w", err)
+		return "", 0, fmt.Errorf("read stdin: %w", err)
 	}
 
 	// Try server first
-	result, meta, err := client.Call(method, string(input))
+	result, exitCode, meta, err := client.Call(method, string(input))
 	if err == nil {
 		// Always show server usage in stderr when successful
 		if meta != nil && meta["via"] == "server" {
 			fmt.Fprintf(os.Stderr, "[CC-TOOLS] ✓ Using server for %s\n", method)
 		}
-		return result, nil
+		return result, exitCode, nil
 	}
 
 	// Always show fallback in stderr with error details for debugging
 	fmt.Fprintf(os.Stderr, "[CC-TOOLS] ✗ Server unavailable, using direct mode for %s (error: %v)\n", method, err)
 
 	// Fallback to direct execution
-	return directFunc()
+	directResult, directErr := directFunc()
+	// Direct mode doesn't return exit codes, so we infer from error
+	if directErr != nil {
+		return "", 1, directErr
+	}
+	return directResult, 0, nil
 }

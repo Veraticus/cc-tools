@@ -14,6 +14,7 @@ type HookLintRunner struct {
 	debug        bool
 	timeoutSecs  int
 	cooldownSecs int
+	exitCode     int // Store the exit code from hook execution
 }
 
 // NewHookLintRunner creates a new lint runner.
@@ -25,8 +26,15 @@ func NewHookLintRunner(debug bool, timeoutSecs, cooldownSecs int) *HookLintRunne
 	}
 }
 
+// ExitCode returns the exit code from the last hook execution.
+func (r *HookLintRunner) ExitCode() int {
+	return r.exitCode
+}
+
 // Run executes the lint hook with the given input.
 func (r *HookLintRunner) Run(ctx context.Context, input io.Reader) (io.Reader, error) {
+	// Reset exit code for this run
+	r.exitCode = 0
 	// Read input
 	inputBytes, err := io.ReadAll(input)
 	if err != nil {
@@ -45,6 +53,9 @@ func (r *HookLintRunner) Run(ctx context.Context, input io.Reader) (io.Reader, e
 
 	// Run the hook
 	exitCode := hooks.RunSmartHook(ctx, hooks.CommandTypeLint, r.debug, r.timeoutSecs, r.cooldownSecs, deps)
+	
+	// Store the exit code for later retrieval
+	r.exitCode = exitCode
 
 	// Get the output regardless of exit code
 	output := outputWriter.String()
@@ -65,6 +76,7 @@ type HookTestRunner struct {
 	debug        bool
 	timeoutSecs  int
 	cooldownSecs int
+	exitCode     int // Store the exit code from hook execution
 }
 
 // NewHookTestRunner creates a new test runner.
@@ -76,8 +88,15 @@ func NewHookTestRunner(debug bool, timeoutSecs, cooldownSecs int) *HookTestRunne
 	}
 }
 
+// ExitCode returns the exit code from the last hook execution.
+func (r *HookTestRunner) ExitCode() int {
+	return r.exitCode
+}
+
 // Run executes the test hook with the given input.
 func (r *HookTestRunner) Run(ctx context.Context, input io.Reader) (io.Reader, error) {
+	// Reset exit code for this run
+	r.exitCode = 0
 	// Read input
 	inputBytes, err := io.ReadAll(input)
 	if err != nil {
@@ -96,6 +115,9 @@ func (r *HookTestRunner) Run(ctx context.Context, input io.Reader) (io.Reader, e
 
 	// Run the hook
 	exitCode := hooks.RunSmartHook(ctx, hooks.CommandTypeTest, r.debug, r.timeoutSecs, r.cooldownSecs, deps)
+	
+	// Store the exit code for later retrieval
+	r.exitCode = exitCode
 
 	// Get the output regardless of exit code
 	output := outputWriter.String()
