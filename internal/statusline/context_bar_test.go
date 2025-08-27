@@ -25,20 +25,20 @@ func TestContextBarPadding(t *testing.T) {
 		}
 
 		result := s.Render(data)
-		
+
 		// Find the context bar portion (between the left and right sections)
 		// The context bar should have "Context" text in it
 		if strings.Contains(result, "Context") {
 			// Strip ANSI codes to analyze spacing
 			stripped := stripAnsi(result)
-			
+
 			// Find where "Context" appears
 			contextIndex := strings.Index(stripped, "Context")
 			if contextIndex == -1 {
 				t.Error("Context bar should be visible with context length > 0")
 				return
 			}
-			
+
 			// Check that there are at least 4 spaces before the context bar starts
 			// The context bar starts with the left curve character before "Context"
 			// Count spaces before the curve
@@ -46,7 +46,7 @@ func TestContextBarPadding(t *testing.T) {
 			for i := contextIndex - 1; i >= 0 && stripped[i] == ' '; i-- {
 				spacesBeforeBar++
 			}
-			
+
 			// Due to the curve character, we check spaces before it
 			// The pattern should be: ...content... + 4 spaces + curve + "Context"
 			// We need to find the actual curve position
@@ -58,7 +58,7 @@ func TestContextBarPadding(t *testing.T) {
 
 	t.Run("context bar content shrinks with padding", func(t *testing.T) {
 		s := New(deps)
-		
+
 		// Test with different widths to see how the bar adapts
 		testCases := []struct {
 			name          string
@@ -85,7 +85,7 @@ func TestContextBarPadding(t *testing.T) {
 				minBarWidth:   0, // Might not show bar at all if too narrow
 			},
 		}
-		
+
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
 				deps.TerminalWidth = &MockTerminalWidth{width: tc.termWidth}
@@ -95,16 +95,16 @@ func TestContextBarPadding(t *testing.T) {
 					TermWidth:     tc.termWidth,
 					ContextLength: tc.contextLength,
 				}
-				
+
 				result := s.Render(data)
 				stripped := stripAnsi(result)
-				
+
 				// Total width should match terminal width
 				width := runewidth.StringWidth(stripped)
 				if width != tc.termWidth {
 					t.Errorf("Width mismatch: got %d, want %d", width, tc.termWidth)
 				}
-				
+
 				if strings.Contains(result, "Context") {
 					t.Logf("Context bar visible at width %d", tc.termWidth)
 				} else if tc.minBarWidth > 0 {
@@ -116,7 +116,7 @@ func TestContextBarPadding(t *testing.T) {
 
 	t.Run("context bar respects minimum size with padding", func(t *testing.T) {
 		s := New(deps)
-		
+
 		// Very narrow terminal where context bar won't fit with padding
 		deps.TerminalWidth = &MockTerminalWidth{width: 50}
 		data := &CachedData{
@@ -125,22 +125,22 @@ func TestContextBarPadding(t *testing.T) {
 			TermWidth:     50,
 			ContextLength: 50000,
 		}
-		
+
 		result := s.Render(data)
 		stripped := stripAnsi(result)
-		
+
 		// Should still maintain exact width
 		width := runewidth.StringWidth(stripped)
 		if width != 50 {
 			t.Errorf("Width should be maintained: got %d, want 50", width)
 		}
-		
+
 		// Context bar should not appear if there isn't enough space with padding
 		// (needs at least 15 chars after 8 chars of padding)
 		if strings.Contains(result, "Context") {
 			// If it does appear, verify it still has proper structure
 			t.Log("Context bar appeared even in very narrow terminal")
-			
+
 			// Check that the total width is still correct
 			if width != 50 {
 				t.Error("Context bar broke width constraints")
@@ -154,13 +154,13 @@ func TestContextBarPadding(t *testing.T) {
 		// Direct test of createContextBar method
 		s := New(deps)
 		s.colors = CatppuccinMocha{} // Initialize colors
-		
+
 		// Give it plenty of width so we can clearly see the padding
 		barWidth := 60
 		contextLength := 50000
-		
+
 		result := s.createContextBar(contextLength, barWidth)
-		
+
 		// The result should be exactly barWidth characters
 		stripped := stripAnsi(result)
 		actualWidth := runewidth.StringWidth(stripped)
@@ -170,17 +170,17 @@ func TestContextBarPadding(t *testing.T) {
 			t.Logf("Stripped length: %d", len(stripped))
 			t.Logf("Stripped width: %d", actualWidth)
 		}
-		
+
 		// Should start with exactly 4 spaces
 		if !strings.HasPrefix(result, "    ") {
 			t.Error("Context bar should start with exactly 4 spaces")
 		}
-		
+
 		// Should end with exactly 4 spaces
 		if !strings.HasSuffix(stripped, "    ") {
 			t.Error("Context bar should end with exactly 4 spaces")
 		}
-		
+
 		// The actual bar content should be in the middle
 		trimmed := strings.TrimSpace(stripped)
 		trimmedWidth := runewidth.StringWidth(trimmed)

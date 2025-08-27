@@ -7,7 +7,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
-	
+
 	"github.com/mattn/go-runewidth"
 )
 
@@ -174,7 +174,7 @@ func runStatusline(command string, input string, termWidth int) {
 		clean := stripAnsiCodes(string(output))
 		width := runewidth.StringWidth(clean)
 		fmt.Printf("\n  Width: %d, Terminal: %d, Diff: %+d", width, termWidth, width-termWidth)
-		
+
 		// Check for trailing spaces
 		if len(clean) > 0 && clean[len(clean)-1] == ' ' {
 			// Count trailing spaces
@@ -236,4 +236,3 @@ func getTerminalWidth() int {
 	// Default fallback
 	return 200
 }
-

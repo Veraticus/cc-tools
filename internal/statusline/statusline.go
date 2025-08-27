@@ -100,17 +100,17 @@ type TerminalWidth interface {
 
 // Config contains configuration for the statusline
 type Config struct {
-	// LeftSpacerWidth is the width of the left spacer (default: 1)
+	// LeftSpacerWidth is the width of the left spacer (default: 2)
 	LeftSpacerWidth int
-	// RightSpacerWidth is the width of the right spacer (default: 1, only shown when not in compact mode)
+	// RightSpacerWidth is the width of the right spacer (default: 2, only shown when not in compact mode)
 	RightSpacerWidth int
 }
 
 // DefaultConfig returns the default configuration
 func DefaultConfig() *Config {
 	return &Config{
-		LeftSpacerWidth:  1,
-		RightSpacerWidth: 1,
+		LeftSpacerWidth:  2,
+		RightSpacerWidth: 2,
 	}
 }
 

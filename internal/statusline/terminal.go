@@ -15,7 +15,7 @@ type DefaultTerminalWidth struct{}
 
 // GetWidth returns the current terminal width
 func (t *DefaultTerminalWidth) GetWidth() int {
-	
+
 	// Priority 1: Explicit override for testing
 	if testWidth := os.Getenv("CLAUDE_STATUSLINE_WIDTH"); testWidth != "" {
 		if width, err := strconv.Atoi(testWidth); err == nil && width > 0 {

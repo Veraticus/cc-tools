@@ -101,6 +101,8 @@ func TestStatuslineGenerate(t *testing.T) {
 			}`,
 			setup: func(deps *Dependencies) {
 				deps.EnvReader.(*MockEnvReader).vars["HOME"] = "/home/user"
+				// Also set actual HOME env for formatPath
+				os.Setenv("HOME", "/home/user")
 			},
 			contains: []string{
 				"~/project",     // Directory
@@ -115,8 +117,11 @@ func TestStatuslineGenerate(t *testing.T) {
 			}`,
 			setup: func(deps *Dependencies) {
 				deps.EnvReader.(*MockEnvReader).vars["HOME"] = "/home/user"
+				// Also set actual HOME env for formatPath
+				os.Setenv("HOME", "/home/user")
 				// Add git files
 				fr := deps.FileReader.(*MockFileReader)
+				fr.files["/home/user/project/.git"] = []byte{} // Make .git exist as a directory
 				fr.files["/home/user/project/.git/HEAD"] = []byte("ref: refs/heads/main\n")
 				fr.files["/home/user/project/.git/index"] = []byte("index")
 				fr.times["/home/user/project/.git/index"] = time.Now() // Recent modification
@@ -178,6 +183,10 @@ func TestStatuslineGenerate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Save and restore HOME env var
+			oldHome := os.Getenv("HOME")
+			defer os.Setenv("HOME", oldHome)
+			
 			// Create mock dependencies
 			deps := &Dependencies{
 				FileReader:    NewMockFileReader(),
@@ -349,6 +358,7 @@ func TestGitInfo(t *testing.T) {
 	sl := New(deps)
 
 	// Test with main branch
+	fr.files["/project/.git"] = []byte{} // Make .git exist as a directory
 	fr.files["/project/.git/HEAD"] = []byte("ref: refs/heads/main\n")
 	info := sl.getGitInfo("/project")
 	if info.Branch != "main" {

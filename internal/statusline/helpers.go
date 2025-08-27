@@ -35,8 +35,16 @@ func formatPath(path string) string {
 		parts = append([]string{""}, parts...)
 	}
 
+	// Count non-empty parts for truncation decision
+	nonEmptyParts := 0
+	for _, part := range parts {
+		if part != "" {
+			nonEmptyParts++
+		}
+	}
+	
 	// If path is longer than 3 directories, truncate with …
-	if len(parts) > 3 {
+	if nonEmptyParts > 3 {
 		// Keep first part (~ or /), last 2 parts
 		if len(parts) > 0 && parts[0] == "~" {
 			return fmt.Sprintf("~/%s/%s", parts[len(parts)-2], parts[len(parts)-1])

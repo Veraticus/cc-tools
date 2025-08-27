@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
-	
+
 	"github.com/mattn/go-runewidth"
 )
 
@@ -14,16 +14,16 @@ func BenchmarkStatuslineRender(b *testing.B) {
 	deps := &Dependencies{
 		FileReader:    &MockFileReader{},
 		CommandRunner: &MockCommandRunner{},
-		EnvReader:     &MockEnvReader{vars: map[string]string{
-			"HOME": "/home/user",
+		EnvReader: &MockEnvReader{vars: map[string]string{
+			"HOME":        "/home/user",
 			"AWS_PROFILE": "dev",
-			"HOSTNAME": "testhost",
+			"HOSTNAME":    "testhost",
 		}},
 		TerminalWidth: &MockTerminalWidth{width: 100},
 	}
-	
+
 	s := New(deps)
-	
+
 	// Prepare JSON input
 	input := &Input{
 		Model: struct {
@@ -61,9 +61,9 @@ func BenchmarkStatuslineRender(b *testing.B) {
 			ProjectDir: "/home/user/project",
 		},
 	}
-	
+
 	jsonData, _ := json.Marshal(input)
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		reader := bytes.NewReader(jsonData)
@@ -76,16 +76,16 @@ func TestStatuslineRenderTiming(t *testing.T) {
 	deps := &Dependencies{
 		FileReader:    &MockFileReader{},
 		CommandRunner: &MockCommandRunner{},
-		EnvReader:     &MockEnvReader{vars: map[string]string{
-			"HOME": "/home/user",
+		EnvReader: &MockEnvReader{vars: map[string]string{
+			"HOME":        "/home/user",
 			"AWS_PROFILE": "dev",
-			"HOSTNAME": "testhost",
+			"HOSTNAME":    "testhost",
 		}},
 		TerminalWidth: &MockTerminalWidth{width: 100},
 	}
-	
+
 	s := New(deps)
-	
+
 	// Test different scenarios
 	scenarios := []struct {
 		name          string
@@ -130,12 +130,12 @@ func TestStatuslineRenderTiming(t *testing.T) {
 			termWidth:     200,
 		},
 	}
-	
+
 	for _, sc := range scenarios {
 		t.Run(sc.name, func(t *testing.T) {
 			// Update dependencies for scenario
 			deps.TerminalWidth = &MockTerminalWidth{width: sc.termWidth}
-			
+
 			// Prepare input
 			input := &Input{
 				Model: struct {
@@ -153,52 +153,52 @@ func TestStatuslineRenderTiming(t *testing.T) {
 					ProjectDir: "/home/user/project/with/long/path",
 				},
 			}
-			
+
 			if sc.contextLength > 0 {
 				input.Cost.InputTokens = sc.contextLength
 				input.Cost.OutputTokens = 2000
 			}
-			
+
 			if sc.hasGit {
 				input.GitInfo.Branch = "feature/long-branch-name"
 				input.GitInfo.IsGitRepo = true
 				input.GitInfo.HasModified = true
 			}
-			
+
 			if sc.hasK8s {
 				deps.EnvReader.(*MockEnvReader).vars["KUBECONFIG"] = "/home/user/.kube/config"
 			}
-			
+
 			jsonData, _ := json.Marshal(input)
-			
+
 			// Run multiple times and measure
 			const runs = 100
 			var totalDuration time.Duration
-			
+
 			for i := 0; i < runs; i++ {
 				reader := bytes.NewReader(jsonData)
 				start := time.Now()
 				_, err := s.Generate(reader)
 				duration := time.Since(start)
 				totalDuration += duration
-				
+
 				if err != nil {
 					t.Fatalf("Generate failed: %v", err)
 				}
 			}
-			
+
 			avgDuration := totalDuration / runs
 			t.Logf("Average time over %d runs: %v", runs, avgDuration)
 			t.Logf("  Per-run: %v", avgDuration)
 			t.Logf("  Total: %v", totalDuration)
-			
+
 			// Warn if it's taking too long
 			if avgDuration > 1*time.Millisecond {
 				t.Logf("  WARNING: Rendering is slower than 1ms")
 			}
 		})
 	}
-	
+
 	// Also do a single detailed timing
 	t.Run("detailed single run", func(t *testing.T) {
 		input := &Input{
@@ -240,18 +240,18 @@ func TestStatuslineRenderTiming(t *testing.T) {
 				ProjectDir: "/very/long/nested/directory/path/that/should/be/truncated",
 			},
 		}
-		
+
 		jsonData, _ := json.Marshal(input)
 		reader := bytes.NewReader(jsonData)
-		
+
 		start := time.Now()
 		result, err := s.Generate(reader)
 		duration := time.Since(start)
-		
+
 		if err != nil {
 			t.Fatalf("Generate failed: %v", err)
 		}
-		
+
 		t.Logf("Single run time: %v", duration)
 		t.Logf("Result length: %d chars", len(result))
 		t.Logf("Result width: %d", runewidth.StringWidth(stripAnsi(result)))

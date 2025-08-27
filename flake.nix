@@ -23,7 +23,7 @@
           src = ./.;
           
           # Update this hash after running: nix build .#${name} --no-link 2>&1 | grep 'got:' | cut -d: -f2 | xargs
-          vendorHash = null; # No dependencies yet
+          vendorHash = null; # Dependencies are vendored
           
           subPackages = [ "cmd/${name}" ];
           
