@@ -42,19 +42,35 @@ func (m *MockFileReader) ModTime(path string) (time.Time, error) {
 // MockCommandRunner implements CommandRunner for testing.
 type MockCommandRunner struct {
 	responses map[string][]byte
+	errors    map[string]error
 }
 
 func NewMockCommandRunner() *MockCommandRunner {
 	return &MockCommandRunner{
 		responses: make(map[string][]byte),
+		errors:    make(map[string]error),
 	}
 }
 
 func (m *MockCommandRunner) Run(command string, args ...string) ([]byte, error) {
-	key := command + " " + strings.Join(args, " ")
+	key := command
+	if len(args) > 0 {
+		key = command + " " + strings.Join(args, " ")
+	}
+
+	// Check for configured error first
+	if m.errors != nil {
+		if err, hasError := m.errors[key]; hasError {
+			return nil, err
+		}
+	}
+
+	// Then check for response
 	if response, ok := m.responses[key]; ok {
 		return response, nil
 	}
+
+	// Default: return empty with no error
 	return []byte(""), nil
 }
 

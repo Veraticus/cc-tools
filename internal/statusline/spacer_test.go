@@ -1,7 +1,6 @@
 package statusline
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/mattn/go-runewidth"
@@ -177,7 +176,7 @@ func TestConfigurableSpacers(t *testing.T) {
 		if width < 20 || width > 100 {
 			t.Errorf("With extreme spacers, width should be between 20 and 100, got %d", width)
 		}
-		
+
 		// The spacers should be scaled proportionally
 		// Total spacer budget: 100 - 20 = 80
 		// Left gets: 80 * 40 / 70 ≈ 45
@@ -254,10 +253,4 @@ func TestSpacerScaling(t *testing.T) {
 	if width < 20 || width > 50 {
 		t.Errorf("With spacers equaling terminal width, should preserve minimum content: got width %d", width)
 	}
-}
-
-// Helper to check if a string contains a substring after stripping ANSI codes
-func containsAfterStrip(s, substr string) bool {
-	stripped := stripAnsi(s)
-	return strings.Contains(stripped, substr)
 }

@@ -13,21 +13,36 @@ import (
 )
 
 const (
-	// dialTimeout is the timeout for connecting to the server.
-	dialTimeout = 5 * time.Second
+	// DefaultDialTimeout is the default timeout for connecting to the server.
+	DefaultDialTimeout = 5 * time.Second
 )
 
 // Client handles communication with the server using concrete types.
 type Client struct {
-	socketPath string
+	socketPath  string
+	dialTimeout time.Duration
 }
 
-// NewClient creates a new client instance.
+// NewClient creates a new client instance with default timeout.
 func NewClient(socketPath string) *Client {
 	if socketPath == "" {
 		socketPath = DefaultSocketPath()
 	}
-	return &Client{socketPath: socketPath}
+	return &Client{
+		socketPath:  socketPath,
+		dialTimeout: DefaultDialTimeout,
+	}
+}
+
+// NewClientWithTimeout creates a new client instance with custom timeout.
+func NewClientWithTimeout(socketPath string, timeout time.Duration) *Client {
+	if socketPath == "" {
+		socketPath = DefaultSocketPath()
+	}
+	return &Client{
+		socketPath:  socketPath,
+		dialTimeout: timeout,
+	}
 }
 
 // DefaultSocketPath returns the default socket path.
@@ -46,12 +61,18 @@ func (c *Client) Call(method string, input string) (string, map[string]string, e
 	}
 
 	// Connect to server
-	d := &net.Dialer{Timeout: dialTimeout}
+	d := &net.Dialer{Timeout: c.dialTimeout}
 	conn, err := d.DialContext(context.Background(), "unix", c.socketPath)
 	if err != nil {
 		return "", nil, fmt.Errorf("connect to server: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
+
+	// Set read/write deadline based on dial timeout
+	deadline := time.Now().Add(c.dialTimeout)
+	if deadlineErr := conn.SetDeadline(deadline); deadlineErr != nil {
+		return "", nil, fmt.Errorf("set deadline: %w", deadlineErr)
+	}
 
 	// Prepare request
 	params := MethodParams{
@@ -64,7 +85,7 @@ func (c *Client) Call(method string, input string) (string, map[string]string, e
 	}
 
 	req := Request{
-		JSONRPC: "2.0",
+		JSONRPC: jsonRPCVersion,
 		ID:      RequestID{value: "1"},
 		Method:  method,
 		Params:  paramsJSON,

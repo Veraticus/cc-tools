@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -64,10 +65,15 @@ func NewStandardLogger() *StandardLogger {
 
 // Printf formats and prints to the standard logger.
 func (l *StandardLogger) Printf(format string, v ...any) {
-	l.logger.Info("log message", "format", format, "args", v)
+	l.logger.Info("formatted message", "message", fmt.Sprintf(format, v...))
 }
 
 // Println prints to the standard logger.
 func (l *StandardLogger) Println(v ...any) {
-	l.logger.Info("log message", "args", v)
+	msg := fmt.Sprintln(v...)
+	// Remove the trailing newline that Sprintln adds
+	if msg != "" && msg[len(msg)-1] == '\n' {
+		msg = msg[:len(msg)-1]
+	}
+	l.logger.Info("println message", "message", msg)
 }

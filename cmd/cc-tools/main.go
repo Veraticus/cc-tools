@@ -112,15 +112,13 @@ func runServe() {
 
 	// Create dependencies
 	const (
-		lintTimeout        = 30
-		testTimeout        = 60
-		statuslineCacheSec = 20
-		hookCooldown       = 2
+		lintTimeout  = 30
+		testTimeout  = 60
+		hookCooldown = 2
 	)
 	deps := &server.ServerDependencies{
 		LintRunner:  server.NewHookLintRunner(true, lintTimeout, hookCooldown),
 		TestRunner:  server.NewHookTestRunner(true, testTimeout, hookCooldown),
-		Statusline:  server.NewStatuslineRunner("/dev/shm", statuslineCacheSec),
 		LockManager: server.NewSimpleLockManager(),
 		Logger:      logger,
 	}
@@ -135,7 +133,9 @@ func runServe() {
 }
 
 func runStatuslineWithServer() {
-	result, err := server.TryCallWithFallback("statusline", runStatuslineDirect)
+	// Statusline always runs locally to have access to user environment
+	// (HOSTNAME, AWS_PROFILE, TMUX_DEVSPACE, kubeconfig, etc.)
+	result, err := runStatuslineDirect()
 	if err != nil {
 		// Fallback prompt output to stdout
 		fmt.Print(" > ") //nolint:forbidigo // CLI output

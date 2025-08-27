@@ -20,8 +20,3 @@ type LintRunner interface {
 type TestRunner interface {
 	Runner
 }
-
-// StatuslineGenerator generates statuslines from input.
-type StatuslineGenerator interface {
-	Generate(ctx context.Context, input io.Reader) (string, error)
-}

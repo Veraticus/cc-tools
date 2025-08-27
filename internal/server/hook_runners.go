@@ -5,10 +5,8 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"time"
 
 	"github.com/Veraticus/cc-tools/internal/hooks"
-	"github.com/Veraticus/cc-tools/internal/statusline"
 )
 
 // HookLintRunner implements LintRunner using the hooks package.
@@ -109,40 +107,4 @@ func (r *HookTestRunner) Run(ctx context.Context, input io.Reader) (io.Reader, e
 
 	// Return output as reader
 	return bytes.NewReader([]byte(outputWriter.String())), nil
-}
-
-// StatuslineRunner implements StatuslineGenerator using the statusline package.
-type StatuslineRunner struct {
-	cacheDir      string
-	cacheDuration int // seconds
-}
-
-// NewStatuslineRunner creates a new statusline generator.
-func NewStatuslineRunner(cacheDir string, cacheDuration int) *StatuslineRunner {
-	return &StatuslineRunner{
-		cacheDir:      cacheDir,
-		cacheDuration: cacheDuration,
-	}
-}
-
-// Generate creates a statusline from the input.
-func (r *StatuslineRunner) Generate(_ context.Context, input io.Reader) (string, error) {
-	// Create dependencies
-	deps := &statusline.Dependencies{
-		FileReader:    &statusline.DefaultFileReader{},
-		CommandRunner: &statusline.DefaultCommandRunner{},
-		EnvReader:     &statusline.DefaultEnvReader{},
-		TerminalWidth: &statusline.DefaultTerminalWidth{},
-		CacheDir:      r.cacheDir,
-		CacheDuration: time.Duration(r.cacheDuration) * time.Second,
-	}
-
-	// Generate statusline
-	sl := statusline.CreateStatusline(deps)
-	result, err := sl.Generate(input)
-	if err != nil {
-		return "", fmt.Errorf("generate statusline: %w", err)
-	}
-
-	return result, nil
 }

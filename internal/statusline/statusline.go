@@ -136,6 +136,7 @@ func NewWithConfig(deps *Dependencies, config *Config) *Statusline {
 	return &Statusline{
 		deps:   deps,
 		config: config,
+		colors: CatppuccinMocha{},
 	}
 }
 
@@ -341,17 +342,6 @@ func (s *Statusline) getTokenMetrics(transcriptPath string) TokenMetrics {
 	lines := strings.Split(string(content), "\n")
 	metrics := TokenMetrics{}
 
-	var lastMessage struct {
-		Message struct {
-			Usage struct {
-				InputTokens              int `json:"input_tokens"`
-				OutputTokens             int `json:"output_tokens"`
-				CacheReadInputTokens     int `json:"cache_read_input_tokens"`
-				CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
-			} `json:"usage"`
-		} `json:"message"`
-	}
-
 	for _, line := range lines {
 		if line == "" {
 			continue
@@ -373,16 +363,11 @@ func (s *Statusline) getTokenMetrics(transcriptPath string) TokenMetrics {
 			metrics.InputTokens += msg.Message.Usage.InputTokens
 			metrics.OutputTokens += msg.Message.Usage.OutputTokens
 			metrics.CachedTokens += msg.Message.Usage.CacheReadInputTokens
-			lastMessage = msg
 		}
 	}
 
-	// Context length from last message
-	if lastMessage.Message.Usage.InputTokens > 0 {
-		metrics.ContextLength = lastMessage.Message.Usage.InputTokens +
-			lastMessage.Message.Usage.CacheReadInputTokens +
-			lastMessage.Message.Usage.CacheCreationInputTokens
-	}
+	// Context length is the total of all input and output tokens
+	metrics.ContextLength = metrics.InputTokens + metrics.OutputTokens
 
 	return metrics
 }
@@ -399,13 +384,17 @@ func (s *Statusline) getHostname() string {
 
 	// Try to get hostname from command
 	output, err := s.deps.CommandRunner.Run("hostname", "-s")
-	if err == nil {
-		return strings.TrimSpace(string(output))
+	if err == nil && len(output) > 0 {
+		if trimmed := strings.TrimSpace(string(output)); trimmed != "" {
+			return trimmed
+		}
 	}
 
 	output, err = s.deps.CommandRunner.Run("hostname")
-	if err == nil {
-		return strings.TrimSpace(string(output))
+	if err == nil && len(output) > 0 {
+		if trimmed := strings.TrimSpace(string(output)); trimmed != "" {
+			return trimmed
+		}
 	}
 
 	return "unknown"

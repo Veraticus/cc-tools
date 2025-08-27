@@ -21,8 +21,29 @@ func (id RequestID) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON implements json.Unmarshaler.
 func (id *RequestID) UnmarshalJSON(data []byte) error {
-	// Store the raw JSON as string for now
-	id.value = string(data)
+	// JSON-RPC allows string, number, or null for ID
+	// We store everything as a string internally
+	var val any
+	if err := json.Unmarshal(data, &val); err != nil {
+		return fmt.Errorf("unmarshal request ID: %w", err)
+	}
+
+	switch v := val.(type) {
+	case string:
+		id.value = v
+	case float64:
+		// JSON numbers unmarshal as float64
+		// Check if it's an integer or has decimals
+		if v == float64(int64(v)) {
+			id.value = fmt.Sprintf("%.0f", v)
+		} else {
+			id.value = fmt.Sprintf("%g", v) // Use %g to avoid trailing zeros
+		}
+	case nil:
+		id.value = ""
+	default:
+		return fmt.Errorf("invalid request ID type: %T", v)
+	}
 	return nil
 }
 
@@ -68,13 +89,13 @@ const (
 type MethodParams struct {
 	Input   string `json:"input"`
 	Project string `json:"project,omitempty"`
-	Timeout int    `json:"timeout,omitempty"` // seconds
+	Timeout int    `json:"timeout,omitempty"` // milliseconds
 }
 
 // NewErrorResponse creates an error response.
 func NewErrorResponse(id RequestID, code int, message string) Response {
 	return Response{
-		JSONRPC: "2.0",
+		JSONRPC: jsonRPCVersion,
 		ID:      id,
 		Error: &Error{
 			Code:    code,
@@ -86,7 +107,7 @@ func NewErrorResponse(id RequestID, code int, message string) Response {
 // NewSuccessResponse creates a success response.
 func NewSuccessResponse(id RequestID, output string) Response {
 	return Response{
-		JSONRPC: "2.0",
+		JSONRPC: jsonRPCVersion,
 		ID:      id,
 		Result: &Result{
 			Output: output,
@@ -97,7 +118,7 @@ func NewSuccessResponse(id RequestID, output string) Response {
 // NewSuccessResponseWithMeta creates a success response with metadata.
 func NewSuccessResponseWithMeta(id RequestID, output string, meta map[string]string) Response {
 	return Response{
-		JSONRPC: "2.0",
+		JSONRPC: jsonRPCVersion,
 		ID:      id,
 		Result: &Result{
 			Output: output,

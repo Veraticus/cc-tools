@@ -171,7 +171,12 @@ func runStatusline(command string, input string, termWidth int) {
 		ctx,
 		"bash",
 		"-c",
-		fmt.Sprintf("echo '%s' | CC_TOOLS_NO_SERVER=1 CLAUDE_STATUSLINE_WIDTH=%d %s statusline 2>/dev/null", input, termWidth, command),
+		fmt.Sprintf(
+			"echo '%s' | CC_TOOLS_NO_SERVER=1 CLAUDE_STATUSLINE_WIDTH=%d %s statusline 2>/dev/null",
+			input,
+			termWidth,
+			command,
+		),
 	)
 	output, _ := cmd.Output()
 	if len(output) > 0 {

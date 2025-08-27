@@ -22,13 +22,15 @@ const (
 	defaultTestTimeout  = 60 * time.Second
 	shutdownGracePeriod = 5 * time.Second
 	socketPermissions   = 0600
+
+	// JSON-RPC version constant.
+	jsonRPCVersion = "2.0"
 )
 
 // ServerDependencies holds all dependencies for the server.
 type ServerDependencies struct {
 	LintRunner  LintRunner
 	TestRunner  TestRunner
-	Statusline  StatuslineGenerator
 	LockManager LockManager
 	Logger      Logger
 }
@@ -195,7 +197,7 @@ func (s *Server) processRequest(req Request) Response {
 	s.deps.Logger.Printf("[SERVER] Processing %s request (ID: %s)", req.Method, req.ID.value)
 
 	// Validate JSON-RPC version
-	if req.JSONRPC != "2.0" {
+	if req.JSONRPC != jsonRPCVersion {
 		return NewErrorResponse(req.ID, InvalidRequest, "Invalid Request")
 	}
 
@@ -204,8 +206,6 @@ func (s *Server) processRequest(req Request) Response {
 	start := time.Now()
 
 	switch req.Method {
-	case "statusline":
-		resp = s.handleStatusline(req)
 	case "lint":
 		resp = s.handleLint(req)
 	case "test":
@@ -225,33 +225,6 @@ func (s *Server) processRequest(req Request) Response {
 	}
 
 	return resp
-}
-
-// handleStatusline processes statusline requests.
-func (s *Server) handleStatusline(req Request) Response {
-	// Parse params
-	var params MethodParams
-	if len(req.Params) > 0 {
-		if err := json.Unmarshal(req.Params, &params); err != nil {
-			return NewErrorResponse(req.ID, InvalidParams, fmt.Sprintf("Invalid params: %v", err))
-		}
-	}
-
-	// Create context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), defaultLintTimeout)
-	defer cancel()
-
-	// Generate statusline
-	input := bytes.NewReader([]byte(params.Input))
-	result, err := s.deps.Statusline.Generate(ctx, input)
-	if err != nil {
-		s.stats.mu.Lock()
-		s.stats.errorCount++
-		s.stats.mu.Unlock()
-		return NewErrorResponse(req.ID, InternalError, err.Error())
-	}
-
-	return NewSuccessResponseWithMeta(req.ID, result, map[string]string{"via": "server"})
 }
 
 // handleRunner processes runner requests (lint/test).
@@ -278,7 +251,7 @@ func (s *Server) handleRunner(req Request, runner interface {
 	// Create context with timeout
 	timeout := defaultTimeout
 	if params.Timeout > 0 {
-		timeout = time.Duration(params.Timeout) * time.Second
+		timeout = time.Duration(params.Timeout) * time.Millisecond
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()

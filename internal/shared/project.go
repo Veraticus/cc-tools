@@ -149,11 +149,6 @@ func fileExists(path string, deps *Dependencies) bool {
 	return err == nil
 }
 
-// FileExists is a convenience function to check if a file exists.
-func FileExists(path string) bool {
-	return fileExists(path, nil)
-}
-
 // ShouldSkipFile determines if a file should be skipped based on common patterns.
 // This function doesn't need dependency injection as it only does string manipulation.
 func ShouldSkipFile(filePath string) bool {
