@@ -25,6 +25,4 @@ go.work.sum
 /reference/
 
 # Binary outputs (just in case)
-/smart-lint
-/smart-test
-/statusline
+/cc-tools

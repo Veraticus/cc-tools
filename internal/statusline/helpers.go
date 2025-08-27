@@ -42,7 +42,7 @@ func formatPath(path string) string {
 			nonEmptyParts++
 		}
 	}
-	
+
 	// If path is longer than 3 directories, truncate with …
 	if nonEmptyParts > 3 {
 		// Keep first part (~ or /), last 2 parts

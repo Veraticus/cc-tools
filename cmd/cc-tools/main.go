@@ -1,11 +1,16 @@
 package main
 
 import (
+	"bytes"
+	"flag"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"time"
 
 	"github.com/Veraticus/cc-tools/internal/hooks"
+	"github.com/Veraticus/cc-tools/internal/server"
 	"github.com/Veraticus/cc-tools/internal/statusline"
 )
 
@@ -17,11 +22,15 @@ func main() {
 
 	switch os.Args[1] {
 	case "statusline":
-		runStatusline()
-	case "lint", "smart-lint":
-		runLint()
-	case "test", "smart-test":
-		runTest()
+		runStatuslineWithServer()
+	case "lint":
+		runLintWithServer()
+	case "test":
+		runTestWithServer()
+	case "serve":
+		runServe()
+	case "status":
+		runStatus()
 	case "version":
 		fmt.Println("cc-tools v0.1.0")
 	case "help", "-h", "--help":
@@ -41,8 +50,10 @@ Usage:
 
 Commands:
   statusline    Generate a status line for the prompt
-  lint          Run smart linting (alias: smart-lint)
-  test          Run smart testing (alias: smart-test)
+  lint          Run smart linting
+  test          Run smart testing
+  serve         Run server mode for improved performance
+  status        Check server status
   version       Print version information
   help          Show this help message
 
@@ -53,7 +64,97 @@ Examples:
 `)
 }
 
-func runStatusline() {
+func runStatus() {
+	socketPath := os.Getenv("CC_TOOLS_SOCKET")
+	if socketPath == "" {
+		socketPath = server.DefaultSocketPath()
+	}
+
+	// Check if socket exists
+	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
+		fmt.Printf("Server: NOT RUNNING\nSocket: %s (not found)\n", socketPath)
+		os.Exit(1)
+	}
+
+	// Try to connect and get stats
+	client := server.NewClient(socketPath)
+	stats, _, err := client.Call("stats", "")
+	if err != nil {
+		fmt.Printf("Server: ERROR\nSocket: %s\nError: %v\n", socketPath, err)
+		os.Exit(1)
+	}
+
+	fmt.Print(stats)
+}
+
+func runServe() {
+	// Parse flags
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	socketPath := fs.String("socket", server.DefaultSocketPath(), "Socket path")
+	verbose := fs.Bool("verbose", false, "Verbose logging")
+	fs.Parse(os.Args[2:])
+
+	// Create logger
+	logger := &server.StandardLogger{}
+	if !*verbose {
+		log.SetOutput(io.Discard)
+	}
+
+	// Create dependencies
+	deps := &server.ServerDependencies{
+		LintRunner:  server.NewHookLintRunner(true, 30, 2),
+		TestRunner:  server.NewHookTestRunner(true, 60, 2),
+		Statusline:  server.NewStatuslineRunner("/dev/shm", 20),
+		LockManager: server.NewSimpleLockManager(),
+		Logger:      logger,
+	}
+
+	// Create and run server
+	srv := server.NewServer(*socketPath, deps)
+
+	logger.Printf("Starting server on %s", *socketPath)
+	if err := srv.Run(); err != nil {
+		log.Fatalf("Server error: %v", err)
+	}
+}
+
+func runStatuslineWithServer() {
+	result, err := server.TryCallWithFallback("statusline", runStatuslineDirect)
+	if err != nil {
+		fmt.Print(" > ") // Fallback prompt
+		os.Exit(0)
+	}
+	fmt.Print(result)
+}
+
+func runLintWithServer() {
+	_, err := server.TryCallWithFallback("lint", runLintDirect)
+	if err != nil {
+		os.Exit(1)
+	}
+}
+
+func runTestWithServer() {
+	_, err := server.TryCallWithFallback("test", runTestDirect)
+	if err != nil {
+		os.Exit(1)
+	}
+}
+
+func runStatuslineDirect() (string, error) {
+	// Read stdin
+	input, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return "", err
+	}
+
+	// Recreate stdin reader
+	reader := bytes.NewReader(input)
+
+	return runStatuslineWithInput(reader)
+}
+
+func runStatuslineWithInput(reader io.Reader) (string, error) {
 	deps := &statusline.Dependencies{
 		FileReader:    &statusline.DefaultFileReader{},
 		CommandRunner: &statusline.DefaultCommandRunner{},
@@ -65,16 +166,15 @@ func runStatusline() {
 
 	sl := statusline.New(deps)
 
-	result, err := sl.Generate(os.Stdin)
+	result, err := sl.Generate(reader)
 	if err != nil {
-		fmt.Print(" > ")
-		os.Exit(0)
+		return "", err
 	}
 
-	fmt.Print(result)
+	return result, nil
 }
 
-func runLint() {
+func runLintDirect() (string, error) {
 	const (
 		debug        = true
 		timeoutSecs  = 30
@@ -82,10 +182,13 @@ func runLint() {
 	)
 
 	exitCode := hooks.RunSmartHook(hooks.CommandTypeLint, debug, timeoutSecs, cooldownSecs)
-	os.Exit(exitCode)
+	if exitCode != 0 {
+		return "", fmt.Errorf("lint failed with exit code %d", exitCode)
+	}
+	return "", nil
 }
 
-func runTest() {
+func runTestDirect() (string, error) {
 	const (
 		debug        = true
 		timeoutSecs  = 60
@@ -93,7 +196,10 @@ func runTest() {
 	)
 
 	exitCode := hooks.RunSmartHook(hooks.CommandTypeTest, debug, timeoutSecs, cooldownSecs)
-	os.Exit(exitCode)
+	if exitCode != 0 {
+		return "", fmt.Errorf("test failed with exit code %d", exitCode)
+	}
+	return "", nil
 }
 
 func getCacheDir() string {

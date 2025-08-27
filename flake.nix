@@ -43,24 +43,12 @@
           };
         };
         
-        # Create symlinks for backwards compatibility
-        cc-tools-with-compat = pkgs.runCommand "cc-tools-with-compat-${version}" {
-          buildInputs = [ cc-tools ];
-        } ''
-          mkdir -p $out/bin
-          cp ${cc-tools}/bin/cc-tools $out/bin/
-          ln -s cc-tools $out/bin/smart-lint
-          ln -s cc-tools $out/bin/smart-test
-          ln -s cc-tools $out/bin/statusline
-        '';
-        
       in
       {
         # Packages
         packages = {
           inherit cc-tools;
-          default = cc-tools-with-compat;
-          cc-tools-nocompat = cc-tools;  # Without compatibility symlinks
+          default = cc-tools;
         };
         
         # Development shell

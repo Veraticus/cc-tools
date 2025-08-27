@@ -41,9 +41,50 @@ type InputReader interface {
 	IsTerminal() bool
 }
 
+// StringInputReader reads from a string instead of stdin.
+type StringInputReader struct {
+	content string
+}
+
+// NewStringInputReader creates a new StringInputReader.
+func NewStringInputReader(content string) *StringInputReader {
+	return &StringInputReader{content: content}
+}
+
+// ReadAll returns the string content as bytes.
+func (s *StringInputReader) ReadAll() ([]byte, error) {
+	return []byte(s.content), nil
+}
+
+// IsTerminal always returns false for string input.
+func (s *StringInputReader) IsTerminal() bool {
+	return false
+}
+
 // OutputWriter writes output to various destinations.
 type OutputWriter interface {
 	io.Writer
+}
+
+// StringOutputWriter captures output to a string.
+type StringOutputWriter struct {
+	content []byte
+}
+
+// NewStringOutputWriter creates a new StringOutputWriter.
+func NewStringOutputWriter() *StringOutputWriter {
+	return &StringOutputWriter{}
+}
+
+// Write appends to the output buffer.
+func (s *StringOutputWriter) Write(p []byte) (n int, err error) {
+	s.content = append(s.content, p...)
+	return len(p), nil
+}
+
+// String returns the captured output as a string.
+func (s *StringOutputWriter) String() string {
+	return string(s.content)
 }
 
 // Dependencies holds all external dependencies.

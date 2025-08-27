@@ -186,7 +186,7 @@ func TestStatuslineGenerate(t *testing.T) {
 			// Save and restore HOME env var
 			oldHome := os.Getenv("HOME")
 			defer os.Setenv("HOME", oldHome)
-			
+
 			// Create mock dependencies
 			deps := &Dependencies{
 				FileReader:    NewMockFileReader(),
