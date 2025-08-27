@@ -18,6 +18,12 @@ import (
 
 const minArgs = 2
 
+// Build-time variables
+var (
+	version   = "dev"
+	buildTime = "unknown"
+)
+
 func main() {
 	if len(os.Args) < minArgs {
 		printUsage()
@@ -37,7 +43,7 @@ func main() {
 		runStatus()
 	case "version":
 		// Print version to stdout as intended output
-		fmt.Println("cc-tools v0.1.0") //nolint:forbidigo // CLI output
+		fmt.Printf("cc-tools %s\n", version) //nolint:forbidigo // CLI output
 	case "help", "-h", "--help":
 		printUsage()
 	default:

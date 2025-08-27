@@ -11,8 +11,12 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
         
+        # Get git revision or use placeholder
+        gitRevision = if (self ? rev) then self.rev else "dirty";
+        shortRev = if (self ? shortRev) then self.shortRev else "dirty";
+        
         # Build configuration
-        version = "0.1.0";
+        version = shortRev;
         buildTime = "1970-01-01T00:00:00Z";
         
         # Build unified cc-tools binary
