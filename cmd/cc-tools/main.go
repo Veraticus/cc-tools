@@ -138,15 +138,30 @@ func runServe() {
 		}
 	}
 
-	// Create dependencies
-	const (
-		lintTimeout  = 30
-		testTimeout  = 60
-		hookCooldown = 2
-	)
+	// Create dependencies using config values with fallback defaults
+	lintTimeout := 30
+	lintCooldown := 2
+	testTimeout := 60
+	testCooldown := 2
+	
+	if cfg != nil {
+		if cfg.Hooks.Lint.TimeoutSeconds > 0 {
+			lintTimeout = cfg.Hooks.Lint.TimeoutSeconds
+		}
+		if cfg.Hooks.Lint.CooldownSeconds > 0 {
+			lintCooldown = cfg.Hooks.Lint.CooldownSeconds
+		}
+		if cfg.Hooks.Test.TimeoutSeconds > 0 {
+			testTimeout = cfg.Hooks.Test.TimeoutSeconds
+		}
+		if cfg.Hooks.Test.CooldownSeconds > 0 {
+			testCooldown = cfg.Hooks.Test.CooldownSeconds
+		}
+	}
+	
 	deps := &server.ServerDependencies{
-		LintRunner:  server.NewHookLintRunner(true, lintTimeout, hookCooldown),
-		TestRunner:  server.NewHookTestRunner(true, testTimeout, hookCooldown),
+		LintRunner:  server.NewHookLintRunner(true, lintTimeout, lintCooldown),
+		TestRunner:  server.NewHookTestRunner(true, testTimeout, testCooldown),
 		LockManager: server.NewSimpleLockManager(),
 		Logger:      logger,
 	}

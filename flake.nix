@@ -7,7 +7,175 @@
   };
 
   outputs = { self, nixpkgs, flake-utils }:
-    flake-utils.lib.eachDefaultSystem (system:
+    let
+      # Define modules outside of eachDefaultSystem since they're system-independent
+      nixosModule = { config, lib, pkgs, ... }:
+        let
+          cfg = config.services.cc-tools;
+          
+          # Build tools that hooks might need
+          serverPath = lib.makeBinPath (with pkgs; [
+            # Build systems
+            gnumake
+            just
+            cmake
+            ninja
+            
+            # Language tools - Go
+            go
+            golangci-lint
+            
+            # Language tools - Python
+            python3
+            python3Packages.flake8
+            python3Packages.mypy
+            python3Packages.black
+            python3Packages.pytest
+            ruff
+            
+            # Language tools - Rust
+            rustc
+            cargo
+            clippy
+            
+            # Language tools - Node.js
+            nodejs
+            
+            # Common tools
+            git
+            coreutils
+            findutils
+            gnugrep
+            gnused
+            gawk
+          ]);
+        in
+        {
+          options.services.cc-tools = {
+            enable = lib.mkEnableOption "cc-tools server";
+            
+            socketPath = lib.mkOption {
+              type = lib.types.str;
+              default = "/run/user/%U/cc-tools.sock";
+              description = "Path to the Unix socket for cc-tools server";
+            };
+            
+            package = lib.mkOption {
+              type = lib.types.package;
+              default = self.packages.${pkgs.system}.cc-tools;
+              description = "The cc-tools package to use";
+            };
+          };
+          
+          config = lib.mkIf cfg.enable {
+            systemd.user.services.cc-tools-server = {
+              Unit = {
+                Description = "Claude Code Tools Server";
+                After = [ "graphical-session-pre.target" ];
+                PartOf = [ "graphical-session.target" ];
+              };
+              
+              Service = {
+                Type = "simple";
+                ExecStart = "${cfg.package}/bin/cc-tools serve -socket ${cfg.socketPath}";
+                Restart = "on-failure";
+                RestartSec = 5;
+                Environment = [ "PATH=${serverPath}" ];
+              };
+              
+              Install = {
+                WantedBy = [ "default.target" ];
+              };
+            };
+          };
+        };
+        
+      homeManagerModule = { config, lib, pkgs, ... }:
+        let
+          cfg = config.services.cc-tools;
+          
+          # Build tools that hooks might need  
+          serverPath = lib.makeBinPath (with pkgs; [
+            # Build systems
+            gnumake
+            just
+            cmake
+            ninja
+            
+            # Language tools - Go
+            go
+            golangci-lint
+            
+            # Language tools - Python
+            python3
+            python3Packages.flake8
+            python3Packages.mypy
+            python3Packages.black
+            python3Packages.pytest
+            ruff
+            
+            # Language tools - Rust
+            rustc
+            cargo
+            clippy
+            
+            # Language tools - Node.js
+            nodejs
+            
+            # Common tools
+            git
+            coreutils
+            findutils
+            gnugrep
+            gnused
+            gawk
+          ]);
+        in
+        {
+          options.services.cc-tools = {
+            enable = lib.mkEnableOption "cc-tools server";
+            
+            socketPath = lib.mkOption {
+              type = lib.types.str;
+              default = "/run/user/\${UID}/cc-tools.sock";
+              description = "Path to the Unix socket for cc-tools server";
+            };
+            
+            package = lib.mkOption {
+              type = lib.types.package;
+              default = self.packages.${pkgs.system}.cc-tools;
+              description = "The cc-tools package to use";
+            };
+          };
+          
+          config = lib.mkIf cfg.enable {
+            systemd.user.services.cc-tools-server = {
+              Unit = {
+                Description = "Claude Code Tools Server";
+                After = [ "graphical-session-pre.target" ];
+                PartOf = [ "graphical-session.target" ];
+              };
+              
+              Service = {
+                Type = "simple";
+                ExecStart = "${cfg.package}/bin/cc-tools serve -socket ${cfg.socketPath}";
+                Restart = "on-failure";
+                RestartSec = 5;
+                Environment = [ "PATH=${serverPath}" ];
+              };
+              
+              Install = {
+                WantedBy = [ "default.target" ];
+              };
+            };
+          };
+        };
+    in
+    {
+      # Export modules at the flake level
+      nixosModules.default = nixosModule;
+      homeManagerModules.default = homeManagerModule;
+    } // flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
         
@@ -55,13 +223,175 @@
           default = cc-tools;
         };
         
+        # NixOS/Home Manager module
+        nixosModules.default = { config, lib, pkgs, ... }:
+          let
+            cfg = config.services.cc-tools;
+            
+            # Build tools that hooks might need
+            serverPath = lib.makeBinPath (with pkgs; [
+              # Build systems
+              gnumake
+              just
+              cmake
+              ninja
+              
+              # Language tools - Go
+              go
+              golangci-lint
+              
+              # Language tools - Python
+              python3
+              python3Packages.flake8
+              python3Packages.mypy
+              python3Packages.black
+              python3Packages.pytest
+              ruff
+              
+              # Language tools - Rust
+              rustc
+              cargo
+              clippy
+              
+              # Language tools - Node.js
+              nodejs
+              
+              # Common tools
+              git
+              coreutils
+              findutils
+              gnugrep
+              gnused
+              gawk
+            ]);
+          in
+          {
+            options.services.cc-tools = {
+              enable = lib.mkEnableOption "cc-tools server";
+              
+              socketPath = lib.mkOption {
+                type = lib.types.str;
+                default = "/run/user/%U/cc-tools.sock";
+                description = "Path to the Unix socket for cc-tools server";
+              };
+              
+              package = lib.mkOption {
+                type = lib.types.package;
+                default = cc-tools;
+                description = "The cc-tools package to use";
+              };
+            };
+            
+            config = lib.mkIf cfg.enable {
+              systemd.user.services.cc-tools-server = {
+                Unit = {
+                  Description = "Claude Code Tools Server";
+                  After = [ "graphical-session-pre.target" ];
+                  PartOf = [ "graphical-session.target" ];
+                };
+                
+                Service = {
+                  Type = "simple";
+                  ExecStart = "${cfg.package}/bin/cc-tools serve -socket ${cfg.socketPath}";
+                  Restart = "on-failure";
+                  RestartSec = 5;
+                  Environment = [ "PATH=${serverPath}" ];
+                };
+                
+                Install = {
+                  WantedBy = [ "default.target" ];
+                };
+              };
+            };
+          };
+        
+        homeManagerModules.default = { config, lib, pkgs, ... }:
+          let
+            cfg = config.services.cc-tools;
+            
+            # Build tools that hooks might need
+            serverPath = lib.makeBinPath (with pkgs; [
+              # Build systems
+              gnumake
+              just
+              cmake
+              ninja
+              
+              # Language tools - Go
+              go
+              golangci-lint
+              
+              # Language tools - Python
+              python3
+              python3Packages.flake8
+              python3Packages.mypy
+              python3Packages.black
+              python3Packages.pytest
+              ruff
+              
+              # Language tools - Rust
+              rustc
+              cargo
+              clippy
+              
+              # Language tools - Node.js
+              nodejs
+              
+              # Common tools
+              git
+              coreutils
+              findutils
+              gnugrep
+              gnused
+              gawk
+            ]);
+          in
+          {
+            options.services.cc-tools = {
+              enable = lib.mkEnableOption "cc-tools server";
+              
+              socketPath = lib.mkOption {
+                type = lib.types.str;
+                default = "/run/user/\${UID}/cc-tools.sock";
+                description = "Path to the Unix socket for cc-tools server";
+              };
+              
+              package = lib.mkOption {
+                type = lib.types.package;
+                default = cc-tools;
+                description = "The cc-tools package to use";
+              };
+            };
+            
+            config = lib.mkIf cfg.enable {
+              systemd.user.services.cc-tools-server = {
+                Unit = {
+                  Description = "Claude Code Tools Server";
+                  After = [ "graphical-session-pre.target" ];
+                  PartOf = [ "graphical-session.target" ];
+                };
+                
+                Service = {
+                  Type = "simple";
+                  ExecStart = "${cfg.package}/bin/cc-tools serve -socket ${cfg.socketPath}";
+                  Restart = "on-failure";
+                  RestartSec = 5;
+                  Environment = [ "PATH=${serverPath}" ];
+                };
+                
+                Install = {
+                  WantedBy = [ "default.target" ];
+                };
+              };
+            };
+          };
+        
         # Development shell
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
             go_1_24
             gopls
             golangci-lint
-            deadcode
             gnumake
             git
             

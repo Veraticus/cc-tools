@@ -1,5 +1,5 @@
 // Package config manages application configuration using Viper.
-// Test edit to trigger hooks.
+// Test edit to trigger hooks - checking hook output.
 package config
 
 import (
