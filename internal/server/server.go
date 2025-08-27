@@ -91,7 +91,8 @@ func (s *Server) Run() error {
 	_ = os.Remove(s.socketPath)
 
 	// Listen on socket
-	listener, err := net.Listen("unix", s.socketPath) //nolint:noctx // Unix socket doesn't need context
+	lc := &net.ListenConfig{}
+	listener, err := lc.Listen(context.Background(), "unix", s.socketPath)
 	if err != nil {
 		return fmt.Errorf("listen on socket: %w", err)
 	}

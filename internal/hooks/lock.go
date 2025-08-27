@@ -19,12 +19,7 @@ type LockManager struct {
 }
 
 // NewLockManager creates a new lock manager for the given workspace.
-func NewLockManager(workspaceDir, hookName string, cooldownSecs int) *LockManager {
-	return NewLockManagerWithDeps(workspaceDir, hookName, cooldownSecs, nil)
-}
-
-// NewLockManagerWithDeps creates a new lock manager with explicit dependencies.
-func NewLockManagerWithDeps(workspaceDir, hookName string, cooldownSecs int, deps *Dependencies) *LockManager {
+func NewLockManager(workspaceDir, hookName string, cooldownSecs int, deps *Dependencies) *LockManager {
 	if deps == nil {
 		deps = NewDefaultDependencies()
 	}
@@ -44,33 +39,50 @@ func NewLockManagerWithDeps(workspaceDir, hookName string, cooldownSecs int, dep
 	}
 }
 
+// isAnotherProcessRunning checks if another process holds the lock.
+func (l *LockManager) isAnotherProcessRunning(lines []string) bool {
+	if len(lines) < 1 || lines[0] == "" {
+		return false
+	}
+
+	pid, err := strconv.Atoi(lines[0])
+	if err != nil {
+		return false
+	}
+
+	return l.deps.Process.ProcessExists(pid)
+}
+
+// isInCooldownPeriod checks if the lock is in cooldown period.
+func (l *LockManager) isInCooldownPeriod(lines []string) bool {
+	if len(lines) < 2 || lines[1] == "" {
+		return false
+	}
+
+	completionTime, err := strconv.ParseInt(lines[1], 10, 64)
+	if err != nil {
+		return false
+	}
+
+	timeSinceCompletion := l.deps.Clock.Now().Unix() - completionTime
+	return timeSinceCompletion < int64(l.cooldownSecs)
+}
+
 // TryAcquire attempts to acquire the lock.
 // Returns true if lock acquired, false if another process has it or cooldown active.
 func (l *LockManager) TryAcquire() (bool, error) {
 	// Check if lock file exists
 	data, err := l.deps.FS.ReadFile(l.lockFile)
-	if err == nil { //nolint:nestif // Lock file checking requires nested checks
-		// Lock file exists, parse it
+	if err == nil {
+		// Lock file exists, check if locked
 		lines := splitLines(string(data))
-		if len(lines) >= 1 && lines[0] != "" {
-			// Check if PID is still running
-			pid, pidErr := strconv.Atoi(lines[0])
-			if pidErr == nil && l.deps.Process.ProcessExists(pid) {
-				// Another instance is running
-				return false, nil
-			}
+
+		if l.isAnotherProcessRunning(lines) {
+			return false, nil
 		}
 
-		// Check cooldown period
-		if len(lines) >= 2 && lines[1] != "" {
-			completionTime, parseErr := strconv.ParseInt(lines[1], 10, 64)
-			if parseErr == nil {
-				timeSinceCompletion := l.deps.Clock.Now().Unix() - completionTime
-				if timeSinceCompletion < int64(l.cooldownSecs) {
-					// Still in cooldown period
-					return false, nil
-				}
-			}
+		if l.isInCooldownPeriod(lines) {
+			return false, nil
 		}
 	}
 

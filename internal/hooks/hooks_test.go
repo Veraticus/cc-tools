@@ -1,6 +1,7 @@
 package hooks
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -203,7 +204,7 @@ func TestLockManager(t *testing.T) {
 	t.Setenv("TMPDIR", tmpDir)
 
 	t.Run("acquire and release lock", func(t *testing.T) {
-		lm := NewLockManager("/test/project", "test", 2)
+		lm := NewLockManager("/test/project", "test", 2, nil)
 
 		// Should acquire lock successfully
 		acquired, err := lm.TryAcquire()
@@ -226,7 +227,7 @@ func TestLockManager(t *testing.T) {
 	})
 
 	t.Run("respects cooldown", func(t *testing.T) {
-		lm1 := NewLockManager("/test/project", "cooldown", 2)
+		lm1 := NewLockManager("/test/project", "cooldown", 2, nil)
 
 		// First process acquires and releases
 		acquired, err := lm1.TryAcquire()
@@ -236,7 +237,7 @@ func TestLockManager(t *testing.T) {
 		lm1.Release()
 
 		// Second process tries immediately
-		lm2 := NewLockManager("/test/project", "cooldown", 2)
+		lm2 := NewLockManager("/test/project", "cooldown", 2, nil)
 		acquired, _ = lm2.TryAcquire()
 		if acquired {
 			t.Error("Should not acquire lock during cooldown")
@@ -301,10 +302,10 @@ func TestDiscoveredCommandStringOld(t *testing.T) {
 	}
 }
 
-// TestCommandExecutor tests command execution.
-func TestCommandExecutor(t *testing.T) {
+// TestCommandExecutorBasic tests basic command execution.
+func TestCommandExecutorBasic(t *testing.T) {
 	t.Run("execute simple command", func(t *testing.T) {
-		executor := NewCommandExecutor(5, false)
+		executor := NewCommandExecutor(5, false, nil)
 
 		cmd := &DiscoveredCommand{
 			Type:       CommandTypeTest,
@@ -313,14 +314,14 @@ func TestCommandExecutor(t *testing.T) {
 			WorkingDir: ".",
 		}
 
-		result := executor.Execute(cmd)
+		result := executor.Execute(context.Background(), cmd)
 		if !result.Success {
 			t.Errorf("Expected success, got error: %v", result.Error)
 		}
 	})
 
 	t.Run("handle command timeout", func(t *testing.T) {
-		executor := NewCommandExecutor(1, false) // 1 second timeout
+		executor := NewCommandExecutor(1, false, nil) // 1 second timeout
 
 		cmd := &DiscoveredCommand{
 			Type:       CommandTypeTest,
@@ -329,7 +330,7 @@ func TestCommandExecutor(t *testing.T) {
 			WorkingDir: ".",
 		}
 
-		result := executor.Execute(cmd)
+		result := executor.Execute(context.Background(), cmd)
 		if result.Success {
 			t.Error("Expected timeout failure")
 		}
@@ -339,7 +340,7 @@ func TestCommandExecutor(t *testing.T) {
 	})
 
 	t.Run("handle non-existent command", func(t *testing.T) {
-		executor := NewCommandExecutor(5, false)
+		executor := NewCommandExecutor(5, false, nil)
 
 		cmd := &DiscoveredCommand{
 			Type:       CommandTypeTest,
@@ -348,19 +349,19 @@ func TestCommandExecutor(t *testing.T) {
 			WorkingDir: ".",
 		}
 
-		result := executor.Execute(cmd)
+		result := executor.Execute(context.Background(), cmd)
 		if result.Success {
 			t.Error("Expected failure for non-existent command")
 		}
 	})
 }
 
-// TestRunSmartHook tests the main hook runner function.
-func TestRunSmartHook(t *testing.T) {
+// TestRunSmartHookBasic tests the main hook runner function.
+func TestRunSmartHookBasic(t *testing.T) {
 	t.Run("exits early when disabled", func(t *testing.T) {
 		t.Setenv("CLAUDE_HOOKS_LINT_ENABLED", "false")
 
-		code := RunSmartHook(CommandTypeLint, false, 20, 2)
+		code := RunSmartHook(context.Background(), CommandTypeLint, false, 20, 2, nil)
 		if code != 0 {
 			t.Errorf("Expected exit code 0 when disabled, got %d", code)
 		}
@@ -389,7 +390,7 @@ test:
 		discovery := NewCommandDiscovery(tmpDir, 20, nil)
 
 		// Test lint discovery
-		cmd, err := discovery.DiscoverCommand(CommandTypeLint, tmpDir)
+		cmd, err := discovery.DiscoverCommand(context.Background(), CommandTypeLint, tmpDir)
 		if err != nil {
 			t.Errorf("Failed to discover lint command: %v", err)
 		}
@@ -401,7 +402,7 @@ test:
 		}
 
 		// Test test discovery
-		cmd, err = discovery.DiscoverCommand(CommandTypeTest, tmpDir)
+		cmd, err = discovery.DiscoverCommand(context.Background(), CommandTypeTest, tmpDir)
 		if err != nil {
 			t.Errorf("Failed to discover test command: %v", err)
 		}
@@ -472,7 +473,7 @@ func BenchmarkDiscovery(b *testing.B) {
 
 	b.ResetTimer()
 	for range b.N {
-		discovery.DiscoverCommand(CommandTypeLint, tmpDir)
+		discovery.DiscoverCommand(context.Background(), CommandTypeLint, tmpDir)
 	}
 }
 
@@ -483,7 +484,7 @@ func BenchmarkLockManager(b *testing.B) {
 
 	b.ResetTimer()
 	for i := range b.N {
-		lm := NewLockManager(fmt.Sprintf("/project%d", i), "bench", 0)
+		lm := NewLockManager(fmt.Sprintf("/project%d", i), "bench", 0, nil)
 		lm.TryAcquire()
 		lm.Release()
 	}

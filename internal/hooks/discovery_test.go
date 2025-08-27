@@ -6,10 +6,9 @@ import (
 	"os"
 	"strings"
 	"testing"
-	"time"
 )
 
-func TestCommandDiscoveryWithDeps(t *testing.T) { //nolint:cyclop // table-driven test with many scenarios
+func TestCommandDiscovery(t *testing.T) { //nolint:cyclop // table-driven test with many scenarios
 	t.Run("discovers Makefile lint target", func(t *testing.T) {
 		testDeps := createTestDependencies()
 
@@ -30,7 +29,7 @@ func TestCommandDiscoveryWithDeps(t *testing.T) { //nolint:cyclop // table-drive
 		}
 
 		discovery := NewCommandDiscovery("/project", 20, testDeps.Dependencies)
-		cmd, err := discovery.DiscoverCommand(CommandTypeLint, "/project")
+		cmd, err := discovery.DiscoverCommand(context.Background(), CommandTypeLint, "/project")
 
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
@@ -66,7 +65,7 @@ func TestCommandDiscoveryWithDeps(t *testing.T) { //nolint:cyclop // table-drive
 		}
 
 		discovery := NewCommandDiscovery("/project", 20, testDeps.Dependencies)
-		cmd, err := discovery.DiscoverCommand(CommandTypeTest, "/project")
+		cmd, err := discovery.DiscoverCommand(context.Background(), CommandTypeTest, "/project")
 
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
@@ -102,7 +101,7 @@ func TestCommandDiscoveryWithDeps(t *testing.T) { //nolint:cyclop // table-drive
 		}
 
 		discovery := NewCommandDiscovery("/project", 20, testDeps.Dependencies)
-		cmd, err := discovery.DiscoverCommand(CommandTypeLint, "/project")
+		cmd, err := discovery.DiscoverCommand(context.Background(), CommandTypeLint, "/project")
 
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
@@ -138,7 +137,7 @@ func TestCommandDiscoveryWithDeps(t *testing.T) { //nolint:cyclop // table-drive
 		}
 
 		discovery := NewCommandDiscovery("/project", 20, testDeps.Dependencies)
-		cmd, err := discovery.DiscoverCommand(CommandTypeTest, "/project")
+		cmd, err := discovery.DiscoverCommand(context.Background(), CommandTypeTest, "/project")
 
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
@@ -171,7 +170,7 @@ func TestCommandDiscoveryWithDeps(t *testing.T) { //nolint:cyclop // table-drive
 		}
 
 		discovery := NewCommandDiscovery("/project", 20, testDeps.Dependencies)
-		cmd, err := discovery.DiscoverCommand(CommandTypeTest, "/project")
+		cmd, err := discovery.DiscoverCommand(context.Background(), CommandTypeTest, "/project")
 
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
@@ -196,7 +195,7 @@ func TestCommandDiscoveryWithDeps(t *testing.T) { //nolint:cyclop // table-drive
 		}
 
 		discovery := NewCommandDiscovery("/project", 20, testDeps.Dependencies)
-		cmd, err := discovery.DiscoverCommand(CommandTypeLint, "/project")
+		cmd, err := discovery.DiscoverCommand(context.Background(), CommandTypeLint, "/project")
 
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
@@ -227,7 +226,7 @@ func TestCommandDiscoveryWithDeps(t *testing.T) { //nolint:cyclop // table-drive
 		}
 
 		discovery := NewCommandDiscovery("/project", 20, testDeps.Dependencies)
-		cmd, err := discovery.DiscoverCommand(CommandTypeTest, "/project")
+		cmd, err := discovery.DiscoverCommand(context.Background(), CommandTypeTest, "/project")
 
 		if err == nil {
 			t.Fatal("Expected error for no command found")
@@ -257,7 +256,7 @@ func TestCommandDiscoveryWithDeps(t *testing.T) { //nolint:cyclop // table-drive
 		}
 
 		discovery := NewCommandDiscovery("/project", 20, testDeps.Dependencies)
-		cmd, err := discovery.DiscoverCommand(CommandTypeLint, "/project")
+		cmd, err := discovery.DiscoverCommand(context.Background(), CommandTypeLint, "/project")
 
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
@@ -290,7 +289,7 @@ func TestCommandDiscoveryWithDeps(t *testing.T) { //nolint:cyclop // table-drive
 		}
 
 		discovery := NewCommandDiscovery("/project", 20, testDeps.Dependencies)
-		cmd, err := discovery.DiscoverCommand(CommandTypeLint, "/project")
+		cmd, err := discovery.DiscoverCommand(context.Background(), CommandTypeLint, "/project")
 
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
@@ -318,7 +317,7 @@ func TestCommandDiscoveryWithDeps(t *testing.T) { //nolint:cyclop // table-drive
 		}
 
 		discovery := NewCommandDiscovery("/project", 20, testDeps.Dependencies)
-		cmd, err := discovery.DiscoverCommand(CommandTypeTest, "/project")
+		cmd, err := discovery.DiscoverCommand(context.Background(), CommandTypeTest, "/project")
 
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
@@ -343,7 +342,7 @@ func TestCommandDiscoveryWithDeps(t *testing.T) { //nolint:cyclop // table-drive
 		}
 
 		discovery := NewCommandDiscovery("/project", 20, testDeps.Dependencies)
-		cmd, err := discovery.DiscoverCommand(CommandTypeLint, "/project")
+		cmd, err := discovery.DiscoverCommand(context.Background(), CommandTypeLint, "/project")
 
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
@@ -377,7 +376,7 @@ func TestCommandDiscoveryWithDeps(t *testing.T) { //nolint:cyclop // table-drive
 		}
 
 		discovery := NewCommandDiscovery("/project", 20, testDeps.Dependencies)
-		cmd, err := discovery.DiscoverCommand(CommandTypeTest, "/project")
+		cmd, err := discovery.DiscoverCommand(context.Background(), CommandTypeTest, "/project")
 
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
@@ -410,7 +409,7 @@ func TestCommandDiscoveryWithDeps(t *testing.T) { //nolint:cyclop // table-drive
 		}
 
 		discovery := NewCommandDiscovery("/project", 20, testDeps.Dependencies)
-		cmd, err := discovery.DiscoverCommand(CommandTypeLint, "/project")
+		cmd, err := discovery.DiscoverCommand(context.Background(), CommandTypeLint, "/project")
 
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
@@ -446,7 +445,7 @@ func TestCommandDiscoveryWithDeps(t *testing.T) { //nolint:cyclop // table-drive
 		}
 
 		discovery := NewCommandDiscovery("/project", 20, testDeps.Dependencies)
-		cmd, err := discovery.DiscoverCommand(CommandTypeLint, "/project")
+		cmd, err := discovery.DiscoverCommand(context.Background(), CommandTypeLint, "/project")
 
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
@@ -479,7 +478,7 @@ func TestCommandDiscoveryWithDeps(t *testing.T) { //nolint:cyclop // table-drive
 		}
 
 		discovery := NewCommandDiscovery("/project", 20, testDeps.Dependencies)
-		cmd, err := discovery.DiscoverCommand(CommandTypeTest, "/project")
+		cmd, err := discovery.DiscoverCommand(context.Background(), CommandTypeTest, "/project")
 
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
@@ -509,7 +508,7 @@ func TestCommandDiscoveryWithDeps(t *testing.T) { //nolint:cyclop // table-drive
 		}
 
 		discovery := NewCommandDiscovery("/project", 20, testDeps.Dependencies)
-		cmd, err := discovery.DiscoverCommand(CommandTypeTest, "/project")
+		cmd, err := discovery.DiscoverCommand(context.Background(), CommandTypeTest, "/project")
 
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
@@ -547,7 +546,7 @@ func TestCommandDiscoveryWithDeps(t *testing.T) { //nolint:cyclop // table-drive
 
 		discovery := NewCommandDiscovery("/project", 20, testDeps.Dependencies)
 		// Start from subdirectory
-		cmd, err := discovery.DiscoverCommand(CommandTypeLint, "/project/src/subdir")
+		cmd, err := discovery.DiscoverCommand(context.Background(), CommandTypeLint, "/project/src/subdir")
 
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
@@ -569,7 +568,7 @@ func TestCommandDiscoveryWithDeps(t *testing.T) { //nolint:cyclop // table-drive
 		}
 
 		discovery := NewCommandDiscovery("/project", 20, testDeps.Dependencies)
-		cmd, err := discovery.DiscoverCommand(CommandTypeLint, "/project/src")
+		cmd, err := discovery.DiscoverCommand(context.Background(), CommandTypeLint, "/project/src")
 
 		if err == nil {
 			t.Fatal("Expected error for no command found")
@@ -602,7 +601,7 @@ func TestCommandDiscoveryWithDeps(t *testing.T) { //nolint:cyclop // table-drive
 
 		// Use very short timeout
 		discovery := NewCommandDiscovery("/project", 0, testDeps.Dependencies)
-		cmd, err := discovery.DiscoverCommand(CommandTypeLint, "/project")
+		cmd, err := discovery.DiscoverCommand(context.Background(), CommandTypeLint, "/project")
 
 		// Should fail to find command due to timeout
 		if err == nil {
@@ -702,42 +701,6 @@ func TestDiscoveredCommandString(t *testing.T) {
 	}
 }
 
-func TestContextWithTimeout(t *testing.T) {
-	t.Run("creates context with proper timeout", func(t *testing.T) {
-		ctx, cancel := contextWithTimeout(1)
-		defer cancel()
-
-		select {
-		case <-time.After(500 * time.Millisecond):
-			// Should not reach here
-		case <-ctx.Done():
-			t.Error("Context canceled too early")
-		}
-
-		select {
-		case <-time.After(600 * time.Millisecond):
-			// Should reach here after 1 second total
-		case <-ctx.Done():
-			// Expected
-			return
-		}
-		t.Error("Context did not timeout as expected")
-	})
-
-	t.Run("handles zero timeout", func(t *testing.T) {
-		ctx, cancel := contextWithTimeout(0)
-		defer cancel()
-
-		// Zero timeout should expire immediately
-		select {
-		case <-time.After(100 * time.Millisecond):
-			t.Error("Context with zero timeout should expire immediately")
-		case <-ctx.Done():
-			// Expected
-		}
-	})
-}
-
 func BenchmarkCommandDiscovery(b *testing.B) {
 	testDeps := createTestDependencies()
 
@@ -760,7 +723,7 @@ func BenchmarkCommandDiscovery(b *testing.B) {
 
 	b.ResetTimer()
 	for range b.N {
-		discovery.DiscoverCommand(CommandTypeLint, "/project")
+		discovery.DiscoverCommand(context.Background(), CommandTypeLint, "/project")
 	}
 }
 

@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestReadHookInputWithDeps(t *testing.T) {
+func TestReadHookInput(t *testing.T) {
 	t.Run("successful parsing of complete input", func(t *testing.T) {
 		reader := &mockInputReader{
 			isTerminalFunc: func() bool { return false },
@@ -30,7 +30,7 @@ func TestReadHookInputWithDeps(t *testing.T) {
 			},
 		}
 
-		input, err := ReadHookInputWithDeps(reader)
+		input, err := ReadHookInput(reader)
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
 		}
@@ -61,7 +61,7 @@ func TestReadHookInputWithDeps(t *testing.T) {
 			isTerminalFunc: func() bool { return true },
 		}
 
-		input, err := ReadHookInputWithDeps(reader)
+		input, err := ReadHookInput(reader)
 		if err == nil {
 			t.Fatal("Expected error for terminal input")
 		}
@@ -81,7 +81,7 @@ func TestReadHookInputWithDeps(t *testing.T) {
 			},
 		}
 
-		input, err := ReadHookInputWithDeps(reader)
+		input, err := ReadHookInput(reader)
 		if err == nil {
 			t.Fatal("Expected error for read failure")
 		}
@@ -98,7 +98,7 @@ func TestReadHookInputWithDeps(t *testing.T) {
 			},
 		}
 
-		input, err := ReadHookInputWithDeps(reader)
+		input, err := ReadHookInput(reader)
 		if err == nil {
 			t.Fatal("Expected error for empty input")
 		}
@@ -118,7 +118,7 @@ func TestReadHookInputWithDeps(t *testing.T) {
 			},
 		}
 
-		input, err := ReadHookInputWithDeps(reader)
+		input, err := ReadHookInput(reader)
 		if err == nil {
 			t.Fatal("Expected error for invalid JSON")
 		}
@@ -135,7 +135,7 @@ func TestReadHookInputWithDeps(t *testing.T) {
 			},
 		}
 
-		input, err := ReadHookInputWithDeps(reader)
+		input, err := ReadHookInput(reader)
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
 		}
@@ -167,7 +167,7 @@ func TestReadHookInputWithDeps(t *testing.T) {
 			},
 		}
 
-		input, err := ReadHookInputWithDeps(reader)
+		input, err := ReadHookInput(reader)
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
 		}
@@ -188,7 +188,7 @@ func TestReadHookInputWithDeps(t *testing.T) {
 	})
 }
 
-func TestReadStatusLineInputWithDeps(t *testing.T) {
+func TestReadStatusLineInput(t *testing.T) {
 	t.Run("successful parsing of statusline input", func(t *testing.T) {
 		reader := &mockInputReader{
 			readAllFunc: func() ([]byte, error) {
@@ -220,7 +220,7 @@ func TestReadStatusLineInputWithDeps(t *testing.T) {
 			},
 		}
 
-		input, err := ReadStatusLineInputWithDeps(reader)
+		input, err := ReadStatusLineInput(reader)
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
 		}
@@ -248,7 +248,7 @@ func TestReadStatusLineInputWithDeps(t *testing.T) {
 			},
 		}
 
-		input, err := ReadStatusLineInputWithDeps(reader)
+		input, err := ReadStatusLineInput(reader)
 		if err == nil {
 			t.Fatal("Expected error for empty input")
 		}
@@ -267,7 +267,7 @@ func TestReadStatusLineInputWithDeps(t *testing.T) {
 			},
 		}
 
-		input, err := ReadStatusLineInputWithDeps(reader)
+		input, err := ReadStatusLineInput(reader)
 		if err == nil {
 			t.Fatal("Expected error for invalid JSON")
 		}
@@ -299,7 +299,7 @@ func TestReadStatusLineInputWithDeps(t *testing.T) {
 			},
 		}
 
-		input, err := ReadStatusLineInputWithDeps(reader)
+		input, err := ReadStatusLineInput(reader)
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
 		}
@@ -585,7 +585,7 @@ func BenchmarkReadHookInput(b *testing.B) {
 
 	b.ResetTimer()
 	for range b.N {
-		ReadHookInputWithDeps(reader)
+		ReadHookInput(reader)
 	}
 }
 

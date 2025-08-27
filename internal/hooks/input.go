@@ -70,8 +70,8 @@ type GitInfo struct {
 	HasStaged    bool   `json:"has_staged"`
 }
 
-// ReadHookInputWithDeps reads and parses hook input with explicit dependencies.
-func ReadHookInputWithDeps(reader InputReader) (*HookInput, error) {
+// ReadHookInput reads and parses hook input.
+func ReadHookInput(reader InputReader) (*HookInput, error) {
 	// Check if stdin is available (not a terminal)
 	if reader.IsTerminal() {
 		// No stdin available
@@ -95,8 +95,8 @@ func ReadHookInputWithDeps(reader InputReader) (*HookInput, error) {
 	return &input, nil
 }
 
-// ReadStatusLineInputWithDeps reads and parses statusline input with explicit dependencies.
-func ReadStatusLineInputWithDeps(reader InputReader) (*StatusLineInput, error) {
+// ReadStatusLineInput reads and parses statusline input.
+func ReadStatusLineInput(reader InputReader) (*StatusLineInput, error) {
 	data, err := reader.ReadAll()
 	if err != nil {
 		return nil, fmt.Errorf("reading stdin: %w", err)

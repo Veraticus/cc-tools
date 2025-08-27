@@ -15,9 +15,9 @@ import (
 func TestExecutorEdgeCases(t *testing.T) {
 	t.Run("Execute with nil command", func(t *testing.T) {
 		testDeps := createTestDependencies()
-		executor := NewCommandExecutorWithDeps(5, false, testDeps.Dependencies)
+		executor := NewCommandExecutor(5, false, testDeps.Dependencies)
 
-		result := executor.Execute(nil)
+		result := executor.Execute(context.Background(), nil)
 		if result.Success {
 			t.Error("Expected failure for nil command")
 		}
@@ -35,7 +35,7 @@ func TestExecutorEdgeCases(t *testing.T) {
 			return nil, context.DeadlineExceeded
 		}
 
-		executor := NewCommandExecutorWithDeps(1, false, testDeps.Dependencies)
+		executor := NewCommandExecutor(1, false, testDeps.Dependencies)
 		cmd := &DiscoveredCommand{
 			Type:       CommandTypeLint,
 			Command:    "sleep",
@@ -43,7 +43,7 @@ func TestExecutorEdgeCases(t *testing.T) {
 			WorkingDir: "/project",
 		}
 
-		exitCode, message := executor.ExecuteForHook(cmd, CommandTypeLint)
+		exitCode, message := executor.ExecuteForHook(context.Background(), cmd, CommandTypeLint)
 		if exitCode != 2 {
 			t.Errorf("Expected exit code 2, got %d", exitCode)
 		}
@@ -59,7 +59,7 @@ func TestExecutorEdgeCases(t *testing.T) {
 			return nil, &exec.ExitError{}
 		}
 
-		executor := NewCommandExecutorWithDeps(5, false, testDeps.Dependencies)
+		executor := NewCommandExecutor(5, false, testDeps.Dependencies)
 		cmd := &DiscoveredCommand{
 			Type:       CommandType("unknown"),
 			Command:    "test",
@@ -67,7 +67,7 @@ func TestExecutorEdgeCases(t *testing.T) {
 			WorkingDir: "/project",
 		}
 
-		exitCode, message := executor.ExecuteForHook(cmd, CommandType("unknown"))
+		exitCode, message := executor.ExecuteForHook(context.Background(), cmd, CommandType("unknown"))
 		if exitCode != 2 {
 			t.Errorf("Expected exit code 2, got %d", exitCode)
 		}
@@ -83,7 +83,7 @@ func TestExecutorEdgeCases(t *testing.T) {
 			return []byte("success"), nil
 		}
 
-		executor := NewCommandExecutorWithDeps(5, true, testDeps.Dependencies) // debug=true
+		executor := NewCommandExecutor(5, true, testDeps.Dependencies) // debug=true
 		cmd := &DiscoveredCommand{
 			Type:       CommandType("unknown"), // Use unknown type to test default case
 			Command:    "echo",
@@ -91,7 +91,7 @@ func TestExecutorEdgeCases(t *testing.T) {
 			WorkingDir: "/project",
 		}
 
-		exitCode, message := executor.ExecuteForHook(cmd, CommandType("unknown"))
+		exitCode, message := executor.ExecuteForHook(context.Background(), cmd, CommandType("unknown"))
 		if exitCode != 2 {
 			t.Errorf("Expected exit code 2 with debug, got %d", exitCode)
 		}
@@ -118,7 +118,7 @@ func TestDiscoveryEdgeCases(t *testing.T) {
 		}
 
 		discovery := NewCommandDiscovery("/project", 20, testDeps.Dependencies)
-		cmd, err := discovery.DiscoverCommand(CommandTypeLint, "/project")
+		cmd, err := discovery.DiscoverCommand(context.Background(), CommandTypeLint, "/project")
 
 		if err == nil {
 			t.Fatal("Expected error when package.json script not found")
@@ -146,7 +146,7 @@ func TestDiscoveryEdgeCases(t *testing.T) {
 		}
 
 		discovery := NewCommandDiscovery("/project", 20, testDeps.Dependencies)
-		cmd, err := discovery.DiscoverCommand(CommandTypeTest, "/project")
+		cmd, err := discovery.DiscoverCommand(context.Background(), CommandTypeTest, "/project")
 
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
@@ -174,7 +174,7 @@ func TestDiscoveryEdgeCases(t *testing.T) {
 		}
 
 		discovery := NewCommandDiscovery("/project", 20, testDeps.Dependencies)
-		cmd, err := discovery.DiscoverCommand(CommandTypeLint, "/project")
+		cmd, err := discovery.DiscoverCommand(context.Background(), CommandTypeLint, "/project")
 
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
@@ -199,7 +199,7 @@ func TestDiscoveryEdgeCases(t *testing.T) {
 		}
 
 		discovery := NewCommandDiscovery("/project", 20, testDeps.Dependencies)
-		cmd, err := discovery.DiscoverCommand(CommandTypeLint, "/project")
+		cmd, err := discovery.DiscoverCommand(context.Background(), CommandTypeLint, "/project")
 
 		// Should return nil when no linters are found
 		if err == nil {
@@ -218,7 +218,7 @@ func TestDiscoveryEdgeCases(t *testing.T) {
 		}
 
 		discovery := NewCommandDiscovery("/", 20, testDeps.Dependencies)
-		cmd, err := discovery.DiscoverCommand(CommandTypeLint, "/")
+		cmd, err := discovery.DiscoverCommand(context.Background(), CommandTypeLint, "/")
 
 		if err == nil {
 			t.Fatal("Expected error at filesystem root")
@@ -247,7 +247,7 @@ func TestRunSmartHookEdgeCases(t *testing.T) {
 			return nil, os.ErrNotExist
 		}
 
-		exitCode := RunSmartHookWithDeps(CommandTypeLint, false, 20, 5, testDeps.Dependencies)
+		exitCode := RunSmartHook(context.Background(), CommandTypeLint, false, 20, 5, testDeps.Dependencies)
 		if exitCode != 0 {
 			t.Errorf("Expected exit code 0, got %d", exitCode)
 		}
@@ -287,7 +287,13 @@ func TestRunSmartHookEdgeCases(t *testing.T) {
 			return nil
 		}
 
-		exitCode := RunSmartHookWithDeps(CommandTypeLint, true, 20, 5, testDeps.Dependencies) // debug=true
+		// Run with debug=true
+		exitCode := RunSmartHook(
+			context.Background(),
+			CommandTypeLint,
+			true, 20, 5,
+			testDeps.Dependencies,
+		)
 		if exitCode != 0 {
 			t.Errorf("Expected exit code 0, got %d", exitCode)
 		}
@@ -305,7 +311,13 @@ func TestRunSmartHookEdgeCases(t *testing.T) {
 			}`), nil
 		}
 
-		exitCode := RunSmartHookWithDeps(CommandTypeLint, true, 20, 5, testDeps.Dependencies) // debug=true
+		// Run with debug=true
+		exitCode := RunSmartHook(
+			context.Background(),
+			CommandTypeLint,
+			true, 20, 5,
+			testDeps.Dependencies,
+		)
 		if exitCode != 0 {
 			t.Errorf("Expected exit code 0, got %d", exitCode)
 		}
@@ -346,7 +358,13 @@ func TestRunSmartHookEdgeCases(t *testing.T) {
 
 		testDeps.MockProcess.getPIDFunc = func() int { return 99999 }
 
-		exitCode := RunSmartHookWithDeps(CommandTypeLint, true, 20, 5, testDeps.Dependencies) // debug=true
+		// Run with debug=true
+		exitCode := RunSmartHook(
+			context.Background(),
+			CommandTypeLint,
+			true, 20, 5,
+			testDeps.Dependencies,
+		)
 		if exitCode != 0 {
 			t.Errorf("Expected exit code 0, got %d", exitCode)
 		}
@@ -404,7 +422,7 @@ func TestReadStatusLineInputEdgeCases(t *testing.T) {
 			},
 		}
 
-		input, err := ReadStatusLineInputWithDeps(reader)
+		input, err := ReadStatusLineInput(reader)
 		if err == nil {
 			t.Fatal("Expected error for read failure")
 		}
@@ -428,7 +446,7 @@ func TestLockManagerCleanupOnExit(t *testing.T) {
 			return nil
 		}
 
-		lm := NewLockManagerWithDeps("/project", "test", 5, testDeps.Dependencies)
+		lm := NewLockManager("/project", "test", 5, testDeps.Dependencies)
 		lm.cleanupOnExit = false // Disable cleanup
 
 		err := lm.Release()
@@ -449,7 +467,7 @@ func TestLockManagerCleanupOnExit(t *testing.T) {
 		}
 		testDeps.MockClock.nowFunc = func() time.Time { return time.Unix(1700000000, 0) }
 
-		lm := NewLockManagerWithDeps("/project", "test", 5, testDeps.Dependencies)
+		lm := NewLockManager("/project", "test", 5, testDeps.Dependencies)
 
 		err := lm.Release()
 		if err == nil {

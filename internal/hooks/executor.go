@@ -11,6 +11,11 @@ import (
 	"github.com/Veraticus/cc-tools/internal/shared"
 )
 
+const (
+	// ExitCodeShowMessage is used to signal that a message should be shown to Claude.
+	ExitCodeShowMessage = 2
+)
+
 // ExecutorResult represents the result of executing a command.
 type ExecutorResult struct {
 	Success  bool
@@ -28,12 +33,7 @@ type CommandExecutor struct {
 }
 
 // NewCommandExecutor creates a new command executor.
-func NewCommandExecutor(timeoutSecs int, debug bool) *CommandExecutor {
-	return NewCommandExecutorWithDeps(timeoutSecs, debug, nil)
-}
-
-// NewCommandExecutorWithDeps creates a new command executor with explicit dependencies.
-func NewCommandExecutorWithDeps(timeoutSecs int, debug bool, deps *Dependencies) *CommandExecutor {
+func NewCommandExecutor(timeoutSecs int, debug bool, deps *Dependencies) *CommandExecutor {
 	if deps == nil {
 		deps = NewDefaultDependencies()
 	}
@@ -44,8 +44,8 @@ func NewCommandExecutorWithDeps(timeoutSecs int, debug bool, deps *Dependencies)
 	}
 }
 
-// Execute runs the discovered command with timeout.
-func (ce *CommandExecutor) Execute(cmd *DiscoveredCommand) *ExecutorResult {
+// Execute runs the discovered command with the given context and timeout.
+func (ce *CommandExecutor) Execute(ctx context.Context, cmd *DiscoveredCommand) *ExecutorResult {
 	if cmd == nil {
 		return &ExecutorResult{
 			Success: false,
@@ -54,7 +54,7 @@ func (ce *CommandExecutor) Execute(cmd *DiscoveredCommand) *ExecutorResult {
 	}
 
 	// Create context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), ce.timeout)
+	ctx, cancel := context.WithTimeout(ctx, ce.timeout)
 	defer cancel()
 
 	// Run the command through dependencies
@@ -91,14 +91,18 @@ func (ce *CommandExecutor) Execute(cmd *DiscoveredCommand) *ExecutorResult {
 	}
 }
 
-// ExecuteForHook executes a command and formats output for hook response.
-func (ce *CommandExecutor) ExecuteForHook(cmd *DiscoveredCommand, hookType CommandType) (int, string) {
-	result := ce.Execute(cmd)
+// ExecuteForHook executes a command with context and formats output for hook response.
+func (ce *CommandExecutor) ExecuteForHook(
+	ctx context.Context,
+	cmd *DiscoveredCommand,
+	hookType CommandType,
+) (int, string) {
+	result := ce.Execute(ctx, cmd)
 
 	if result.TimedOut {
 		message := shared.RawErrorStyle.Render(
 			fmt.Sprintf("⛔ BLOCKING: Command timed out after %v", ce.timeout))
-		return 2, message //nolint:mnd // Exit code 2 signals blocking error to Claude
+		return ExitCodeShowMessage, message
 	}
 
 	if result.Success {
@@ -113,7 +117,7 @@ func (ce *CommandExecutor) ExecuteForHook(cmd *DiscoveredCommand, hookType Comma
 			default:
 				message = shared.RawSuccessStyle.Render("✓ Command succeeded")
 			}
-			return 2, message //nolint:mnd // Exit code 2 shows message to Claude
+			return ExitCodeShowMessage, message
 		}
 		return 0, "" // Silent success when not in debug mode
 	}
@@ -135,22 +139,24 @@ func (ce *CommandExecutor) ExecuteForHook(cmd *DiscoveredCommand, hookType Comma
 			fmt.Sprintf("⛔ BLOCKING: Command failed: %s", cmdStr))
 	}
 
-	return 2, message //nolint:mnd // Exit code 2 signals blocking error to Claude
+	return ExitCodeShowMessage, message
 }
 
 // RunSmartHook is the main entry point for smart-lint and smart-test hooks.
-func RunSmartHook(hookType CommandType, debug bool, timeoutSecs int, cooldownSecs int) int {
-	return RunSmartHookWithDeps(hookType, debug, timeoutSecs, cooldownSecs, nil)
-}
-
-// RunSmartHookWithDeps runs the smart hook with explicit dependencies.
-func RunSmartHookWithDeps(hookType CommandType, debug bool, timeoutSecs int, cooldownSecs int, deps *Dependencies) int {
+func RunSmartHook(
+	ctx context.Context,
+	hookType CommandType,
+	debug bool,
+	timeoutSecs int,
+	cooldownSecs int,
+	deps *Dependencies,
+) int {
 	if deps == nil {
 		deps = NewDefaultDependencies()
 	}
 
 	// Read and validate input
-	input, err := ReadHookInputWithDeps(deps.Input)
+	input, err := ReadHookInput(deps.Input)
 	if err != nil {
 		handleInputError(err, debug, deps.Stderr)
 		return 0
@@ -171,7 +177,7 @@ func RunSmartHookWithDeps(hookType CommandType, debug bool, timeoutSecs int, coo
 
 	// Find project root
 	fileDir := filepath.Dir(filePath)
-	projectRoot, err := shared.FindProjectRoot(fileDir)
+	projectRoot, err := shared.FindProjectRoot(fileDir, nil)
 	if err != nil {
 		if debug {
 			_, _ = fmt.Fprintf(deps.Stderr, "Error finding project root: %v\n", err)
@@ -180,7 +186,7 @@ func RunSmartHookWithDeps(hookType CommandType, debug bool, timeoutSecs int, coo
 	}
 
 	// Acquire lock
-	lockMgr := NewLockManagerWithDeps(projectRoot, string(hookType), cooldownSecs, deps)
+	lockMgr := NewLockManager(projectRoot, string(hookType), cooldownSecs, deps)
 	if !acquireLock(lockMgr, debug, deps.Stderr) {
 		return 0
 	}
@@ -189,7 +195,7 @@ func RunSmartHookWithDeps(hookType CommandType, debug bool, timeoutSecs int, coo
 	}()
 
 	// Discover and execute command
-	return discoverAndExecute(projectRoot, fileDir, hookType, timeoutSecs, debug, deps)
+	return discoverAndExecute(ctx, projectRoot, fileDir, hookType, timeoutSecs, debug, deps)
 }
 
 // handleInputError handles errors from reading hook input.
@@ -241,6 +247,7 @@ func acquireLock(lockMgr *LockManager, debug bool, stderr OutputWriter) bool {
 
 // discoverAndExecute discovers and executes the appropriate command.
 func discoverAndExecute(
+	ctx context.Context,
 	projectRoot, fileDir string,
 	hookType CommandType,
 	timeoutSecs int,
@@ -249,7 +256,7 @@ func discoverAndExecute(
 ) int {
 	// Discover command
 	discovery := NewCommandDiscovery(projectRoot, timeoutSecs, deps)
-	cmd, err := discovery.DiscoverCommand(hookType, fileDir)
+	cmd, err := discovery.DiscoverCommand(ctx, hookType, fileDir)
 	if err != nil {
 		if debug {
 			_, _ = fmt.Fprintf(deps.Stderr, "Error discovering command: %v\n", err)
@@ -264,8 +271,8 @@ func discoverAndExecute(
 	}
 
 	// Execute command
-	executor := NewCommandExecutorWithDeps(timeoutSecs, debug, deps)
-	exitCode, message := executor.ExecuteForHook(cmd, hookType)
+	executor := NewCommandExecutor(timeoutSecs, debug, deps)
+	exitCode, message := executor.ExecuteForHook(ctx, cmd, hookType)
 
 	if message != "" {
 		_, _ = fmt.Fprintln(deps.Stderr, message)

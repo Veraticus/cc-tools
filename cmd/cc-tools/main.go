@@ -3,6 +3,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -198,7 +199,7 @@ func runLintDirect() (string, error) {
 		cooldownSecs = 2
 	)
 
-	exitCode := hooks.RunSmartHook(hooks.CommandTypeLint, debug, timeoutSecs, cooldownSecs)
+	exitCode := hooks.RunSmartHook(context.Background(), hooks.CommandTypeLint, debug, timeoutSecs, cooldownSecs, nil)
 	if exitCode != 0 {
 		return "", fmt.Errorf("lint failed with exit code %d", exitCode)
 	}
@@ -212,7 +213,7 @@ func runTestDirect() (string, error) {
 		cooldownSecs = 2
 	)
 
-	exitCode := hooks.RunSmartHook(hooks.CommandTypeTest, debug, timeoutSecs, cooldownSecs)
+	exitCode := hooks.RunSmartHook(context.Background(), hooks.CommandTypeTest, debug, timeoutSecs, cooldownSecs, nil)
 	if exitCode != 0 {
 		return "", fmt.Errorf("test failed with exit code %d", exitCode)
 	}

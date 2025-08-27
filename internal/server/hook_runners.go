@@ -28,7 +28,7 @@ func NewHookLintRunner(debug bool, timeoutSecs, cooldownSecs int) *HookLintRunne
 }
 
 // Run executes the lint hook with the given input.
-func (r *HookLintRunner) Run(_ context.Context, input io.Reader) (io.Reader, error) {
+func (r *HookLintRunner) Run(ctx context.Context, input io.Reader) (io.Reader, error) {
 	// Read input
 	inputBytes, err := io.ReadAll(input)
 	if err != nil {
@@ -46,8 +46,7 @@ func (r *HookLintRunner) Run(_ context.Context, input io.Reader) (io.Reader, err
 	deps.Stderr = outputWriter
 
 	// Run the hook
-	//nolint:contextcheck // hooks package doesn't support context yet
-	exitCode := hooks.RunSmartHookWithDeps(hooks.CommandTypeLint, r.debug, r.timeoutSecs, r.cooldownSecs, deps)
+	exitCode := hooks.RunSmartHook(ctx, hooks.CommandTypeLint, r.debug, r.timeoutSecs, r.cooldownSecs, deps)
 
 	// Check exit code
 	if exitCode != 0 {
@@ -79,7 +78,7 @@ func NewHookTestRunner(debug bool, timeoutSecs, cooldownSecs int) *HookTestRunne
 }
 
 // Run executes the test hook with the given input.
-func (r *HookTestRunner) Run(_ context.Context, input io.Reader) (io.Reader, error) {
+func (r *HookTestRunner) Run(ctx context.Context, input io.Reader) (io.Reader, error) {
 	// Read input
 	inputBytes, err := io.ReadAll(input)
 	if err != nil {
@@ -97,8 +96,7 @@ func (r *HookTestRunner) Run(_ context.Context, input io.Reader) (io.Reader, err
 	deps.Stderr = outputWriter
 
 	// Run the hook
-	//nolint:contextcheck // hooks package doesn't support context yet
-	exitCode := hooks.RunSmartHookWithDeps(hooks.CommandTypeTest, r.debug, r.timeoutSecs, r.cooldownSecs, deps)
+	exitCode := hooks.RunSmartHook(ctx, hooks.CommandTypeTest, r.debug, r.timeoutSecs, r.cooldownSecs, deps)
 
 	// Check exit code
 	if exitCode != 0 {

@@ -54,9 +54,9 @@ func (m mockFileInfo) Size() int64        { return m.size }
 func (m mockFileInfo) Mode() os.FileMode  { return m.mode }
 func (m mockFileInfo) ModTime() time.Time { return m.modTime }
 func (m mockFileInfo) IsDir() bool        { return m.isDir }
-func (m mockFileInfo) Sys() any           { return nil }
+func (m mockFileInfo) Sys() any           { return nil } //nolint:ireturn // os.FileInfo interface requirement
 
-func TestFindProjectRootWithDeps(t *testing.T) {
+func TestFindProjectRoot(t *testing.T) {
 	tests := []struct {
 		name      string
 		startDir  string
@@ -236,7 +236,7 @@ func TestFindProjectRootWithDeps(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			deps := &Dependencies{FS: tt.mockFS}
-			result, err := FindProjectRootWithDeps(tt.startDir, deps)
+			result, err := FindProjectRoot(tt.startDir, deps)
 
 			if tt.expectErr {
 				if err == nil {
@@ -257,19 +257,7 @@ func TestFindProjectRootWithDeps(t *testing.T) {
 	}
 }
 
-func TestFindProjectRoot(t *testing.T) {
-	// Test the convenience wrapper - just ensure it doesn't panic
-	// We can't mock the real filesystem, but we can test it doesn't crash
-	result, err := FindProjectRoot("")
-	if err != nil {
-		// This is okay - might fail in test environment
-		t.Logf("FindProjectRoot returned error (expected in test env): %v", err)
-	} else {
-		t.Logf("FindProjectRoot found: %s", result)
-	}
-}
-
-func TestDetectProjectTypeWithDeps(t *testing.T) {
+func TestDetectProjectType(t *testing.T) {
 	tests := []struct {
 		name       string
 		projectDir string
@@ -452,7 +440,7 @@ func TestDetectProjectTypeWithDeps(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			deps := &Dependencies{FS: tt.mockFS}
-			result := DetectProjectTypeWithDeps(tt.projectDir, deps)
+			result := DetectProjectType(tt.projectDir, deps)
 
 			if len(result) != len(tt.expected) {
 				t.Errorf("expected %v, got %v", tt.expected, result)
@@ -469,15 +457,7 @@ func TestDetectProjectTypeWithDeps(t *testing.T) {
 	}
 }
 
-func TestDetectProjectType(t *testing.T) {
-	// Test the convenience wrapper
-	result := DetectProjectType("/nonexistent")
-	if len(result) != 1 || result[0] != "unknown" {
-		t.Logf("DetectProjectType returned: %v", result)
-	}
-}
-
-func TestGetPackageManagerWithDeps(t *testing.T) {
+func TestGetPackageManager(t *testing.T) {
 	tests := []struct {
 		name       string
 		projectDir string
@@ -538,20 +518,12 @@ func TestGetPackageManagerWithDeps(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			deps := &Dependencies{FS: tt.mockFS}
-			result := GetPackageManagerWithDeps(tt.projectDir, deps)
+			result := GetPackageManager(tt.projectDir, deps)
 
 			if result != tt.expected {
 				t.Errorf("expected %q, got %q", tt.expected, result)
 			}
 		})
-	}
-}
-
-func TestGetPackageManager(t *testing.T) {
-	// Test the convenience wrapper - should default to npm
-	result := GetPackageManager("/nonexistent")
-	if result != "npm" {
-		t.Errorf("expected npm, got %s", result)
 	}
 }
 
@@ -677,7 +649,7 @@ func TestFileExistsWithDeps(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			deps := &Dependencies{FS: tt.mockFS}
-			result := fileExistsWithDeps(tt.path, deps)
+			result := fileExists(tt.path, deps)
 			if result != tt.expected {
 				t.Errorf("expected %v, got %v", tt.expected, result)
 			}
@@ -687,7 +659,7 @@ func TestFileExistsWithDeps(t *testing.T) {
 
 func TestFileExists(t *testing.T) {
 	// Test convenience wrapper - just ensure it doesn't panic
-	result := fileExists("/probably/nonexistent/file.txt")
+	result := fileExists("/probably/nonexistent/file.txt", nil)
 	if result {
 		t.Log("Unexpectedly found file /probably/nonexistent/file.txt")
 	}

@@ -2,6 +2,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -45,7 +46,8 @@ func (c *Client) Call(method string, input string) (string, map[string]string, e
 	}
 
 	// Connect to server
-	conn, err := net.DialTimeout("unix", c.socketPath, dialTimeout) //nolint:noctx // Unix socket doesn't need context
+	d := &net.Dialer{Timeout: dialTimeout}
+	conn, err := d.DialContext(context.Background(), "unix", c.socketPath)
 	if err != nil {
 		return "", nil, fmt.Errorf("connect to server: %w", err)
 	}

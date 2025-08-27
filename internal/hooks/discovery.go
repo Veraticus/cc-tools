@@ -27,11 +27,6 @@ type DiscoveredCommand struct {
 	Source     string // Where it was found (e.g., "Makefile", "package.json")
 }
 
-// contextWithTimeout creates a context with timeout in seconds.
-func contextWithTimeout(timeoutSecs int) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), time.Duration(timeoutSecs)*time.Second)
-}
-
 // CommandDiscovery handles discovering project commands with injected dependencies.
 type CommandDiscovery struct {
 	projectRoot string
@@ -52,7 +47,11 @@ func NewCommandDiscovery(projectRoot string, timeoutSecs int, deps *Dependencies
 }
 
 // DiscoverCommand searches for and returns a command of the specified type.
-func (cd *CommandDiscovery) DiscoverCommand(cmdType CommandType, startDir string) (*DiscoveredCommand, error) {
+func (cd *CommandDiscovery) DiscoverCommand(
+	ctx context.Context,
+	cmdType CommandType,
+	startDir string,
+) (*DiscoveredCommand, error) {
 	currentDir := startDir
 	if currentDir == "" {
 		currentDir = cd.projectRoot
@@ -61,27 +60,27 @@ func (cd *CommandDiscovery) DiscoverCommand(cmdType CommandType, startDir string
 	// Walk up from current directory to project root
 	for {
 		// Check for Makefile
-		if cmd := cd.checkMakefile(currentDir, cmdType); cmd != nil {
+		if cmd := cd.checkMakefile(ctx, currentDir, cmdType); cmd != nil {
 			return cmd, nil
 		}
 
 		// Check for justfile
-		if cmd := cd.checkJustfile(currentDir, cmdType); cmd != nil {
+		if cmd := cd.checkJustfile(ctx, currentDir, cmdType); cmd != nil {
 			return cmd, nil
 		}
 
 		// Check for package.json (Node.js)
-		if cmd := cd.checkPackageJSON(currentDir, cmdType); cmd != nil {
+		if cmd := cd.checkPackageJSON(ctx, currentDir, cmdType); cmd != nil {
 			return cmd, nil
 		}
 
 		// Check for scripts directory
-		if cmd := cd.checkScriptsDir(currentDir, cmdType); cmd != nil {
+		if cmd := cd.checkScriptsDir(ctx, currentDir, cmdType); cmd != nil {
 			return cmd, nil
 		}
 
 		// Check for language-specific tools
-		if cmd := cd.checkLanguageSpecific(currentDir, cmdType); cmd != nil {
+		if cmd := cd.checkLanguageSpecific(ctx, currentDir, cmdType); cmd != nil {
 			return cmd, nil
 		}
 
@@ -102,7 +101,11 @@ func (cd *CommandDiscovery) DiscoverCommand(cmdType CommandType, startDir string
 }
 
 // checkMakefile checks for Makefile targets.
-func (cd *CommandDiscovery) checkMakefile(dir string, cmdType CommandType) *DiscoveredCommand {
+func (cd *CommandDiscovery) checkMakefile(
+	ctx context.Context,
+	dir string,
+	cmdType CommandType,
+) *DiscoveredCommand {
 	makefiles := []string{"Makefile", "makefile"}
 
 	for _, makefile := range makefiles {
@@ -113,8 +116,8 @@ func (cd *CommandDiscovery) checkMakefile(dir string, cmdType CommandType) *Disc
 
 		target := string(cmdType)
 		// Check if target exists using make -n (dry run)
-		ctx, cancel := contextWithTimeout(cd.timeout)
-		_, err := cd.deps.Runner.RunContext(ctx, dir, "make", "-f", path, "-n", target)
+		timeoutCtx, cancel := context.WithTimeout(ctx, time.Duration(cd.timeout)*time.Second)
+		_, err := cd.deps.Runner.RunContext(timeoutCtx, dir, "make", "-f", path, "-n", target)
 		cancel()
 		if err == nil {
 			return &DiscoveredCommand{
@@ -131,7 +134,11 @@ func (cd *CommandDiscovery) checkMakefile(dir string, cmdType CommandType) *Disc
 }
 
 // checkJustfile checks for justfile recipes.
-func (cd *CommandDiscovery) checkJustfile(dir string, cmdType CommandType) *DiscoveredCommand {
+func (cd *CommandDiscovery) checkJustfile(
+	ctx context.Context,
+	dir string,
+	cmdType CommandType,
+) *DiscoveredCommand {
 	justfiles := []string{"justfile", "Justfile", ".justfile"}
 
 	for _, justfile := range justfiles {
@@ -142,8 +149,8 @@ func (cd *CommandDiscovery) checkJustfile(dir string, cmdType CommandType) *Disc
 
 		recipe := string(cmdType)
 		// Check if recipe exists using just --show
-		ctx, cancel := contextWithTimeout(cd.timeout)
-		_, err := cd.deps.Runner.RunContext(ctx, dir, "just", "--justfile", path, "--show", recipe)
+		timeoutCtx, cancel := context.WithTimeout(ctx, time.Duration(cd.timeout)*time.Second)
+		_, err := cd.deps.Runner.RunContext(timeoutCtx, dir, "just", "--justfile", path, "--show", recipe)
 		cancel()
 		if err == nil {
 			return &DiscoveredCommand{
@@ -160,7 +167,11 @@ func (cd *CommandDiscovery) checkJustfile(dir string, cmdType CommandType) *Disc
 }
 
 // checkPackageJSON checks for npm/yarn/pnpm scripts.
-func (cd *CommandDiscovery) checkPackageJSON(dir string, cmdType CommandType) *DiscoveredCommand {
+func (cd *CommandDiscovery) checkPackageJSON(
+	ctx context.Context,
+	dir string,
+	cmdType CommandType,
+) *DiscoveredCommand {
 	packagePath := filepath.Join(dir, "package.json")
 	if _, err := cd.deps.FS.Stat(packagePath); err != nil {
 		return nil
@@ -168,10 +179,10 @@ func (cd *CommandDiscovery) checkPackageJSON(dir string, cmdType CommandType) *D
 
 	// Use jq to check if script exists
 	script := string(cmdType)
-	ctx, cancel := contextWithTimeout(cd.timeout)
+	timeoutCtx, cancel := context.WithTimeout(ctx, time.Duration(cd.timeout)*time.Second)
 	defer cancel()
 
-	if _, err := cd.deps.Runner.RunContext(ctx, dir, "jq", "-e",
+	if _, err := cd.deps.Runner.RunContext(timeoutCtx, dir, "jq", "-e",
 		fmt.Sprintf(".scripts.\"%s\"", script), packagePath); err != nil {
 		return nil
 	}
@@ -189,7 +200,11 @@ func (cd *CommandDiscovery) checkPackageJSON(dir string, cmdType CommandType) *D
 }
 
 // checkScriptsDir checks for executable scripts in scripts/ directory.
-func (cd *CommandDiscovery) checkScriptsDir(dir string, cmdType CommandType) *DiscoveredCommand {
+func (cd *CommandDiscovery) checkScriptsDir(
+	_ context.Context,
+	dir string,
+	cmdType CommandType,
+) *DiscoveredCommand {
 	scriptPath := filepath.Join(dir, "scripts", string(cmdType))
 
 	info, err := cd.deps.FS.Stat(scriptPath)
@@ -212,22 +227,26 @@ func (cd *CommandDiscovery) checkScriptsDir(dir string, cmdType CommandType) *Di
 }
 
 // checkLanguageSpecific checks for language-specific tools.
-func (cd *CommandDiscovery) checkLanguageSpecific(dir string, cmdType CommandType) *DiscoveredCommand {
+func (cd *CommandDiscovery) checkLanguageSpecific(
+	ctx context.Context,
+	dir string,
+	cmdType CommandType,
+) *DiscoveredCommand {
 	// Check for various project markers
 	projectTypes := cd.detectProjectTypes(dir)
 
 	for _, projectType := range projectTypes {
 		switch projectType {
 		case "go":
-			if cmd := cd.checkGoCommands(dir, cmdType); cmd != nil {
+			if cmd := cd.checkGoCommands(ctx, dir, cmdType); cmd != nil {
 				return cmd
 			}
 		case "rust":
-			if cmd := cd.checkRustCommands(dir, cmdType); cmd != nil {
+			if cmd := cd.checkRustCommands(ctx, dir, cmdType); cmd != nil {
 				return cmd
 			}
 		case "python":
-			if cmd := cd.checkPythonCommands(dir, cmdType); cmd != nil {
+			if cmd := cd.checkPythonCommands(ctx, dir, cmdType); cmd != nil {
 				return cmd
 			}
 		}
@@ -237,7 +256,11 @@ func (cd *CommandDiscovery) checkLanguageSpecific(dir string, cmdType CommandTyp
 }
 
 // checkGoCommands checks for Go-specific commands.
-func (cd *CommandDiscovery) checkGoCommands(dir string, cmdType CommandType) *DiscoveredCommand {
+func (cd *CommandDiscovery) checkGoCommands(
+	_ context.Context,
+	dir string,
+	cmdType CommandType,
+) *DiscoveredCommand {
 	// Only check if go.mod exists in this directory
 	if _, err := cd.deps.FS.Stat(filepath.Join(dir, "go.mod")); err != nil {
 		return nil
@@ -277,7 +300,11 @@ func (cd *CommandDiscovery) checkGoCommands(dir string, cmdType CommandType) *Di
 }
 
 // checkRustCommands checks for Rust-specific commands.
-func (cd *CommandDiscovery) checkRustCommands(dir string, cmdType CommandType) *DiscoveredCommand {
+func (cd *CommandDiscovery) checkRustCommands(
+	_ context.Context,
+	dir string,
+	cmdType CommandType,
+) *DiscoveredCommand {
 	// Only check if Cargo.toml exists in this directory
 	if _, err := cd.deps.FS.Stat(filepath.Join(dir, "Cargo.toml")); err != nil {
 		return nil
@@ -306,7 +333,11 @@ func (cd *CommandDiscovery) checkRustCommands(dir string, cmdType CommandType) *
 }
 
 // checkPythonCommands checks for Python-specific commands.
-func (cd *CommandDiscovery) checkPythonCommands(dir string, cmdType CommandType) *DiscoveredCommand {
+func (cd *CommandDiscovery) checkPythonCommands(
+	_ context.Context,
+	dir string,
+	cmdType CommandType,
+) *DiscoveredCommand {
 	// Check if this is a Python project directory
 	pythonMarkers := []string{"pyproject.toml", "setup.py", "requirements.txt"}
 	hasPython := false

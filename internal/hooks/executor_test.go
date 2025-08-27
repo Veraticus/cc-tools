@@ -10,14 +10,14 @@ import (
 	"time"
 )
 
-func TestRunSmartHookWithDeps(t *testing.T) { //nolint:cyclop // table-driven test with many scenarios
+func TestRunSmartHook(t *testing.T) { //nolint:cyclop // table-driven test with many scenarios
 	t.Run("exit code 0 when no input", func(t *testing.T) {
 		testDeps := createTestDependencies()
 
 		// Setup no input
 		testDeps.MockInput.isTerminalFunc = func() bool { return true }
 
-		exitCode := RunSmartHookWithDeps(CommandTypeLint, false, 20, 5, testDeps.Dependencies)
+		exitCode := RunSmartHook(context.Background(), CommandTypeLint, false, 20, 5, testDeps.Dependencies)
 		if exitCode != 0 {
 			t.Errorf("Expected exit code 0, got %d", exitCode)
 		}
@@ -32,7 +32,7 @@ func TestRunSmartHookWithDeps(t *testing.T) { //nolint:cyclop // table-driven te
 			return []byte(`{"hook_event_name": "PreToolUse", "tool_name": "Edit"}`), nil
 		}
 
-		exitCode := RunSmartHookWithDeps(CommandTypeLint, false, 20, 5, testDeps.Dependencies)
+		exitCode := RunSmartHook(context.Background(), CommandTypeLint, false, 20, 5, testDeps.Dependencies)
 		if exitCode != 0 {
 			t.Errorf("Expected exit code 0, got %d", exitCode)
 		}
@@ -47,7 +47,7 @@ func TestRunSmartHookWithDeps(t *testing.T) { //nolint:cyclop // table-driven te
 			return []byte(`{"hook_event_name": "PostToolUse", "tool_name": "Bash"}`), nil
 		}
 
-		exitCode := RunSmartHookWithDeps(CommandTypeLint, false, 20, 5, testDeps.Dependencies)
+		exitCode := RunSmartHook(context.Background(), CommandTypeLint, false, 20, 5, testDeps.Dependencies)
 		if exitCode != 0 {
 			t.Errorf("Expected exit code 0, got %d", exitCode)
 		}
@@ -66,7 +66,7 @@ func TestRunSmartHookWithDeps(t *testing.T) { //nolint:cyclop // table-driven te
 			}`), nil
 		}
 
-		exitCode := RunSmartHookWithDeps(CommandTypeLint, false, 20, 5, testDeps.Dependencies)
+		exitCode := RunSmartHook(context.Background(), CommandTypeLint, false, 20, 5, testDeps.Dependencies)
 		if exitCode != 0 {
 			t.Errorf("Expected exit code 0, got %d", exitCode)
 		}
@@ -105,7 +105,7 @@ func TestRunSmartHookWithDeps(t *testing.T) { //nolint:cyclop // table-driven te
 			return pid == 12345 // Another process holds lock
 		}
 
-		exitCode := RunSmartHookWithDeps(CommandTypeLint, false, 20, 5, testDeps.Dependencies)
+		exitCode := RunSmartHook(context.Background(), CommandTypeLint, false, 20, 5, testDeps.Dependencies)
 		if exitCode != 0 {
 			t.Errorf("Expected exit code 0, got %d", exitCode)
 		}
@@ -151,7 +151,7 @@ func TestRunSmartHookWithDeps(t *testing.T) { //nolint:cyclop // table-driven te
 			return "", fmt.Errorf("not found")
 		}
 
-		exitCode := RunSmartHookWithDeps(CommandTypeLint, false, 20, 5, testDeps.Dependencies)
+		exitCode := RunSmartHook(context.Background(), CommandTypeLint, false, 20, 5, testDeps.Dependencies)
 		if exitCode != 0 {
 			t.Errorf("Expected exit code 0, got %d", exitCode)
 		}
@@ -206,7 +206,7 @@ func TestRunSmartHookWithDeps(t *testing.T) { //nolint:cyclop // table-driven te
 			return nil, fmt.Errorf("command not found")
 		}
 
-		exitCode := RunSmartHookWithDeps(CommandTypeLint, false, 20, 5, testDeps.Dependencies)
+		exitCode := RunSmartHook(context.Background(), CommandTypeLint, false, 20, 5, testDeps.Dependencies)
 		if exitCode != 2 {
 			t.Errorf("Expected exit code 2, got %d", exitCode)
 		}
@@ -264,7 +264,7 @@ func TestRunSmartHookWithDeps(t *testing.T) { //nolint:cyclop // table-driven te
 			return nil, fmt.Errorf("command not found")
 		}
 
-		exitCode := RunSmartHookWithDeps(CommandTypeLint, false, 20, 5, testDeps.Dependencies)
+		exitCode := RunSmartHook(context.Background(), CommandTypeLint, false, 20, 5, testDeps.Dependencies)
 		if exitCode != 0 {
 			t.Errorf("Expected exit code 0, got %d", exitCode)
 		}
@@ -319,7 +319,13 @@ func TestRunSmartHookWithDeps(t *testing.T) { //nolint:cyclop // table-driven te
 			return nil, fmt.Errorf("command not found")
 		}
 
-		exitCode := RunSmartHookWithDeps(CommandTypeLint, true, 20, 5, testDeps.Dependencies) // debug=true
+		// Run with debug=true
+		exitCode := RunSmartHook(
+			context.Background(),
+			CommandTypeLint,
+			true, 20, 5,
+			testDeps.Dependencies,
+		)
 		if exitCode != 2 {
 			t.Errorf("Expected exit code 2, got %d", exitCode)
 		}
@@ -381,7 +387,13 @@ func TestRunSmartHookWithDeps(t *testing.T) { //nolint:cyclop // table-driven te
 			return nil, fmt.Errorf("command not found")
 		}
 
-		exitCode := RunSmartHookWithDeps(CommandTypeLint, false, 1, 5, testDeps.Dependencies) // 1 second timeout
+		// Run with 1 second timeout
+		exitCode := RunSmartHook(
+			context.Background(),
+			CommandTypeLint,
+			false, 1, 5,
+			testDeps.Dependencies,
+		)
 		if exitCode != 2 {
 			t.Errorf("Expected exit code 2, got %d", exitCode)
 		}
@@ -394,7 +406,7 @@ func TestRunSmartHookWithDeps(t *testing.T) { //nolint:cyclop // table-driven te
 	})
 }
 
-func TestCommandExecutorWithDeps(t *testing.T) {
+func TestCommandExecutor(t *testing.T) {
 	t.Run("successful command execution", func(t *testing.T) {
 		testDeps := createTestDependencies()
 
@@ -406,7 +418,7 @@ func TestCommandExecutorWithDeps(t *testing.T) {
 			return nil, fmt.Errorf("unexpected command")
 		}
 
-		executor := NewCommandExecutorWithDeps(5, false, testDeps.Dependencies)
+		executor := NewCommandExecutor(5, false, testDeps.Dependencies)
 		cmd := &DiscoveredCommand{
 			Type:       CommandTypeLint,
 			Command:    "echo",
@@ -414,7 +426,7 @@ func TestCommandExecutorWithDeps(t *testing.T) {
 			WorkingDir: ".",
 		}
 
-		result := executor.Execute(cmd)
+		result := executor.Execute(context.Background(), cmd)
 		if !result.Success {
 			t.Errorf("Expected success, got error: %v", result.Error)
 		}
@@ -439,7 +451,7 @@ func TestCommandExecutorWithDeps(t *testing.T) {
 			return nil, fmt.Errorf("unexpected command")
 		}
 
-		executor := NewCommandExecutorWithDeps(5, false, testDeps.Dependencies)
+		executor := NewCommandExecutor(5, false, testDeps.Dependencies)
 		cmd := &DiscoveredCommand{
 			Type:       CommandTypeLint,
 			Command:    "false",
@@ -447,7 +459,7 @@ func TestCommandExecutorWithDeps(t *testing.T) {
 			WorkingDir: ".",
 		}
 
-		result := executor.Execute(cmd)
+		result := executor.Execute(context.Background(), cmd)
 		if result.Success {
 			t.Error("Expected failure")
 		}
@@ -465,7 +477,7 @@ func TestCommandExecutorWithDeps(t *testing.T) {
 			return []byte("lint errors"), exitErr
 		}
 
-		executor := NewCommandExecutorWithDeps(5, false, testDeps.Dependencies)
+		executor := NewCommandExecutor(5, false, testDeps.Dependencies)
 		cmd := &DiscoveredCommand{
 			Type:       CommandTypeLint,
 			Command:    "make",
@@ -473,7 +485,7 @@ func TestCommandExecutorWithDeps(t *testing.T) {
 			WorkingDir: "/project",
 		}
 
-		exitCode, message := executor.ExecuteForHook(cmd, CommandTypeLint)
+		exitCode, message := executor.ExecuteForHook(context.Background(), cmd, CommandTypeLint)
 		if exitCode != 2 {
 			t.Errorf("Expected exit code 2, got %d", exitCode)
 		}
@@ -494,7 +506,7 @@ func TestCommandExecutorWithDeps(t *testing.T) {
 			return []byte("test failures"), exitErr
 		}
 
-		executor := NewCommandExecutorWithDeps(5, false, testDeps.Dependencies)
+		executor := NewCommandExecutor(5, false, testDeps.Dependencies)
 		cmd := &DiscoveredCommand{
 			Type:       CommandTypeTest,
 			Command:    "go",
@@ -502,7 +514,7 @@ func TestCommandExecutorWithDeps(t *testing.T) {
 			WorkingDir: "/project",
 		}
 
-		exitCode, message := executor.ExecuteForHook(cmd, CommandTypeTest)
+		exitCode, message := executor.ExecuteForHook(context.Background(), cmd, CommandTypeTest)
 		if exitCode != 2 {
 			t.Errorf("Expected exit code 2, got %d", exitCode)
 		}

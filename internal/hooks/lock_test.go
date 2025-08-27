@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-func TestLockManagerWithDeps(t *testing.T) {
+func TestLockManagerWithMocks(t *testing.T) {
 	t.Run("successful lock acquisition", func(t *testing.T) {
 		testDeps := createTestDependencies()
 
@@ -22,7 +22,7 @@ func TestLockManagerWithDeps(t *testing.T) {
 		testDeps.MockProcess.getPIDFunc = func() int { return 99999 }
 		testDeps.MockClock.nowFunc = func() time.Time { return time.Unix(1700000000, 0) }
 
-		lm := NewLockManagerWithDeps("/project", "test", 5, testDeps.Dependencies)
+		lm := NewLockManager("/project", "test", 5, testDeps.Dependencies)
 
 		acquired, err := lm.TryAcquire()
 		if err != nil {
@@ -46,7 +46,7 @@ func TestLockManagerWithDeps(t *testing.T) {
 			return pid == 12345 // Process 12345 is running
 		}
 
-		lm := NewLockManagerWithDeps("/project", "test", 5, testDeps.Dependencies)
+		lm := NewLockManager("/project", "test", 5, testDeps.Dependencies)
 
 		acquired, err := lm.TryAcquire()
 		if err != nil {
@@ -77,7 +77,7 @@ func TestLockManagerWithDeps(t *testing.T) {
 		}
 		testDeps.MockClock.nowFunc = func() time.Time { return time.Unix(1700000000, 0) }
 
-		lm := NewLockManagerWithDeps("/project", "test", 5, testDeps.Dependencies)
+		lm := NewLockManager("/project", "test", 5, testDeps.Dependencies)
 
 		acquired, err := lm.TryAcquire()
 		if err != nil {
@@ -105,7 +105,7 @@ func TestLockManagerWithDeps(t *testing.T) {
 			return time.Unix(1700000100, 0) // 1 second after completion
 		}
 
-		lm := NewLockManagerWithDeps("/project", "test", 5, testDeps.Dependencies) // 5 second cooldown
+		lm := NewLockManager("/project", "test", 5, testDeps.Dependencies) // 5 second cooldown
 
 		acquired, err := lm.TryAcquire()
 		if err != nil {
@@ -136,7 +136,7 @@ func TestLockManagerWithDeps(t *testing.T) {
 			return time.Unix(1700000100, 0) // 6 seconds after completion
 		}
 
-		lm := NewLockManagerWithDeps("/project", "test", 5, testDeps.Dependencies) // 5 second cooldown
+		lm := NewLockManager("/project", "test", 5, testDeps.Dependencies) // 5 second cooldown
 
 		acquired, err := lm.TryAcquire()
 		if err != nil {
@@ -165,7 +165,7 @@ func TestLockManagerWithDeps(t *testing.T) {
 			return time.Unix(1700000200, 0)
 		}
 
-		lm := NewLockManagerWithDeps("/project", "test", 5, testDeps.Dependencies)
+		lm := NewLockManager("/project", "test", 5, testDeps.Dependencies)
 
 		err := lm.Release()
 		if err != nil {
@@ -191,7 +191,7 @@ func TestLockManagerWithDeps(t *testing.T) {
 		}
 		testDeps.MockProcess.getPIDFunc = func() int { return 99999 }
 
-		lm := NewLockManagerWithDeps("/project", "test", 5, testDeps.Dependencies)
+		lm := NewLockManager("/project", "test", 5, testDeps.Dependencies)
 
 		acquired, err := lm.TryAcquire()
 		if err == nil {
@@ -219,7 +219,7 @@ func TestLockManagerWithDeps(t *testing.T) {
 		testDeps.MockProcess.getPIDFunc = func() int { return 99999 }
 		testDeps.MockClock.nowFunc = func() time.Time { return time.Unix(1700000000, 0) }
 
-		lm := NewLockManagerWithDeps("/project", "test", 5, testDeps.Dependencies)
+		lm := NewLockManager("/project", "test", 5, testDeps.Dependencies)
 
 		acquired, err := lm.TryAcquire()
 		if err != nil {
@@ -250,7 +250,7 @@ func TestLockManagerWithDeps(t *testing.T) {
 		testDeps.MockProcess.getPIDFunc = func() int { return 99999 }
 		testDeps.MockClock.nowFunc = func() time.Time { return time.Unix(1700000000, 0) }
 
-		lm := NewLockManagerWithDeps("/project", "test", 5, testDeps.Dependencies)
+		lm := NewLockManager("/project", "test", 5, testDeps.Dependencies)
 
 		acquired, err := lm.TryAcquire()
 		if err != nil {
