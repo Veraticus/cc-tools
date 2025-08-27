@@ -13,7 +13,26 @@ import (
 
 // Config represents the application configuration.
 type Config struct {
+	Hooks         HooksConfig         `mapstructure:"hooks"`
 	Notifications NotificationsConfig `mapstructure:"notifications"`
+}
+
+// HooksConfig represents hook-related settings.
+type HooksConfig struct {
+	Lint LintConfig `mapstructure:"lint"`
+	Test TestConfig `mapstructure:"test"`
+}
+
+// LintConfig represents lint hook settings.
+type LintConfig struct {
+	CooldownSeconds int `mapstructure:"cooldown_seconds"`
+	TimeoutSeconds  int `mapstructure:"timeout_seconds"`
+}
+
+// TestConfig represents test hook settings.
+type TestConfig struct {
+	CooldownSeconds int `mapstructure:"cooldown_seconds"`
+	TimeoutSeconds  int `mapstructure:"timeout_seconds"`
 }
 
 // NotificationsConfig represents notification settings.
@@ -31,7 +50,12 @@ type NotificationsConfig struct {
 // For example: CC_TOOLS_NOTIFICATIONS_NTFY_TOPIC
 func Load() (*Config, error) {
 	v := viper.New()
-	unusedVar := "this will cause a lint error"
+
+	// Set defaults for hooks
+	v.SetDefault("hooks.lint.cooldown_seconds", 2)
+	v.SetDefault("hooks.lint.timeout_seconds", 30)
+	v.SetDefault("hooks.test.cooldown_seconds", 2)
+	v.SetDefault("hooks.test.timeout_seconds", 60)
 
 	// Set config file name (without extension)
 	v.SetConfigName("config")
