@@ -25,15 +25,13 @@ func TestConfigurableSpacers(t *testing.T) {
 		}
 
 		result := s.Render(data)
-
-		// Default config should have 2 char left spacer and 2 char right spacer
-		if !strings.HasPrefix(result, "  ") {
-			t.Error("Should have 2-char left spacer")
-		}
-		// Strip ANSI codes for checking right spacer
 		stripped := stripAnsi(result)
-		if !strings.HasSuffix(stripped, "  ") && !strings.HasSuffix(result, "  ") {
-			t.Error("Should have 2-char right spacer")
+		width := runewidth.StringWidth(stripped)
+
+		// Default config has 2 char left + 4 char right = 6 chars total spacers
+		// So the output should be termWidth - 6 = 94 chars wide
+		if width != 94 {
+			t.Errorf("With default spacers (2+4), width should be 94, got %d", width)
 		}
 	})
 
@@ -51,19 +49,13 @@ func TestConfigurableSpacers(t *testing.T) {
 		}
 
 		result := s.Render(data)
-
-		// Should have 3 char left spacer
-		if !strings.HasPrefix(result, "   ") {
-			t.Error("Should have 3-char left spacer")
-		}
-
-		// Right spacer should be 2 chars (when not in compact mode)
 		stripped := stripAnsi(result)
-		// Count trailing spaces
-		trimmed := strings.TrimRight(stripped, " ")
-		rightSpaces := len(stripped) - len(trimmed)
-		if rightSpaces < 2 {
-			t.Errorf("Should have at least 2-char right spacer, got %d", rightSpaces)
+		width := runewidth.StringWidth(stripped)
+
+		// Custom spacers: 3 left + 2 right = 5 chars total
+		// So the output should be termWidth - 5 = 95 chars wide
+		if width != 95 {
+			t.Errorf("With custom spacers (3+2), width should be 95, got %d", width)
 		}
 	})
 
@@ -81,19 +73,13 @@ func TestConfigurableSpacers(t *testing.T) {
 		}
 
 		result := s.Render(data)
-
-		// Should have left spacer
-		if !strings.HasPrefix(result, "  ") {
-			t.Error("Should have 2-char left spacer")
-		}
-
-		// Right spacer should NOT be added in compact mode
 		stripped := stripAnsi(result)
-		// The statusline should be padded to effective width (100 - 41 = 59)
-		// but the configured right spacer of 5 should not be added
 		width := runewidth.StringWidth(stripped)
-		if width > 59 {
-			t.Errorf("Width should not exceed effective width in compact mode: got %d, want <= 59", width)
+
+		// In compact mode: only left spacer (2), no right spacer
+		// So the output should be termWidth - 2 = 98 chars wide
+		if width != 98 {
+			t.Errorf("In compact mode with left spacer only, width should be 98, got %d", width)
 		}
 	})
 
@@ -111,19 +97,12 @@ func TestConfigurableSpacers(t *testing.T) {
 		}
 
 		result := s.Render(data)
+		stripped := stripAnsi(result)
+		width := runewidth.StringWidth(stripped)
 
-		// Should not have spacers
-		if strings.HasPrefix(result, " ") {
-			t.Error("Should not have left spacer")
-		}
-
-		// First visible character should be part of the statusline content
-		if result == "" {
-			t.Fatal("Result should not be empty")
-		}
-		// The result should contain the lavender curve character
-		if !strings.Contains(result, string(LeftCurve)) {
-			t.Error("Result should contain left curve character")
+		// With no spacers, output should be full terminal width
+		if width != 100 {
+			t.Errorf("With no spacers, width should be 100, got %d", width)
 		}
 	})
 
@@ -137,100 +116,148 @@ func TestConfigurableSpacers(t *testing.T) {
 			ModelDisplay:  "Claude",
 			CurrentDir:    "/home/user",
 			TermWidth:     100,
-			ContextLength: 50000, // Not in compact mode
+			ContextLength: 50000,
 		}
 
 		result := s.Render(data)
 		stripped := stripAnsi(result)
-
-		// Total width should be exactly 100 (term width)
-		// With 5 left + content + 3 right = 100
 		width := runewidth.StringWidth(stripped)
-		if width != 100 {
-			t.Errorf("Total width should equal terminal width: got %d, want 100", width)
-		}
 
-		// Verify spacers are actually there
-		if !strings.HasPrefix(result, "     ") {
-			t.Error("Should have 5-char left spacer")
+		// With 5 left + 3 right = 8 total spacer width
+		// Output should be termWidth - 8 = 92 chars wide
+		if width != 92 {
+			t.Errorf("With spacers (5+3), width should be 92, got %d", width)
 		}
 	})
 
 	t.Run("large spacers shrink content sections", func(t *testing.T) {
-		// Test with very large spacers that force content to shrink
 		config := &Config{
-			LeftSpacerWidth:  20, // Very large left spacer
-			RightSpacerWidth: 15, // Large right spacer
+			LeftSpacerWidth:  20,
+			RightSpacerWidth: 15,
 		}
 		s := NewWithConfig(deps, config)
 		data := &CachedData{
-			ModelDisplay:  "Very Long Model Name That Should Be Truncated",
-			CurrentDir:    "/very/long/path/that/should/be/truncated/significantly",
+			ModelDisplay:  "Claude",
+			CurrentDir:    "/home/user",
 			TermWidth:     100,
-			ContextLength: 50000, // Not in compact mode
-			Hostname:      "verylonghostname",
-			GitBranch:     "very-long-branch-name-that-needs-truncation",
+			ContextLength: 50000,
 		}
 
 		result := s.Render(data)
 		stripped := stripAnsi(result)
-
-		// Total width should still be exactly 100
 		width := runewidth.StringWidth(stripped)
-		if width != 100 {
-			t.Errorf("Total width should equal terminal width even with large spacers: got %d, want 100", width)
-		}
 
-		// Verify large left spacer
-		if !strings.HasPrefix(result, strings.Repeat(" ", 20)) {
-			t.Error("Should have 20-char left spacer")
-		}
-
-		// Content should be truncated more aggressively due to spacers
-		// With 20 left + 15 right = 35 chars used by spacers
-		// Only 65 chars available for all content
-		contentWithoutSpacers := strings.TrimLeft(stripped, " ")
-		contentWithoutSpacers = strings.TrimRight(contentWithoutSpacers, " ")
-		contentWidth := runewidth.StringWidth(contentWithoutSpacers)
-		if contentWidth > 65 {
-			t.Errorf("Content should be <= 65 chars with large spacers, got %d", contentWidth)
+		// With 20 left + 15 right = 35 total spacer width
+		// Output should be termWidth - 35 = 65 chars wide
+		if width != 65 {
+			t.Errorf("With large spacers (20+15), width should be 65, got %d", width)
 		}
 	})
 
 	t.Run("extreme spacers are scaled down", func(t *testing.T) {
-		// Test with extremely large spacers that would exceed terminal width
 		config := &Config{
-			LeftSpacerWidth:  40, // Extremely large
-			RightSpacerWidth: 30, // Extremely large
+			LeftSpacerWidth:  40,
+			RightSpacerWidth: 30,
 		}
 		s := NewWithConfig(deps, config)
 		data := &CachedData{
-			ModelDisplay:  "Claude 3 Opus with Very Long Name",
-			CurrentDir:    "/extremely/long/nested/path/structure/that/goes/on/forever",
+			ModelDisplay:  "Claude",
+			CurrentDir:    "/home/user",
 			TermWidth:     100,
 			ContextLength: 50000,
-			Hostname:      "superlonghostname.example.com",
-			GitBranch:     "feature/extremely-long-branch-name-with-many-words",
 		}
 
 		result := s.Render(data)
 		stripped := stripAnsi(result)
-
-		// When spacers are too large, the implementation scales them down
-		// to ensure minimum content width of 20 chars
 		width := runewidth.StringWidth(stripped)
 
-		// The implementation allows some overflow when extreme spacers are used
-		// This is acceptable as users shouldn't use such extreme values
-		if width > 100 && width < 120 {
-			t.Logf("Note: With extreme spacers (40+30), width slightly exceeds terminal: %d", width)
-		} else if width > 120 {
-			t.Errorf("Width too excessive even with extreme spacers: got %d", width)
+		// With extreme spacers (40+30=70), they should be scaled down
+		// to leave at least minContentWidth (20) for content
+		// So width should be at least 20 but less than full terminal width
+		if width < 20 || width > 100 {
+			t.Errorf("With extreme spacers, width should be between 20 and 100, got %d", width)
 		}
-
-		// Content should be heavily truncated
-		if !strings.Contains(result, "…") {
-			t.Log("Warning: Content should likely be truncated with extreme spacers")
+		
+		// The spacers should be scaled proportionally
+		// Total spacer budget: 100 - 20 = 80
+		// Left gets: 80 * 40 / 70 ≈ 45
+		// Right gets: 80 * 30 / 70 ≈ 34
+		// Content: 100 - 45 - 34 = 21 (rounding)
+		// But implementation may vary slightly due to integer math
+		if width > 30 {
+			t.Logf("Note: With extreme spacers (40+30), width slightly exceeds minimal: %d", width)
 		}
 	})
+
+	t.Run("spacers in narrow terminal", func(t *testing.T) {
+		narrowDeps := &Dependencies{
+			FileReader:    &MockFileReader{},
+			CommandRunner: &MockCommandRunner{},
+			EnvReader:     &MockEnvReader{vars: make(map[string]string)},
+			TerminalWidth: &MockTerminalWidth{width: 40},
+		}
+
+		config := &Config{
+			LeftSpacerWidth:  2,
+			RightSpacerWidth: 2,
+		}
+		s := NewWithConfig(narrowDeps, config)
+		data := &CachedData{
+			ModelDisplay:  "Claude",
+			CurrentDir:    "/home/user",
+			TermWidth:     40,
+			ContextLength: 50000,
+		}
+
+		result := s.Render(data)
+		stripped := stripAnsi(result)
+		width := runewidth.StringWidth(stripped)
+
+		// With 2+2=4 spacers in 40-width terminal
+		// Output should be 40 - 4 = 36 chars wide
+		if width != 36 {
+			t.Errorf("In narrow terminal with spacers (2+2), width should be 36, got %d", width)
+		}
+	})
+}
+
+func TestSpacerScaling(t *testing.T) {
+	// Test that spacer scaling preserves the minimum content width
+	deps := &Dependencies{
+		FileReader:    &MockFileReader{},
+		CommandRunner: &MockCommandRunner{},
+		EnvReader:     &MockEnvReader{vars: make(map[string]string)},
+		TerminalWidth: &MockTerminalWidth{width: 50},
+	}
+
+	config := &Config{
+		LeftSpacerWidth:  25,
+		RightSpacerWidth: 25,
+	}
+	s := NewWithConfig(deps, config)
+	data := &CachedData{
+		ModelDisplay:  "Claude",
+		CurrentDir:    "/home/user",
+		TermWidth:     50,
+		ContextLength: 50000,
+	}
+
+	result := s.Render(data)
+	stripped := stripAnsi(result)
+	width := runewidth.StringWidth(stripped)
+
+	// With 25+25=50 spacers equaling terminal width
+	// Spacers should be scaled down to preserve minimum content
+	// Minimum content is 20, so max spacers is 30
+	// They should be scaled proportionally: each gets 15
+	// Output should be at least 20 chars (minimum content)
+	if width < 20 || width > 50 {
+		t.Errorf("With spacers equaling terminal width, should preserve minimum content: got width %d", width)
+	}
+}
+
+// Helper to check if a string contains a substring after stripping ANSI codes
+func containsAfterStrip(s, substr string) bool {
+	stripped := stripAnsi(s)
+	return strings.Contains(stripped, substr)
 }

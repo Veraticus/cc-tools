@@ -99,10 +99,11 @@ func TestContextBarPadding(t *testing.T) {
 				result := s.Render(data)
 				stripped := stripAnsi(result)
 
-				// Total width should match terminal width
+				// Total width should match terminal width minus spacers (default: 2+4=6)
 				width := runewidth.StringWidth(stripped)
-				if width != tc.termWidth {
-					t.Errorf("Width mismatch: got %d, want %d", width, tc.termWidth)
+				expectedWidth := tc.termWidth - 6 // Default spacers
+				if width != expectedWidth {
+					t.Errorf("Width mismatch: got %d, want %d", width, expectedWidth)
 				}
 
 				if strings.Contains(result, "Context") {
@@ -129,10 +130,11 @@ func TestContextBarPadding(t *testing.T) {
 		result := s.Render(data)
 		stripped := stripAnsi(result)
 
-		// Should still maintain exact width
+		// Should maintain width minus spacers (default: 2+4=6)
 		width := runewidth.StringWidth(stripped)
-		if width != 50 {
-			t.Errorf("Width should be maintained: got %d, want 50", width)
+		expectedWidth := 50 - 6 // Default spacers
+		if width != expectedWidth {
+			t.Errorf("Width should be maintained: got %d, want %d", width, expectedWidth)
 		}
 
 		// Context bar should not appear if there isn't enough space with padding
@@ -142,7 +144,7 @@ func TestContextBarPadding(t *testing.T) {
 			t.Log("Context bar appeared even in very narrow terminal")
 
 			// Check that the total width is still correct
-			if width != 50 {
+			if width != expectedWidth {
 				t.Error("Context bar broke width constraints")
 			}
 		} else {

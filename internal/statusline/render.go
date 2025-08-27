@@ -20,10 +20,6 @@ func (s *Statusline) Render(data *CachedData) string {
 	// Calculate widths
 	leftSpacerWidth, rightSpacerWidth, contentWidth := s.calculateWidths(termWidth, isCompact)
 	effectiveWidth := termWidth - leftSpacerWidth - rightSpacerWidth
-	if isCompact {
-		const compactModeReservedChars = 41
-		effectiveWidth -= compactModeReservedChars
-	}
 
 	// Debug terminal width
 	if os.Getenv("DEBUG_WIDTH") == "1" {
@@ -63,7 +59,7 @@ func (s *Statusline) Render(data *CachedData) string {
 	// Create middle section (context bar or spacing)
 	middleSection := s.buildMiddleSection(data, middleWidth, isCompact)
 
-	// Combine all sections (no visible spacers - they're just width constraints)
+	// Combine all sections (spacers are width constraints, not visible spaces)
 	// Start with a color reset to ensure clean state regardless of what Claude Code has done
 	result := s.colors.NC() + leftSection + middleSection + rightSection
 
@@ -702,11 +698,7 @@ func (s *Statusline) calculateWidths(termWidth int, isCompact bool) (int, int, i
 		rightSpacer = s.config.RightSpacerWidth
 	}
 
-	const compactModeReservedChars = 41
 	effectiveWidth := termWidth - leftSpacer - rightSpacer
-	if isCompact {
-		effectiveWidth -= compactModeReservedChars
-	}
 	content := effectiveWidth
 
 	const minContentWidth = 20
