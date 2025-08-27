@@ -82,8 +82,8 @@ func runTestCase(tc TestCase, termWidth int) {
 	// Clear cache
 	clearCache()
 
-	// Run Go statusline
-	runStatusline("./build/statusline", input, termWidth)
+	// Run Go statusline (bypass server for testing)
+	runStatusline("./build/cc-tools", input, termWidth)
 }
 
 func setupTestEnvironment(tc TestCase, termWidth int) {
@@ -171,7 +171,7 @@ func runStatusline(command string, input string, termWidth int) {
 		ctx,
 		"bash",
 		"-c",
-		fmt.Sprintf("echo '%s' | CLAUDE_STATUSLINE_WIDTH=%d %s 2>/dev/null", input, termWidth, command),
+		fmt.Sprintf("echo '%s' | CC_TOOLS_NO_SERVER=1 CLAUDE_STATUSLINE_WIDTH=%d %s statusline 2>/dev/null", input, termWidth, command),
 	)
 	output, _ := cmd.Output()
 	if len(output) > 0 {
