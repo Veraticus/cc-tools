@@ -241,7 +241,7 @@ func getContextTokens(tc TestCase) int {
 		halfTokens         = 80000  // 50% of 160k
 		threeQuarterTokens = 120000 // 75% of 160k
 		fullTokens         = 160000 // 100% of 160k
-		compactTokens      = 130000 // Just over compact threshold
+		compactTokens      = 170000 // At compact threshold (85% of 200k)
 	)
 
 	switch {

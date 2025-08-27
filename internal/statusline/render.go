@@ -683,7 +683,9 @@ func (s *Statusline) selectModelIcon() string {
 }
 
 func (s *Statusline) isCompactMode(contextLength int) bool {
-	const compactModeThreshold = 128000
+	const maxContextLength = 200000
+	const compactThresholdPercent = 85
+	compactModeThreshold := (maxContextLength * compactThresholdPercent) / 100
 	return contextLength >= compactModeThreshold
 }
 
@@ -694,7 +696,10 @@ func (s *Statusline) calculateWidths(termWidth int, isCompact bool) (int, int, i
 	}
 
 	rightSpacer := 0
-	if !isCompact && s.config.RightSpacerWidth > 0 {
+	if isCompact {
+		// In compact mode, reserve 40 chars for auto-compact message
+		rightSpacer = 40
+	} else if s.config.RightSpacerWidth > 0 {
 		rightSpacer = s.config.RightSpacerWidth
 	}
 

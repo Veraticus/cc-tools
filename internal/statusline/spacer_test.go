@@ -58,27 +58,27 @@ func TestConfigurableSpacers(t *testing.T) {
 		}
 	})
 
-	t.Run("compact mode hides right spacer", func(t *testing.T) {
+	t.Run("compact mode sets right spacer to 40", func(t *testing.T) {
 		config := &Config{
 			LeftSpacerWidth:  2,
-			RightSpacerWidth: 5, // Large right spacer that should be hidden
+			RightSpacerWidth: 5, // This should be ignored in compact mode
 		}
 		s := NewWithConfig(deps, config)
 		data := &CachedData{
 			ModelDisplay:  "Claude",
 			CurrentDir:    "/home/user",
 			TermWidth:     100,
-			ContextLength: 130000, // In compact mode (>= 128000)
+			ContextLength: 170000, // In compact mode (>= 85% of 200k = 170k)
 		}
 
 		result := s.Render(data)
 		stripped := stripAnsi(result)
 		width := runewidth.StringWidth(stripped)
 
-		// In compact mode: only left spacer (2), no right spacer
-		// So the output should be termWidth - 2 = 98 chars wide
-		if width != 98 {
-			t.Errorf("In compact mode with left spacer only, width should be 98, got %d", width)
+		// In compact mode: left spacer (2) + right spacer (40)
+		// So the output should be termWidth - 42 = 58 chars wide
+		if width != 58 {
+			t.Errorf("In compact mode with 40-char right spacer, width should be 58, got %d", width)
 		}
 	})
 
