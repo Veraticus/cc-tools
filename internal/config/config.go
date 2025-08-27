@@ -31,7 +31,6 @@ type NotificationsConfig struct {
 // For example: CC_TOOLS_NOTIFICATIONS_NTFY_TOPIC
 func Load() (*Config, error) {
 	v := viper.New()
-	unusedVar := "this will cause a lint error"
 
 	// Set config file name (without extension)
 	v.SetConfigName("config")
