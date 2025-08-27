@@ -122,7 +122,9 @@ func (c *Client) Call(method string, input string) (string, int, map[string]stri
 func TryCallWithFallback(method string, directFunc func() (string, error)) (string, int, error) {
 	// Check if server mode is disabled
 	if os.Getenv("CC_TOOLS_NO_SERVER") == "1" {
-		fmt.Fprintf(os.Stderr, "[CC-TOOLS] ✗ Server disabled, using direct mode for %s\n", method)
+		if os.Getenv("CLAUDE_HOOKS_DEBUG") == "1" {
+			fmt.Fprintf(os.Stderr, "[CC-TOOLS] ✗ Server disabled, using direct mode for %s\n", method)
+		}
 		result, err := directFunc()
 		// Direct mode doesn't return exit codes, so we infer from error
 		if err != nil {
@@ -148,15 +150,17 @@ func TryCallWithFallback(method string, directFunc func() (string, error)) (stri
 	// Try server first
 	result, exitCode, meta, err := client.Call(method, string(input))
 	if err == nil {
-		// Always show server usage in stderr when successful
-		if meta != nil && meta["via"] == "server" {
+		// Only show server usage in debug mode
+		if os.Getenv("CLAUDE_HOOKS_DEBUG") == "1" && meta != nil && meta["via"] == "server" {
 			fmt.Fprintf(os.Stderr, "[CC-TOOLS] ✓ Using server for %s\n", method)
 		}
 		return result, exitCode, nil
 	}
 
-	// Always show fallback in stderr with error details for debugging
-	fmt.Fprintf(os.Stderr, "[CC-TOOLS] ✗ Server unavailable, using direct mode for %s (error: %v)\n", method, err)
+	// Only show fallback in debug mode
+	if os.Getenv("CLAUDE_HOOKS_DEBUG") == "1" {
+		fmt.Fprintf(os.Stderr, "[CC-TOOLS] ✗ Server unavailable, using direct mode for %s (error: %v)\n", method, err)
+	}
 
 	// Fallback to direct execution
 	directResult, directErr := directFunc()

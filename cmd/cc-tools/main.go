@@ -29,7 +29,7 @@ var (
 func main() {
 	// Debug logging - log all invocations to a file
 	debugLog()
-	
+
 	if len(os.Args) < minArgs {
 		printUsage()
 		os.Exit(1)
@@ -183,7 +183,7 @@ func isResourceLockedError(err error) bool {
 
 func runLintWithServer() {
 	result, exitCode, err := server.TryCallWithFallback("lint", runLintDirect)
-	
+
 	// Debug log the result
 	if debugFile, err := os.OpenFile("/tmp/cc-tools.debug", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
 		defer debugFile.Close()
@@ -193,7 +193,7 @@ func runLintWithServer() {
 			fmt.Fprintf(debugFile, "Lint error: %v\n", err)
 		}
 	}
-	
+
 	if err != nil {
 		// Return exit code 0 if resource is locked to match direct execution behavior
 		if isResourceLockedError(err) {
@@ -201,12 +201,12 @@ func runLintWithServer() {
 		}
 		os.Exit(1)
 	}
-	
+
 	// Print result to stdout if any
 	if result != "" {
 		fmt.Print(result)
 	}
-	
+
 	// Exit with the exit code from the server/hook
 	os.Exit(exitCode)
 }
@@ -220,12 +220,12 @@ func runTestWithServer() {
 		}
 		os.Exit(1)
 	}
-	
+
 	// Print result to stdout if any
 	if result != "" {
 		fmt.Print(result)
 	}
-	
+
 	// Exit with the exit code from the server/hook
 	os.Exit(exitCode)
 }
@@ -353,13 +353,13 @@ func debugLog() {
 		}
 		return "unknown"
 	}())
-	
+
 	if len(stdinDebugData) > 0 {
 		fmt.Fprintf(f, "Stdin: %s\n", string(stdinDebugData))
 	} else {
 		fmt.Fprintf(f, "Stdin: (no data available)\n")
 	}
-	
+
 	fmt.Fprintf(f, "Command: %s\n", func() string {
 		if len(os.Args) > 1 {
 			return os.Args[1]

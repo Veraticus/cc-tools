@@ -53,7 +53,7 @@ func (r *HookLintRunner) Run(ctx context.Context, input io.Reader) (io.Reader, e
 
 	// Run the hook
 	exitCode := hooks.RunSmartHook(ctx, hooks.CommandTypeLint, r.debug, r.timeoutSecs, r.cooldownSecs, deps)
-	
+
 	// Store the exit code for later retrieval
 	r.exitCode = exitCode
 
@@ -115,7 +115,7 @@ func (r *HookTestRunner) Run(ctx context.Context, input io.Reader) (io.Reader, e
 
 	// Run the hook
 	exitCode := hooks.RunSmartHook(ctx, hooks.CommandTypeTest, r.debug, r.timeoutSecs, r.cooldownSecs, deps)
-	
+
 	// Store the exit code for later retrieval
 	r.exitCode = exitCode
 
