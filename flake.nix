@@ -174,7 +174,7 @@
     {
       # Export modules at the flake level
       nixosModules.default = nixosModule;
-      homeManagerModules.default = homeManagerModule;
+      homeManagerModule = homeManagerModule;  # Export directly for home-manager
     } // flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
