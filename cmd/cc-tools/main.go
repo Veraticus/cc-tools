@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Veraticus/cc-tools/internal/config"
 	"github.com/Veraticus/cc-tools/internal/hooks"
 	"github.com/Veraticus/cc-tools/internal/server"
 	"github.com/Veraticus/cc-tools/internal/statusline"
@@ -115,6 +116,23 @@ func runServe() {
 	logger := server.NewStandardLogger()
 	if !*verbose {
 		log.SetOutput(io.Discard)
+	}
+
+	// Load configuration
+	cfg, err := config.Load()
+	if err != nil {
+		logger.Printf("Warning: Failed to load config: %v", err)
+		// Continue with defaults
+		cfg = &config.Config{}
+	} else {
+		if configFile := config.ConfigFileUsed(); configFile != "" {
+			logger.Printf("Loaded config from: %s", configFile)
+		}
+
+		// Log notification configuration if present
+		if cfg.Notifications.NtfyTopic != "" {
+			logger.Printf("Notifications configured for ntfy topic: %s", cfg.Notifications.NtfyTopic)
+		}
 	}
 
 	// Create dependencies

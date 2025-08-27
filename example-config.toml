@@ -1,0 +1,8 @@
+# Example configuration file for cc-tools
+# Place this file in one of the following locations:
+#   /etc/cc-tools/config.toml
+#   ~/.config/cc-tools/config.toml  
+#   ./config.toml
+
+[notifications]
+ntfy_topic = "my-claude-notifications"

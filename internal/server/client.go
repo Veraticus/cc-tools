@@ -48,7 +48,7 @@ func NewClientWithTimeout(socketPath string, timeout time.Duration) *Client {
 // DefaultSocketPath returns the default socket path.
 func DefaultSocketPath() string {
 	if runtime := os.Getenv("XDG_RUNTIME_DIR"); runtime != "" {
-		return filepath.Join(runtime, "cc-tools", "server.sock")
+		return filepath.Join(runtime, "cc-tools.sock")
 	}
 	return filepath.Join(os.TempDir(), fmt.Sprintf("cc-tools-%d.sock", os.Getuid()))
 }
@@ -149,8 +149,8 @@ func TryCallWithFallback(method string, directFunc func() (string, error)) (stri
 		return result, nil
 	}
 
-	// Always show fallback in stderr
-	fmt.Fprintf(os.Stderr, "[CC-TOOLS] ✗ Server unavailable, using direct mode for %s\n", method)
+	// Always show fallback in stderr with error details for debugging
+	fmt.Fprintf(os.Stderr, "[CC-TOOLS] ✗ Server unavailable, using direct mode for %s (error: %v)\n", method, err)
 
 	// Fallback to direct execution
 	return directFunc()

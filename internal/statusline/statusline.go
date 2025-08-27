@@ -341,7 +341,7 @@ func (s *Statusline) getTokenMetrics(transcriptPath string) TokenMetrics {
 	// Parse JSONL transcript file
 	lines := strings.Split(string(content), "\n")
 	metrics := TokenMetrics{}
-	
+
 	// Track the most recent main chain entry for context length calculation
 	var mostRecentMainChainUsage struct {
 		InputTokens              int
@@ -372,7 +372,7 @@ func (s *Statusline) getTokenMetrics(transcriptPath string) TokenMetrics {
 			metrics.InputTokens += msg.Message.Usage.InputTokens
 			metrics.OutputTokens += msg.Message.Usage.OutputTokens
 			metrics.CachedTokens += msg.Message.Usage.CacheReadInputTokens
-			
+
 			// Track the most recent main chain entry (not sidechain) for context length
 			if !msg.IsSidechain {
 				mostRecentMainChainUsage.InputTokens = msg.Message.Usage.InputTokens
@@ -384,8 +384,8 @@ func (s *Statusline) getTokenMetrics(transcriptPath string) TokenMetrics {
 
 	// Context length is calculated from the most recent main chain entry
 	// It's the sum of input_tokens + cache_read_input_tokens + cache_creation_input_tokens
-	metrics.ContextLength = mostRecentMainChainUsage.InputTokens + 
-		mostRecentMainChainUsage.CacheReadInputTokens + 
+	metrics.ContextLength = mostRecentMainChainUsage.InputTokens +
+		mostRecentMainChainUsage.CacheReadInputTokens +
 		mostRecentMainChainUsage.CacheCreationInputTokens
 
 	return metrics

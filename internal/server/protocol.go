@@ -65,8 +65,10 @@ type Response struct {
 
 // Result represents a successful response.
 type Result struct {
-	Output string            `json:"output"`
-	Meta   map[string]string `json:"meta,omitempty"`
+	Output   string            `json:"output"`
+	Meta     map[string]string `json:"meta,omitempty"`
+	ExitCode int               `json:"exit_code,omitempty"`
+	Status   string            `json:"status,omitempty"` // "success", "lint-failed", "test-failed", etc.
 }
 
 // Error represents a JSON-RPC 2.0 error.

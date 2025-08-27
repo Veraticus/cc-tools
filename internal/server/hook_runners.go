@@ -46,17 +46,18 @@ func (r *HookLintRunner) Run(ctx context.Context, input io.Reader) (io.Reader, e
 	// Run the hook
 	exitCode := hooks.RunSmartHook(ctx, hooks.CommandTypeLint, r.debug, r.timeoutSecs, r.cooldownSecs, deps)
 
-	// Check exit code
-	if exitCode != 0 {
-		output := outputWriter.String()
-		if output != "" {
-			return nil, fmt.Errorf("lint failed: %s", output)
-		}
-		return nil, fmt.Errorf("lint failed with exit code %d", exitCode)
+	// Get the output regardless of exit code
+	output := outputWriter.String()
+
+	// Exit code 2 means "show message to user" - this is a successful execution
+	// Exit code 0 means success (possibly silent)
+	// Any other exit code is an actual infrastructure error
+	if exitCode != 0 && exitCode != 2 {
+		return nil, fmt.Errorf("lint hook error with exit code %d: %s", exitCode, output)
 	}
 
-	// Return output as reader
-	return bytes.NewReader([]byte(outputWriter.String())), nil
+	// Return output for successful execution (exit codes 0 and 2)
+	return bytes.NewReader([]byte(output)), nil
 }
 
 // HookTestRunner implements TestRunner using the hooks package.
@@ -96,15 +97,16 @@ func (r *HookTestRunner) Run(ctx context.Context, input io.Reader) (io.Reader, e
 	// Run the hook
 	exitCode := hooks.RunSmartHook(ctx, hooks.CommandTypeTest, r.debug, r.timeoutSecs, r.cooldownSecs, deps)
 
-	// Check exit code
-	if exitCode != 0 {
-		output := outputWriter.String()
-		if output != "" {
-			return nil, fmt.Errorf("test failed: %s", output)
-		}
-		return nil, fmt.Errorf("test failed with exit code %d", exitCode)
+	// Get the output regardless of exit code
+	output := outputWriter.String()
+
+	// Exit code 2 means "show message to user" - this is a successful execution
+	// Exit code 0 means success (possibly silent)
+	// Any other exit code is an actual infrastructure error
+	if exitCode != 0 && exitCode != 2 {
+		return nil, fmt.Errorf("test hook error with exit code %d: %s", exitCode, output)
 	}
 
-	// Return output as reader
-	return bytes.NewReader([]byte(outputWriter.String())), nil
+	// Return output for successful execution (exit codes 0 and 2)
+	return bytes.NewReader([]byte(output)), nil
 }
