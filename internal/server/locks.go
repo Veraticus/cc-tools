@@ -1,7 +1,7 @@
 package server
 
 import (
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -51,14 +51,23 @@ func (m *SimpleLockManager) Release(key string) {
 }
 
 // StandardLogger implements Logger using the standard log package.
-type StandardLogger struct{}
+type StandardLogger struct {
+	logger *slog.Logger
+}
+
+// NewStandardLogger creates a new StandardLogger.
+func NewStandardLogger() *StandardLogger {
+	return &StandardLogger{
+		logger: slog.Default(),
+	}
+}
 
 // Printf formats and prints to the standard logger.
-func (l *StandardLogger) Printf(format string, v ...interface{}) {
-	log.Printf(format, v...)
+func (l *StandardLogger) Printf(format string, v ...any) {
+	l.logger.Info("log message", "format", format, "args", v)
 }
 
 // Println prints to the standard logger.
-func (l *StandardLogger) Println(v ...interface{}) {
-	log.Println(v...)
+func (l *StandardLogger) Println(v ...any) {
+	l.logger.Info("log message", "args", v)
 }

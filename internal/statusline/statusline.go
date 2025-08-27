@@ -1,19 +1,16 @@
 package statusline
 
 import (
-	"crypto/md5"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
-	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 )
 
-// Input represents the JSON input from stdin
+// Input represents the JSON input from stdin.
 type Input struct {
 	Model struct {
 		ID          string `json:"id"`
@@ -41,7 +38,7 @@ type Input struct {
 	TranscriptPath string `json:"transcript_path"`
 }
 
-// TokenMetrics holds token usage information
+// TokenMetrics holds token usage information.
 type TokenMetrics struct {
 	InputTokens   int
 	OutputTokens  int
@@ -49,7 +46,7 @@ type TokenMetrics struct {
 	ContextLength int
 }
 
-// CachedData represents cached statusline data
+// CachedData represents cached statusline data.
 type CachedData struct {
 	ModelDisplay   string
 	CurrentDir     string
@@ -66,7 +63,7 @@ type CachedData struct {
 	TermWidth      int
 }
 
-// Dependencies contains all external dependencies
+// Dependencies contains all external dependencies.
 type Dependencies struct {
 	FileReader    FileReader
 	CommandRunner CommandRunner
@@ -76,29 +73,29 @@ type Dependencies struct {
 	CacheDuration time.Duration
 }
 
-// FileReader interface for reading files
+// FileReader interface for reading files.
 type FileReader interface {
 	ReadFile(path string) ([]byte, error)
 	Exists(path string) bool
 	ModTime(path string) (time.Time, error)
 }
 
-// CommandRunner interface for executing commands
+// CommandRunner interface for executing commands.
 type CommandRunner interface {
 	Run(command string, args ...string) ([]byte, error)
 }
 
-// EnvReader interface for reading environment variables
+// EnvReader interface for reading environment variables.
 type EnvReader interface {
 	Get(key string) string
 }
 
-// TerminalWidth interface for getting terminal width
+// TerminalWidth interface for getting terminal width.
 type TerminalWidth interface {
 	GetWidth() int
 }
 
-// Config contains configuration for the statusline
+// Config contains configuration for the statusline.
 type Config struct {
 	// LeftSpacerWidth is the width of the left spacer (default: 2)
 	LeftSpacerWidth int
@@ -106,15 +103,19 @@ type Config struct {
 	RightSpacerWidth int
 }
 
-// DefaultConfig returns the default configuration
+// DefaultConfig returns the default configuration.
 func DefaultConfig() *Config {
+	const (
+		defaultLeftSpacerWidth  = 2
+		defaultRightSpacerWidth = 4
+	)
 	return &Config{
-		LeftSpacerWidth:  2,
-		RightSpacerWidth: 4,
+		LeftSpacerWidth:  defaultLeftSpacerWidth,
+		RightSpacerWidth: defaultRightSpacerWidth,
 	}
 }
 
-// Statusline is the main statusline generator
+// Statusline is the main statusline generator.
 type Statusline struct {
 	deps   *Dependencies
 	colors CatppuccinMocha
@@ -122,12 +123,12 @@ type Statusline struct {
 	config *Config
 }
 
-// New creates a new Statusline instance
-func New(deps *Dependencies) *Statusline {
+// CreateStatusline creates a new Statusline instance.
+func CreateStatusline(deps *Dependencies) *Statusline {
 	return NewWithConfig(deps, DefaultConfig())
 }
 
-// NewWithConfig creates a new Statusline instance with custom configuration
+// NewWithConfig creates a new Statusline instance with custom configuration.
 func NewWithConfig(deps *Dependencies, config *Config) *Statusline {
 	if config == nil {
 		config = DefaultConfig()
@@ -138,7 +139,7 @@ func NewWithConfig(deps *Dependencies, config *Config) *Statusline {
 	}
 }
 
-// Generate generates the statusline from JSON input
+// Generate generates the statusline from JSON input.
 func (s *Statusline) Generate(reader io.Reader) (string, error) {
 	// Read and parse JSON input
 	if err := s.parseInput(reader); err != nil {
@@ -158,7 +159,10 @@ func (s *Statusline) Generate(reader io.Reader) (string, error) {
 func (s *Statusline) parseInput(reader io.Reader) error {
 	decoder := json.NewDecoder(reader)
 	s.input = &Input{}
-	return decoder.Decode(s.input)
+	if err := decoder.Decode(s.input); err != nil {
+		return fmt.Errorf("decoding JSON: %w", err)
+	}
+	return nil
 }
 
 func (s *Statusline) getCurrentDir() string {
@@ -172,12 +176,6 @@ func (s *Statusline) getCurrentDir() string {
 		return s.input.Workspace.CWD
 	}
 	return "~"
-}
-
-func (s *Statusline) generateCacheKey(dir string) string {
-	h := md5.New()
-	h.Write([]byte(dir))
-	return hex.EncodeToString(h.Sum(nil))
 }
 
 func (s *Statusline) computeData(currentDir string) *CachedData {
@@ -211,9 +209,18 @@ func (s *Statusline) computeData(currentDir string) *CachedData {
 
 		// Debug
 		if os.Getenv("DEBUG_CONTEXT") == "1" {
-			debug := fmt.Sprintf("DEBUG computeData: TranscriptPath=%s, InputTokens=%d, OutputTokens=%d, ContextLength=%d\n",
-				data.TranscriptPath, data.InputTokens, data.OutputTokens, data.ContextLength)
-			os.WriteFile("/tmp/compute_debug.txt", []byte(debug), 0644)
+			debug := fmt.Sprintf(
+				"DEBUG computeData: TranscriptPath=%s, InputTokens=%d, OutputTokens=%d, ContextLength=%d\n",
+				data.TranscriptPath,
+				data.InputTokens,
+				data.OutputTokens,
+				data.ContextLength,
+			)
+			const debugFileMode = 0600
+			if err := os.WriteFile("/tmp/compute_debug.txt", []byte(debug), debugFileMode); err != nil { //nolint:gosec // Debug file
+				// Debug write failed - continue silently
+				_ = err
+			}
 		}
 	}
 
@@ -272,7 +279,8 @@ func (s *Statusline) readGitInfo(gitDir string) GitInfo {
 	indexPath := filepath.Join(gitDir, "index")
 	if modTime, err := s.deps.FileReader.ModTime(indexPath); err == nil {
 		// If index was modified in last 60 seconds, likely have changes
-		if time.Since(modTime) < 60*time.Second {
+		const recentChangeWindow = 60 * time.Second
+		if time.Since(modTime) < recentChangeWindow {
 			info.Status = "!"
 		}
 	}
@@ -360,7 +368,8 @@ func (s *Statusline) getTokenMetrics(transcriptPath string) TokenMetrics {
 			} `json:"message"`
 		}
 
-		if err := json.Unmarshal([]byte(line), &msg); err == nil && msg.Message.Usage.InputTokens > 0 {
+		unmarshalErr := json.Unmarshal([]byte(line), &msg)
+		if unmarshalErr == nil && msg.Message.Usage.InputTokens > 0 {
 			metrics.InputTokens += msg.Message.Usage.InputTokens
 			metrics.OutputTokens += msg.Message.Usage.OutputTokens
 			metrics.CachedTokens += msg.Message.Usage.CacheReadInputTokens
@@ -434,295 +443,6 @@ func (s *Statusline) getDevspace() (string, string) {
 	return symbol + " " + tmuxDevspace, symbol
 }
 
-func (s *Statusline) buildStatuslineOld(data *CachedData) string {
-	var sb strings.Builder
-
-	// Select random model icon
-	icons := []rune(ModelIcons)
-	modelIcon := string(icons[rand.Intn(len(icons))]) + " "
-
-	// Format directory path
-	dirPath := formatPath(data.CurrentDir)
-
-	// Truncation lengths based on context mode
-	var dirMaxLen, modelMaxLen, hostnameMaxLen, branchMaxLen, awsMaxLen, k8sMaxLen, devspaceMaxLen int
-	if data.ContextLength >= 128000 {
-		// Compact mode
-		dirMaxLen, modelMaxLen, hostnameMaxLen = 15, 20, 15
-		branchMaxLen, awsMaxLen, k8sMaxLen, devspaceMaxLen = 20, 15, 15, 10
-	} else {
-		// Normal mode
-		dirMaxLen, modelMaxLen, hostnameMaxLen = 20, 30, 25
-		branchMaxLen, awsMaxLen, k8sMaxLen, devspaceMaxLen = 30, 25, 25, 20
-	}
-
-	dirPath = truncateText(dirPath, dirMaxLen)
-	modelDisplay := truncateText(data.ModelDisplay, modelMaxLen)
-
-	// Build left section
-	sb.WriteString(s.colors.NC()) // Reset
-	sb.WriteString(s.colors.LavenderFG())
-	sb.WriteString(LeftCurve)
-	sb.WriteString(s.colors.LavenderBG())
-	sb.WriteString(s.colors.BaseFG())
-	sb.WriteString(" ")
-	sb.WriteString(dirPath)
-	sb.WriteString(" ")
-	sb.WriteString(s.colors.NC())
-
-	// Model/tokens section
-	sb.WriteString(s.colors.SkyBG())
-	sb.WriteString(s.colors.LavenderFG())
-	sb.WriteString(LeftChevron)
-	sb.WriteString(s.colors.NC())
-	sb.WriteString(s.colors.SkyBG())
-	sb.WriteString(s.colors.BaseFG())
-
-	tokenInfo := " " + modelIcon + modelDisplay
-	if data.InputTokens > 0 || data.OutputTokens > 0 {
-		tokenInfo += fmt.Sprintf(" ↑%s ↓%s",
-			formatTokens(data.InputTokens),
-			formatTokens(data.OutputTokens))
-	}
-	sb.WriteString(tokenInfo)
-	sb.WriteString(" ")
-	sb.WriteString(s.colors.NC())
-
-	// End left section
-	sb.WriteString(s.colors.SkyFG())
-	sb.WriteString(LeftChevron)
-	sb.WriteString(s.colors.NC())
-
-	// Build right side
-	rightSide := s.buildRightSide(data, hostnameMaxLen, branchMaxLen, awsMaxLen, k8sMaxLen, devspaceMaxLen)
-
-	// Calculate lengths for spacing
-	leftLength := calculateLeftLength(dirPath, tokenInfo, modelIcon)
-	rightLength := calculateRightLength(data, rightSide)
-
-	// Calculate middle section
-	termWidth := data.TermWidth
-	if termWidth == 0 {
-		termWidth = 210 // Default
-	}
-
-	compactMessageWidth := 0
-	if data.ContextLength >= 128000 {
-		compactMessageWidth = 41
-	}
-
-	availableWidth := termWidth - compactMessageWidth
-	spaceForMiddle := availableWidth - leftLength - rightLength
-
-	// Create middle section (context bar or spacing)
-	middleSection := s.createMiddleSection(data, spaceForMiddle)
-
-	// Output final statusline
-	sb.WriteString(middleSection)
-	sb.WriteString(rightSide)
-
-	return sb.String()
-}
-
-func (s *Statusline) buildRightSide(data *CachedData, hostnameMaxLen, branchMaxLen, awsMaxLen, k8sMaxLen, devspaceMaxLen int) string {
-	var components []Component
-
-	// Add components
-	if data.Devspace != "" {
-		devspace := truncateText(data.Devspace, devspaceMaxLen)
-		components = append(components, Component{"mauve", devspace})
-	}
-
-	if data.Hostname != "" {
-		hostname := truncateText(data.Hostname, hostnameMaxLen)
-		text := HostnameIcon + hostname
-		components = append(components, Component{"rosewater", text})
-	}
-
-	if data.GitBranch != "" {
-		branch := truncateText(data.GitBranch, branchMaxLen)
-		text := GitIcon + branch
-		if data.GitStatus != "" {
-			text += " " + data.GitStatus
-		}
-		components = append(components, Component{"sky", text})
-	}
-
-	// AWS Profile
-	awsProfile := s.deps.EnvReader.Get("AWS_PROFILE")
-	// Remove "export AWS_PROFILE=" prefix if present
-	awsProfile = strings.TrimPrefix(awsProfile, "export AWS_PROFILE=")
-	if awsProfile != "" {
-		awsProfile = truncateText(awsProfile, awsMaxLen)
-		components = append(components, Component{"peach", AwsIcon + awsProfile})
-	}
-
-	// K8s context
-	if data.K8sContext != "" {
-		k8s := data.K8sContext
-		// Shorten common patterns
-		k8s = strings.TrimPrefix(k8s, "arn:aws:eks:*:*:cluster/")
-		k8s = strings.TrimPrefix(k8s, "gke_*_*_")
-		k8s = truncateText(k8s, k8sMaxLen)
-		components = append(components, Component{"teal", K8sIcon + k8s})
-	}
-
-	// Build with powerline separators
-	var sb strings.Builder
-	var prevColor string
-
-	for i, comp := range components {
-		// Add separator
-		if i == 0 {
-			// First component
-			sb.WriteString(s.getColorFG(comp.Color))
-			sb.WriteString(RightChevron)
-			sb.WriteString(s.colors.NC())
-		} else {
-			// Between components
-			sb.WriteString(s.getColorBG(prevColor))
-			sb.WriteString(s.getColorFG(comp.Color))
-			sb.WriteString(RightChevron)
-			sb.WriteString(s.colors.NC())
-		}
-
-		// Add content
-		sb.WriteString(s.getColorBG(comp.Color))
-		sb.WriteString(s.colors.BaseFG())
-		sb.WriteString(" ")
-		sb.WriteString(comp.Text)
-		sb.WriteString(" ")
-		sb.WriteString(s.colors.NC())
-
-		prevColor = comp.Color
-	}
-
-	// Add end curve
-	if prevColor != "" {
-		sb.WriteString(s.getColorFG(prevColor))
-		sb.WriteString(RightCurve)
-		sb.WriteString(s.colors.NC())
-
-		// Add space for compact mode
-		if data.ContextLength >= 128000 {
-			sb.WriteString(" ")
-		}
-	}
-
-	return sb.String()
-}
-
-func (s *Statusline) createMiddleSection(data *CachedData, spaceForMiddle int) string {
-	if data.ContextLength > 0 && spaceForMiddle > 20 {
-		// Create context bar
-		paddingTotal := 10
-		barWidth := spaceForMiddle - paddingTotal
-
-		if barWidth < 20 {
-			paddingTotal = 4
-			barWidth = spaceForMiddle - paddingTotal
-		}
-
-		if barWidth > 0 {
-			bar := s.createContextBar(data.ContextLength, barWidth)
-			leftPad := paddingTotal / 2
-			rightPad := paddingTotal - leftPad
-			return fmt.Sprintf("%*s%s%*s", leftPad, "", bar, rightPad, "")
-		}
-	}
-
-	// Just spacing
-	if data.ContextLength == 0 && spaceForMiddle > 0 {
-		spaceForMiddle-- // Reduce by 1 to prevent wrapping
-	}
-	return fmt.Sprintf("%*s", spaceForMiddle, "")
-}
-
-func (s *Statusline) createContextBarOld(contextLength, barWidth int) string {
-	// Calculate percentage (160k is auto-compact threshold)
-	percentage := float64(contextLength) * 100.0 / 160000.0
-	if percentage > 100 {
-		percentage = 100
-	}
-
-	// Choose colors based on percentage
-	var bgColor, fgColor, fgLightBg string
-	if percentage < 40 {
-		bgColor = s.colors.GreenBG()
-		fgColor = s.colors.GreenFG()
-		fgLightBg = s.colors.GreenLightBG()
-	} else if percentage < 60 {
-		bgColor = s.colors.YellowBG()
-		fgColor = s.colors.YellowFG()
-		fgLightBg = s.colors.YellowLightBG()
-	} else if percentage < 80 {
-		bgColor = s.colors.PeachBG()
-		fgColor = s.colors.PeachFG()
-		fgLightBg = s.colors.PeachLightBG()
-	} else {
-		bgColor = s.colors.RedBG()
-		fgColor = s.colors.RedFG()
-		fgLightBg = s.colors.RedLightBG()
-	}
-
-	label := ContextIcon + "Context "
-	percentText := fmt.Sprintf(" %.1f%%", percentage)
-	textLength := len(label) + len(percentText) + 2 // +2 for icon width and space
-
-	fillWidth := barWidth - textLength - 2 // -2 for curves
-	if fillWidth < 4 {
-		return ""
-	}
-
-	filledWidth := int(float64(fillWidth) * percentage / 100.0)
-
-	// Build bar
-	var bar strings.Builder
-	for i := 0; i < fillWidth; i++ {
-		var char string
-		if i == 0 {
-			char = ProgressLeftFull
-		} else if i == fillWidth-1 {
-			if i < filledWidth {
-				char = ProgressRightFull
-			} else {
-				char = ProgressRightEmpty
-			}
-		} else {
-			if i < filledWidth {
-				char = ProgressMidFull
-			} else {
-				char = ProgressMidEmpty
-			}
-		}
-		bar.WriteString(fgLightBg)
-		bar.WriteString(fgColor)
-		bar.WriteString(char)
-		bar.WriteString(s.colors.NC())
-	}
-
-	// Build complete bar
-	var result strings.Builder
-	result.WriteString(fgColor)
-	result.WriteString(LeftCurve)
-	result.WriteString(s.colors.NC())
-	result.WriteString(bgColor)
-	result.WriteString(s.colors.BaseFG())
-	result.WriteString(label)
-	result.WriteString(s.colors.NC())
-	result.WriteString(bar.String())
-	result.WriteString(bgColor)
-	result.WriteString(s.colors.BaseFG())
-	result.WriteString(percentText)
-	result.WriteString(" ")
-	result.WriteString(s.colors.NC())
-	result.WriteString(fgColor)
-	result.WriteString(RightCurve)
-	result.WriteString(s.colors.NC())
-
-	return result.String()
-}
-
 func (s *Statusline) getColorBG(color string) string {
 	switch color {
 	case "mauve":
@@ -757,13 +477,13 @@ func (s *Statusline) getColorFG(color string) string {
 	}
 }
 
-// GitInfo contains git repository information
+// GitInfo contains git repository information.
 type GitInfo struct {
 	Branch string
 	Status string
 }
 
-// Component represents a statusline component
+// Component represents a statusline component.
 type Component struct {
 	Color string
 	Text  string

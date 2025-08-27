@@ -1,3 +1,4 @@
+// Package main implements the cc-tools CLI application.
 package main
 
 import (
@@ -14,8 +15,10 @@ import (
 	"github.com/Veraticus/cc-tools/internal/statusline"
 )
 
+const minArgs = 2
+
 func main() {
-	if len(os.Args) < 2 {
+	if len(os.Args) < minArgs {
 		printUsage()
 		os.Exit(1)
 	}
@@ -32,7 +35,8 @@ func main() {
 	case "status":
 		runStatus()
 	case "version":
-		fmt.Println("cc-tools v0.1.0")
+		// Print version to stdout as intended output
+		fmt.Println("cc-tools v0.1.0") //nolint:forbidigo // CLI output
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -72,7 +76,8 @@ func runStatus() {
 
 	// Check if socket exists
 	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
-		fmt.Printf("Server: NOT RUNNING\nSocket: %s (not found)\n", socketPath)
+		// Print status to stdout as intended output
+		fmt.Printf("Server: NOT RUNNING\nSocket: %s (not found)\n", socketPath) //nolint:forbidigo // CLI output
 		os.Exit(1)
 	}
 
@@ -80,11 +85,13 @@ func runStatus() {
 	client := server.NewClient(socketPath)
 	stats, _, err := client.Call("stats", "")
 	if err != nil {
-		fmt.Printf("Server: ERROR\nSocket: %s\nError: %v\n", socketPath, err)
+		// Print status to stdout as intended output
+		fmt.Printf("Server: ERROR\nSocket: %s\nError: %v\n", socketPath, err) //nolint:forbidigo // CLI output
 		os.Exit(1)
 	}
 
-	fmt.Print(stats)
+	// Print server stats to stdout as intended output
+	fmt.Print(stats) //nolint:forbidigo // CLI output
 }
 
 func runServe() {
@@ -92,19 +99,27 @@ func runServe() {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	socketPath := fs.String("socket", server.DefaultSocketPath(), "Socket path")
 	verbose := fs.Bool("verbose", false, "Verbose logging")
-	fs.Parse(os.Args[2:])
+	if err := fs.Parse(os.Args[2:]); err != nil {
+		log.Fatalf("Parse flags: %v", err)
+	}
 
 	// Create logger
-	logger := &server.StandardLogger{}
+	logger := server.NewStandardLogger()
 	if !*verbose {
 		log.SetOutput(io.Discard)
 	}
 
 	// Create dependencies
+	const (
+		lintTimeout        = 30
+		testTimeout        = 60
+		statuslineCacheSec = 20
+		hookCooldown       = 2
+	)
 	deps := &server.ServerDependencies{
-		LintRunner:  server.NewHookLintRunner(true, 30, 2),
-		TestRunner:  server.NewHookTestRunner(true, 60, 2),
-		Statusline:  server.NewStatuslineRunner("/dev/shm", 20),
+		LintRunner:  server.NewHookLintRunner(true, lintTimeout, hookCooldown),
+		TestRunner:  server.NewHookTestRunner(true, testTimeout, hookCooldown),
+		Statusline:  server.NewStatuslineRunner("/dev/shm", statuslineCacheSec),
 		LockManager: server.NewSimpleLockManager(),
 		Logger:      logger,
 	}
@@ -121,10 +136,12 @@ func runServe() {
 func runStatuslineWithServer() {
 	result, err := server.TryCallWithFallback("statusline", runStatuslineDirect)
 	if err != nil {
-		fmt.Print(" > ") // Fallback prompt
+		// Fallback prompt output to stdout
+		fmt.Print(" > ") //nolint:forbidigo // CLI output
 		os.Exit(0)
 	}
-	fmt.Print(result)
+	// Output statusline result to stdout
+	fmt.Print(result) //nolint:forbidigo // CLI output
 }
 
 func runLintWithServer() {
@@ -145,7 +162,7 @@ func runStatuslineDirect() (string, error) {
 	// Read stdin
 	input, err := io.ReadAll(os.Stdin)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("reading stdin: %w", err)
 	}
 
 	// Recreate stdin reader
@@ -164,11 +181,11 @@ func runStatuslineWithInput(reader io.Reader) (string, error) {
 		CacheDuration: getCacheDuration(),
 	}
 
-	sl := statusline.New(deps)
+	sl := statusline.CreateStatusline(deps)
 
 	result, err := sl.Generate(reader)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("generating statusline: %w", err)
 	}
 
 	return result, nil
@@ -218,5 +235,6 @@ func getCacheDuration() time.Duration {
 			return duration
 		}
 	}
-	return 20 * time.Second
+	const defaultCacheSeconds = 20
+	return defaultCacheSeconds * time.Second
 }

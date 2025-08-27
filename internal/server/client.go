@@ -1,3 +1,4 @@
+// Package server provides a JSON-RPC server for cc-tools.
 package server
 
 import (
@@ -8,6 +9,11 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+)
+
+const (
+	// dialTimeout is the timeout for connecting to the server.
+	dialTimeout = 5 * time.Second
 )
 
 // Client handles communication with the server using concrete types.
@@ -39,11 +45,11 @@ func (c *Client) Call(method string, input string) (string, map[string]string, e
 	}
 
 	// Connect to server
-	conn, err := net.DialTimeout("unix", c.socketPath, 5*time.Second)
+	conn, err := net.DialTimeout("unix", c.socketPath, dialTimeout) //nolint:noctx // Unix socket doesn't need context
 	if err != nil {
 		return "", nil, fmt.Errorf("connect to server: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Prepare request
 	params := MethodParams{
@@ -64,15 +70,15 @@ func (c *Client) Call(method string, input string) (string, map[string]string, e
 
 	// Send request
 	encoder := json.NewEncoder(conn)
-	if err := encoder.Encode(req); err != nil {
-		return "", nil, fmt.Errorf("send request: %w", err)
+	if encErr := encoder.Encode(req); encErr != nil {
+		return "", nil, fmt.Errorf("send request: %w", encErr)
 	}
 
 	// Read response
 	decoder := json.NewDecoder(conn)
 	var resp Response
-	if err := decoder.Decode(&resp); err != nil {
-		return "", nil, fmt.Errorf("read response: %w", err)
+	if decErr := decoder.Decode(&resp); decErr != nil {
+		return "", nil, fmt.Errorf("read response: %w", decErr)
 	}
 
 	// Check for error

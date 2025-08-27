@@ -3,7 +3,6 @@ package statusline
 import (
 	"bytes"
 	"encoding/json"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -13,11 +12,7 @@ import (
 
 func TestRealFilesystemImpact(t *testing.T) {
 	// Create a temporary directory with mock git structure
-	tmpDir, err := ioutil.TempDir("", "statusline-test-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
 
 	// Create a fake .git directory structure
 	gitDir := filepath.Join(tmpDir, ".git")
@@ -25,10 +20,10 @@ func TestRealFilesystemImpact(t *testing.T) {
 
 	// Create HEAD file
 	headContent := []byte("ref: refs/heads/main")
-	ioutil.WriteFile(filepath.Join(gitDir, "HEAD"), headContent, 0644)
+	os.WriteFile(filepath.Join(gitDir, "HEAD"), headContent, 0644)
 
 	// Create index file (git's staging area)
-	ioutil.WriteFile(filepath.Join(gitDir, "index"), []byte("fake index"), 0644)
+	os.WriteFile(filepath.Join(gitDir, "index"), []byte("fake index"), 0644)
 
 	// Create kubeconfig
 	kubeDir := filepath.Join(tmpDir, ".kube")
@@ -38,12 +33,12 @@ current-context: production-cluster
 contexts:
 - name: production-cluster
 `
-	ioutil.WriteFile(filepath.Join(kubeDir, "config"), []byte(kubeconfig), 0644)
+	os.WriteFile(filepath.Join(kubeDir, "config"), []byte(kubeconfig), 0644)
 
 	// Create transcript file
 	transcript := `{"message": {"usage": {"input_tokens": 50000, "output_tokens": 2000}}}`
 	transcriptPath := filepath.Join(tmpDir, "transcript.jsonl")
-	ioutil.WriteFile(transcriptPath, []byte(transcript), 0644)
+	os.WriteFile(transcriptPath, []byte(transcript), 0644)
 
 	// Setup real filesystem reader
 	realFS := &RealFileReader{}
@@ -60,7 +55,7 @@ contexts:
 		TerminalWidth: &MockTerminalWidth{width: 100},
 	}
 
-	s := New(deps)
+	s := CreateStatusline(deps)
 
 	// Prepare input pointing to our temp directory
 	input := &Input{
@@ -105,7 +100,7 @@ contexts:
 		const runs = 100
 		var totalDuration time.Duration
 
-		for i := 0; i < runs; i++ {
+		for range runs {
 			reader := bytes.NewReader(jsonData)
 			start := time.Now()
 			s.Generate(reader)
@@ -128,7 +123,7 @@ contexts:
 
 		// Subsequent runs - warm cache
 		var warmTimes []time.Duration
-		for i := 0; i < 10; i++ {
+		for range 10 {
 			reader = bytes.NewReader(jsonData)
 			start = time.Now()
 			s.Generate(reader)
@@ -179,11 +174,11 @@ contexts:
 	})
 }
 
-// RealFileReader implements FileReader using actual filesystem
+// RealFileReader implements FileReader using actual filesystem.
 type RealFileReader struct{}
 
 func (r *RealFileReader) ReadFile(path string) ([]byte, error) {
-	return ioutil.ReadFile(path)
+	return os.ReadFile(path)
 }
 
 func (r *RealFileReader) Exists(path string) bool {

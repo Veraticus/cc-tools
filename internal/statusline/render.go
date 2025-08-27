@@ -2,77 +2,41 @@ package statusline
 
 import (
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"os"
 	"strings"
 
 	"github.com/mattn/go-runewidth"
 )
 
-// Render renders the statusline with lipgloss styling and guaranteed fixed width
+// Render renders the statusline with lipgloss styling and guaranteed fixed width.
 func (s *Statusline) Render(data *CachedData) string {
-	termWidth := data.TermWidth
-	if termWidth == 0 {
-		termWidth = 200
-	}
-
-	// Initialize colors
+	termWidth := s.getTermWidth(data)
 	s.colors = CatppuccinMocha{}
-
-	// Select random model icon
-	icons := []rune(ModelIcons)
-	modelIcon := string(icons[rand.Intn(len(icons))])
-
-	// Format directory path
+	modelIcon := s.selectModelIcon()
 	dirPath := formatPath(data.CurrentDir)
+	isCompact := s.isCompactMode(data.ContextLength)
 
-	// Determine if we're in compact mode
-	isCompact := data.ContextLength >= 128000
-
-	// Calculate spacer widths first
-	leftSpacerWidth := 0
-	if s.config.LeftSpacerWidth > 0 {
-		leftSpacerWidth = s.config.LeftSpacerWidth
-	}
-
-	rightSpacerWidth := 0
-	// Only add right spacer when not in compact mode
-	if !isCompact && s.config.RightSpacerWidth > 0 {
-		rightSpacerWidth = s.config.RightSpacerWidth
-	}
-
-	// Calculate effective width after spacers and compact mode
+	// Calculate widths
+	leftSpacerWidth, rightSpacerWidth, contentWidth := s.calculateWidths(termWidth, isCompact)
 	effectiveWidth := termWidth - leftSpacerWidth - rightSpacerWidth
 	if isCompact {
-		// In compact mode, also reserve 41 chars for "     Context left until auto-compact: XX%"
-		effectiveWidth = effectiveWidth - 41
-	}
-
-	// Content width is now the same as effective width (since spacers are already accounted for)
-	contentWidth := effectiveWidth
-
-	// Ensure we have at least some width for content
-	if contentWidth < 20 {
-		// Extreme case: spacers are taking up too much space
-		// Force a minimum content width and reduce spacers if necessary
-		contentWidth = 20
-		totalSpacerBudget := effectiveWidth - contentWidth
-		if totalSpacerBudget < leftSpacerWidth+rightSpacerWidth {
-			// Scale down spacers proportionally
-			if totalSpacerBudget > 0 {
-				leftSpacerWidth = totalSpacerBudget * leftSpacerWidth / (leftSpacerWidth + rightSpacerWidth)
-				rightSpacerWidth = totalSpacerBudget - leftSpacerWidth
-			} else {
-				leftSpacerWidth = 0
-				rightSpacerWidth = 0
-			}
-		}
+		const compactModeReservedChars = 41
+		effectiveWidth -= compactModeReservedChars
 	}
 
 	// Debug terminal width
 	if os.Getenv("DEBUG_WIDTH") == "1" {
-		fmt.Fprintf(os.Stderr, "Render: termWidth=%d, isCompact=%v, effectiveWidth=%d, spacers(L:%d,R:%d), contentWidth=%d\n",
-			data.TermWidth, isCompact, effectiveWidth, leftSpacerWidth, rightSpacerWidth, contentWidth)
+		fmt.Fprintf(
+			os.Stderr,
+			"Render: termWidth=%d, isCompact=%v, effectiveWidth=%d, spacers(L:%d,R:%d), contentWidth=%d\n",
+			data.TermWidth,
+			isCompact,
+			effectiveWidth,
+			leftSpacerWidth,
+			rightSpacerWidth,
+			contentWidth,
+		)
 	}
 
 	// Build components with proper sizing that accounts for spacers
@@ -105,12 +69,21 @@ func (s *Statusline) Render(data *CachedData) string {
 
 	// Debug each section
 	if os.Getenv("DEBUG_WIDTH") == "1" {
-		fmt.Fprintf(os.Stderr, "Final section widths: left=%d, middle=%d, right=%d, total=%d (contentWidth=%d)\n",
+		fmt.Fprintf(
+			os.Stderr,
+			"Final section widths: left=%d, middle=%d, right=%d, total=%d (contentWidth=%d)\n",
 			runewidth.StringWidth(stripAnsi(leftSection)),
 			runewidth.StringWidth(stripAnsi(middleSection)),
 			runewidth.StringWidth(stripAnsi(rightSection)),
-			runewidth.StringWidth(stripAnsi(leftSection))+runewidth.StringWidth(stripAnsi(middleSection))+runewidth.StringWidth(stripAnsi(rightSection)),
-			contentWidth)
+			runewidth.StringWidth(
+				stripAnsi(leftSection),
+			)+runewidth.StringWidth(
+				stripAnsi(middleSection),
+			)+runewidth.StringWidth(
+				stripAnsi(rightSection),
+			),
+			contentWidth,
+		)
 	}
 
 	// Don't pad - the spacers are meant to make the statusline shorter
@@ -124,7 +97,12 @@ func (s *Statusline) Render(data *CachedData) string {
 	return result
 }
 
-func (s *Statusline) buildLeftSection(dirPath, modelDisplay, modelIcon string, data *CachedData, isCompact bool, availableWidth int) string {
+func (s *Statusline) buildLeftSection(
+	dirPath, modelDisplay, modelIcon string,
+	data *CachedData,
+	isCompact bool,
+	availableWidth int,
+) string {
 	// Calculate proportional truncation lengths based on available width
 	// Default allocations when width is sufficient
 	var dirMaxLen, modelMaxLen int
@@ -151,36 +129,11 @@ func (s *Statusline) buildLeftSection(dirPath, modelDisplay, modelIcon string, d
 	// Don't artificially limit the left section - let it use space it needs
 	// Only constrain if we're running out of total space
 	availableForText := availableWidth
-	if availableForText < overhead+minDirLen+minModelLen {
-		// Very constrained - use minimum sizes but ensure we fit
-		totalMin := overhead + minDirLen + minModelLen
-		if totalMin > availableForText {
-			// Even minimums don't fit - scale them down
-			scaleRatio := float64(availableForText-overhead) / float64(minDirLen+minModelLen)
-			dirMaxLen = int(float64(minDirLen) * scaleRatio)
-			modelMaxLen = int(float64(minModelLen) * scaleRatio)
-			if dirMaxLen < 5 {
-				dirMaxLen = 5
-			}
-			if modelMaxLen < 5 {
-				modelMaxLen = 5
-			}
-		} else {
-			dirMaxLen = minDirLen
-			modelMaxLen = minModelLen
-		}
-	} else if availableForText < overhead+dirMaxLen+modelMaxLen {
-		// Scale down proportionally
-		textBudget := availableForText - overhead
-		dirMaxLen = textBudget * 40 / 100   // 40% for directory
-		modelMaxLen = textBudget * 60 / 100 // 60% for model
-		if dirMaxLen < minDirLen {
-			dirMaxLen = minDirLen
-		}
-		if modelMaxLen < minModelLen {
-			modelMaxLen = minModelLen
-		}
-	}
+	dirMaxLen, modelMaxLen = s.calculateTextLengths(
+		availableForText, overhead,
+		dirMaxLen, modelMaxLen,
+		minDirLen, minModelLen,
+	)
 
 	dirPath = truncateText(dirPath, dirMaxLen)
 	modelDisplay = truncateText(modelDisplay, modelMaxLen)
@@ -232,155 +185,171 @@ func (s *Statusline) buildLeftSection(dirPath, modelDisplay, modelIcon string, d
 }
 
 func (s *Statusline) buildRightSection(data *CachedData, isCompact bool, availableWidth int) string {
-	// Calculate proportional max lengths based on available width
-	var hostnameMaxLen, branchMaxLen, awsMaxLen, k8sMaxLen, devspaceMaxLen int
-
-	// Base minimum sizes
-	minHostnameLen := 8
-	minBranchLen := 10
-	minAwsLen := 8
-	minK8sLen := 8
-	minDevspaceLen := 6
-
-	if isCompact {
-		hostnameMaxLen, branchMaxLen = 20, 25
-		awsMaxLen, k8sMaxLen, devspaceMaxLen = 20, 20, 15
-	} else {
-		// Increased defaults since components get priority over context bar
-		hostnameMaxLen, branchMaxLen = 35, 40
-		awsMaxLen, k8sMaxLen, devspaceMaxLen = 35, 35, 30
-	}
-
-	// Don't artificially limit the right section - let it use space it needs
-	availableForRight := availableWidth
-
-	// Count how many components we'll show
-	componentCount := 0
-	if data.Devspace != "" {
-		componentCount++
-	}
-	if data.Hostname != "" {
-		componentCount++
-	}
-	if data.GitBranch != "" {
-		componentCount++
-	}
+	maxLengths := s.getRightSectionMaxLengths(isCompact)
 	awsProfile := s.deps.EnvReader.Get("AWS_PROFILE")
-	if awsProfile != "" {
-		componentCount++
-	}
-	if data.K8sContext != "" {
-		componentCount++
-	}
+	componentCount := s.countRightComponents(data, awsProfile)
 
 	if componentCount > 0 {
-		// Reserve space for separators, curves, spaces, and icons
-		overhead := componentCount*5 + 4 // Roughly 5 chars per component for formatting + 4 for curves
-
-		availableForText := availableForRight - overhead
-		if availableForText < 30 { // Very constrained
-			// Use minimum sizes
-			hostnameMaxLen = minHostnameLen
-			branchMaxLen = minBranchLen
-			awsMaxLen = minAwsLen
-			k8sMaxLen = minK8sLen
-			devspaceMaxLen = minDevspaceLen
-		} else if availableForText < (hostnameMaxLen + branchMaxLen + awsMaxLen + k8sMaxLen + devspaceMaxLen) {
-			// Scale down proportionally
-			perComponent := availableForText / componentCount
-			hostnameMaxLen = perComponent
-			branchMaxLen = perComponent
-			awsMaxLen = perComponent
-			k8sMaxLen = perComponent
-			devspaceMaxLen = perComponent
-
-			// Ensure minimums
-			if hostnameMaxLen < minHostnameLen {
-				hostnameMaxLen = minHostnameLen
-			}
-			if branchMaxLen < minBranchLen {
-				branchMaxLen = minBranchLen
-			}
-			if awsMaxLen < minAwsLen {
-				awsMaxLen = minAwsLen
-			}
-			if k8sMaxLen < minK8sLen {
-				k8sMaxLen = minK8sLen
-			}
-			if devspaceMaxLen < minDevspaceLen {
-				devspaceMaxLen = minDevspaceLen
-			}
-		}
+		maxLengths = s.adjustComponentMaxLengths(maxLengths, componentCount, availableWidth)
 	}
 
+	components := s.collectRightComponents(data, awsProfile, maxLengths)
+	return s.renderComponents(components)
+}
+
+type componentMaxLengths struct {
+	hostname int
+	branch   int
+	aws      int
+	k8s      int
+	devspace int
+}
+
+func (s *Statusline) getRightSectionMaxLengths(isCompact bool) componentMaxLengths {
+	const (
+		compactHostname = 20
+		compactBranch   = 25
+		compactAWS      = 20
+		compactK8s      = 20
+		compactDevspace = 15
+		normalHostname  = 35
+		normalBranch    = 40
+		normalAWS       = 35
+		normalK8s       = 35
+		normalDevspace  = 30
+	)
+
+	if isCompact {
+		return componentMaxLengths{
+			hostname: compactHostname,
+			branch:   compactBranch,
+			aws:      compactAWS,
+			k8s:      compactK8s,
+			devspace: compactDevspace,
+		}
+	}
+	return componentMaxLengths{
+		hostname: normalHostname,
+		branch:   normalBranch,
+		aws:      normalAWS,
+		k8s:      normalK8s,
+		devspace: normalDevspace,
+	}
+}
+
+func (s *Statusline) countRightComponents(data *CachedData, awsProfile string) int {
+	count := 0
+	if data.Devspace != "" {
+		count++
+	}
+	if data.Hostname != "" {
+		count++
+	}
+	if data.GitBranch != "" {
+		count++
+	}
+	if awsProfile != "" {
+		count++
+	}
+	if data.K8sContext != "" {
+		count++
+	}
+	return count
+}
+
+func (s *Statusline) adjustComponentMaxLengths(
+	maxLengths componentMaxLengths,
+	componentCount, availableWidth int,
+) componentMaxLengths {
+	const (
+		minHostnameLen = 8
+		minBranchLen   = 10
+		minAwsLen      = 8
+		minK8sLen      = 8
+		minDevspaceLen = 6
+	)
+
+	hostnameMaxLen, branchMaxLen, awsMaxLen, k8sMaxLen, devspaceMaxLen := s.calculateComponentSizes(
+		componentCount, availableWidth,
+		maxLengths.hostname, maxLengths.branch, maxLengths.aws, maxLengths.k8s, maxLengths.devspace,
+		minHostnameLen, minBranchLen, minAwsLen, minK8sLen, minDevspaceLen,
+	)
+
+	return componentMaxLengths{
+		hostname: hostnameMaxLen,
+		branch:   branchMaxLen,
+		aws:      awsMaxLen,
+		k8s:      k8sMaxLen,
+		devspace: devspaceMaxLen,
+	}
+}
+
+func (s *Statusline) collectRightComponents(
+	data *CachedData,
+	awsProfile string,
+	maxLengths componentMaxLengths,
+) []Component {
 	var components []Component
 
-	// Add devspace
 	if data.Devspace != "" {
-		devspace := truncateText(data.Devspace, devspaceMaxLen)
+		devspace := truncateText(data.Devspace, maxLengths.devspace)
 		components = append(components, Component{"mauve", devspace})
 	}
 
-	// Add hostname
 	if data.Hostname != "" {
-		hostname := truncateText(data.Hostname, hostnameMaxLen)
-		text := HostnameIcon + hostname
-		components = append(components, Component{"rosewater", text})
+		hostname := truncateText(data.Hostname, maxLengths.hostname)
+		components = append(components, Component{"rosewater", HostnameIcon + hostname})
 	}
 
-	// Add git
 	if data.GitBranch != "" {
-		branch := truncateText(data.GitBranch, branchMaxLen)
-		text := GitIcon + branch
-		if data.GitStatus != "" {
-			text += " " + data.GitStatus
-		}
-		components = append(components, Component{"sky", text})
+		components = append(components, s.createGitComponent(data, maxLengths.branch))
 	}
 
-	// Add AWS
-	awsProfile = strings.TrimPrefix(awsProfile, "export AWS_PROFILE=")
 	if awsProfile != "" {
-		awsProfile = truncateText(awsProfile, awsMaxLen)
-		components = append(components, Component{"peach", AwsIcon + awsProfile})
+		components = append(components, s.createAwsComponent(awsProfile, maxLengths.aws))
 	}
 
-	// Add K8s
 	if data.K8sContext != "" {
-		k8s := data.K8sContext
-		k8s = strings.TrimPrefix(k8s, "arn:aws:eks:*:*:cluster/")
-		k8s = strings.TrimPrefix(k8s, "gke_*_*_")
-		k8s = truncateText(k8s, k8sMaxLen)
-		components = append(components, Component{"teal", K8sIcon + k8s})
+		components = append(components, s.createK8sComponent(data.K8sContext, maxLengths.k8s))
 	}
 
-	// Build with powerline separators
+	return components
+}
+
+func (s *Statusline) createGitComponent(data *CachedData, maxLen int) Component {
+	branch := truncateText(data.GitBranch, maxLen)
+	text := GitIcon + branch
+	if data.GitStatus != "" {
+		text += " " + data.GitStatus
+	}
+	return Component{"sky", text}
+}
+
+func (s *Statusline) createAwsComponent(awsProfile string, maxLen int) Component {
+	awsProfile = strings.TrimPrefix(awsProfile, "export AWS_PROFILE=")
+	awsProfile = truncateText(awsProfile, maxLen)
+	return Component{"peach", AwsIcon + awsProfile}
+}
+
+func (s *Statusline) createK8sComponent(k8sContext string, maxLen int) Component {
+	k8s := k8sContext
+	k8s = strings.TrimPrefix(k8s, "arn:aws:eks:*:*:cluster/")
+	k8s = strings.TrimPrefix(k8s, "gke_*_*_")
+	k8s = truncateText(k8s, maxLen)
+	return Component{"teal", K8sIcon + k8s}
+}
+
+func (s *Statusline) renderComponents(components []Component) string {
+	if len(components) == 0 {
+		return ""
+	}
+
 	var sb strings.Builder
 	var prevColor string
 
 	for i, comp := range components {
-		// Add separator
-		if i == 0 {
-			// First component
-			sb.WriteString(s.getColorFG(comp.Color))
-			sb.WriteString(RightChevron)
-			sb.WriteString(s.colors.NC())
-		} else {
-			// Between components
-			sb.WriteString(s.getColorBG(prevColor))
-			sb.WriteString(s.getColorFG(comp.Color))
-			sb.WriteString(RightChevron)
-			sb.WriteString(s.colors.NC())
-		}
-
-		// Add content
-		sb.WriteString(s.getColorBG(comp.Color))
-		sb.WriteString(s.colors.BaseFG())
-		sb.WriteString(" ")
-		sb.WriteString(comp.Text)
-		sb.WriteString(" ")
-		sb.WriteString(s.colors.NC())
-
+		s.renderComponentSeparator(&sb, i, comp.Color, prevColor)
+		s.renderComponentContent(&sb, comp)
 		prevColor = comp.Color
 	}
 
@@ -394,14 +363,36 @@ func (s *Statusline) buildRightSection(data *CachedData, isCompact bool, availab
 	return sb.String()
 }
 
-func (s *Statusline) buildMiddleSection(data *CachedData, width int, isCompact bool) string {
+func (s *Statusline) renderComponentSeparator(sb *strings.Builder, index int, color, prevColor string) {
+	if index == 0 {
+		sb.WriteString(s.getColorFG(color))
+		sb.WriteString(RightChevron)
+		sb.WriteString(s.colors.NC())
+	} else {
+		sb.WriteString(s.getColorBG(prevColor))
+		sb.WriteString(s.getColorFG(color))
+		sb.WriteString(RightChevron)
+		sb.WriteString(s.colors.NC())
+	}
+}
+
+func (s *Statusline) renderComponentContent(sb *strings.Builder, comp Component) {
+	sb.WriteString(s.getColorBG(comp.Color))
+	sb.WriteString(s.colors.BaseFG())
+	sb.WriteString(" ")
+	sb.WriteString(comp.Text)
+	sb.WriteString(" ")
+	sb.WriteString(s.colors.NC())
+}
+
+func (s *Statusline) buildMiddleSection(data *CachedData, width int, _ bool) string { // isCompact unused
 	if width <= 0 {
 		return ""
 	}
 
 	// Context bar only appears if there's at least 25 chars of space left after components
 	// This ensures components get priority for space
-	minContextBarWidth := 25
+	const minContextBarWidth = 25
 	if data.ContextLength > 0 && width >= minContextBarWidth {
 		return s.createContextBar(data.ContextLength, width)
 	}
@@ -411,108 +402,114 @@ func (s *Statusline) buildMiddleSection(data *CachedData, width int, isCompact b
 }
 
 func (s *Statusline) createContextBar(contextLength, barWidth int) string {
-	// Always reserve 4 spaces padding on each side
-	const contextBarPadding = 4
-
-	// Calculate available width for the actual bar after padding
-	availableForBar := barWidth - (contextBarPadding * 2) // 4 spaces left, 4 spaces right
-	if availableForBar < 15 {                             // Minimum sensible bar size
-		// Not enough space for a meaningful context bar
+	availableForBar := s.calculateAvailableBarWidth(barWidth)
+	const minSensibleBarSize = 15
+	if availableForBar < minSensibleBarSize {
 		return strings.Repeat(" ", barWidth)
 	}
 
-	// Calculate percentage (160k is auto-compact threshold)
-	percentage := float64(contextLength) * 100.0 / 160000.0
-	if percentage > 100 {
-		percentage = 100
+	percentage := s.calculateContextPercentage(contextLength)
+	bgColor, fgColor, fgLightBg := s.getContextColors(percentage)
+
+	barInfo := s.prepareContextBarInfo(percentage, availableForBar)
+	const minFillWidth = 4
+	if barInfo.fillWidth < minFillWidth {
+		return strings.Repeat(" ", barWidth)
 	}
 
-	// Choose colors based on percentage
-	var bgColor, fgColor, fgLightBg string
-	if percentage < 40 {
-		bgColor = s.colors.GreenBG()
-		fgColor = s.colors.GreenFG()
-		fgLightBg = s.colors.GreenLightBG()
-	} else if percentage < 60 {
-		bgColor = s.colors.YellowBG()
-		fgColor = s.colors.YellowFG()
-		fgLightBg = s.colors.YellowLightBG()
-	} else if percentage < 80 {
-		bgColor = s.colors.PeachBG()
-		fgColor = s.colors.PeachFG()
-		fgLightBg = s.colors.PeachLightBG()
-	} else {
-		bgColor = s.colors.RedBG()
-		fgColor = s.colors.RedFG()
-		fgLightBg = s.colors.RedLightBG()
-	}
+	s.debugContextBarInfo(barWidth, availableForBar, barInfo)
 
+	progressBar := s.buildProgressBar(barInfo.fillWidth, barInfo.filledWidth, fgColor, fgLightBg)
+	return s.assembleContextBar(barInfo, bgColor, fgColor, progressBar, barWidth)
+}
+
+type contextBarInfo struct {
+	label       string
+	percentText string
+	textLength  int
+	fillWidth   int
+	filledWidth int
+}
+
+func (s *Statusline) prepareContextBarInfo(percentage float64, availableForBar int) contextBarInfo {
 	label := ContextIcon + "Context "
 	percentText := fmt.Sprintf(" %.1f%%", percentage)
 	textLength := runewidth.StringWidth(label) + runewidth.StringWidth(percentText)
 
-	// Debug context bar calculations
-	if os.Getenv("DEBUG_WIDTH") == "1" {
-		fmt.Fprintf(os.Stderr, "createContextBar: barWidth=%d, availableForBar=%d, label='%s' width=%d, percentText='%s' width=%d, textLength=%d\n",
-			barWidth, availableForBar, label, runewidth.StringWidth(label), percentText, runewidth.StringWidth(percentText), textLength)
+	const curvesWidth = 2
+	fillWidth := availableForBar - textLength - curvesWidth
+	const percentDivisor = 100.0
+	filledWidth := int(float64(fillWidth) * percentage / percentDivisor)
+
+	return contextBarInfo{
+		label:       label,
+		percentText: percentText,
+		textLength:  textLength,
+		fillWidth:   fillWidth,
+		filledWidth: filledWidth,
 	}
+}
 
-	// Calculate fill width from available bar space
-	fillWidth := availableForBar - textLength - 2 // -2 for curves
-	if fillWidth < 4 {
-		// Not enough space for progress bar
-		return strings.Repeat(" ", barWidth)
+func (s *Statusline) debugContextBarInfo(barWidth, availableForBar int, info contextBarInfo) {
+	if os.Getenv("DEBUG_WIDTH") != "1" {
+		return
 	}
+	fmt.Fprintf(
+		os.Stderr,
+		"createContextBar: barWidth=%d, availableForBar=%d, label='%s' width=%d, percentText='%s' width=%d, textLength=%d\n",
+		barWidth,
+		availableForBar,
+		info.label,
+		runewidth.StringWidth(info.label),
+		info.percentText,
+		runewidth.StringWidth(info.percentText),
+		info.textLength,
+	)
+	fmt.Fprintf(os.Stderr, "  fillWidth=%d, leftPad=4, rightPad=4\n", info.fillWidth)
+}
 
-	// Calculate filled portion
-	filledWidth := int(float64(fillWidth) * percentage / 100.0)
-
-	// Build the progress bar with proper characters
+func (s *Statusline) buildProgressBar(fillWidth, filledWidth int, fgColor, fgLightBg string) string {
 	var bar strings.Builder
-	for i := 0; i < fillWidth; i++ {
-		var char string
-		if i == 0 {
-			if filledWidth > 0 {
-				char = ProgressLeftFull
-			} else {
-				char = ProgressLeftEmpty
-			}
-		} else if i == fillWidth-1 {
-			if i < filledWidth {
-				char = ProgressRightFull
-			} else {
-				char = ProgressRightEmpty
-			}
-		} else {
-			if i < filledWidth {
-				char = ProgressMidFull
-			} else {
-				char = ProgressMidEmpty
-			}
-		}
-
-		// Apply colors - all progress bar characters use the muted background
+	for i := range fillWidth {
+		char := selectProgressChar(i, fillWidth, filledWidth)
 		bar.WriteString(fgLightBg)
 		bar.WriteString(fgColor)
 		bar.WriteString(char)
 		bar.WriteString(s.colors.NC())
 	}
+	return bar.String()
+}
 
-	// Build complete context bar with fixed padding
-	var result strings.Builder
-
-	// Always use exactly 4 spaces of padding on each side
-	leftPad := contextBarPadding
-	rightPad := contextBarPadding
-
-	// Debug padding calculations
-	if os.Getenv("DEBUG_WIDTH") == "1" {
-		fmt.Fprintf(os.Stderr, "  fillWidth=%d, leftPad=%d, rightPad=%d\n",
-			fillWidth, leftPad, rightPad)
+func selectProgressChar(position, fillWidth, filledWidth int) string {
+	switch position {
+	case 0:
+		if filledWidth > 0 {
+			return ProgressLeftFull
+		}
+		return ProgressLeftEmpty
+	case fillWidth - 1:
+		if position < filledWidth {
+			return ProgressRightFull
+		}
+		return ProgressRightEmpty
+	default:
+		if position < filledWidth {
+			return ProgressMidFull
+		}
+		return ProgressMidEmpty
 	}
+}
 
-	// Add left padding (always 4 spaces)
-	result.WriteString(strings.Repeat(" ", leftPad))
+func (s *Statusline) assembleContextBar(
+	info contextBarInfo,
+	bgColor, fgColor, progressBar string,
+	barWidth int,
+) string {
+	var result strings.Builder
+	const contextBarPadding = 4
+
+	// Left padding
+	result.WriteString(strings.Repeat(" ", contextBarPadding))
 
 	// Start curve
 	result.WriteString(fgColor)
@@ -522,16 +519,16 @@ func (s *Statusline) createContextBar(contextLength, barWidth int) string {
 	// Label
 	result.WriteString(bgColor)
 	result.WriteString(s.colors.BaseFG())
-	result.WriteString(label)
+	result.WriteString(info.label)
 	result.WriteString(s.colors.NC())
 
 	// Progress bar
-	result.WriteString(bar.String())
+	result.WriteString(progressBar)
 
 	// Percentage
 	result.WriteString(bgColor)
 	result.WriteString(s.colors.BaseFG())
-	result.WriteString(percentText)
+	result.WriteString(info.percentText)
 	result.WriteString(s.colors.NC())
 
 	// End curve
@@ -539,18 +536,227 @@ func (s *Statusline) createContextBar(contextLength, barWidth int) string {
 	result.WriteString(RightCurve)
 	result.WriteString(s.colors.NC())
 
-	// Add right padding (always 4 spaces)
-	result.WriteString(strings.Repeat(" ", rightPad))
+	// Right padding
+	result.WriteString(strings.Repeat(" ", contextBarPadding))
 
-	// Debug final result
-	finalResult := result.String()
-	if os.Getenv("DEBUG_WIDTH") == "1" {
-		finalWidth := runewidth.StringWidth(stripAnsi(finalResult))
-		fmt.Fprintf(os.Stderr, "  context bar final width=%d (should be %d)\n", finalWidth, barWidth)
-		if finalWidth != barWidth {
-			fmt.Fprintf(os.Stderr, "  WARNING: Context bar width mismatch!\n")
+	s.debugContextBarResult(result.String(), barWidth)
+	return result.String()
+}
+
+func (s *Statusline) debugContextBarResult(finalResult string, barWidth int) {
+	if os.Getenv("DEBUG_WIDTH") != "1" {
+		return
+	}
+	finalWidth := runewidth.StringWidth(stripAnsi(finalResult))
+	fmt.Fprintf(os.Stderr, "  context bar final width=%d (should be %d)\n", finalWidth, barWidth)
+	if finalWidth != barWidth {
+		fmt.Fprintf(os.Stderr, "  WARNING: Context bar width mismatch!\n")
+	}
+}
+
+func (s *Statusline) calculateTextLengths(
+	availableForText, overhead int,
+	dirMaxLen, modelMaxLen int,
+	minDirLen, minModelLen int,
+) (int, int) {
+	if availableForText < overhead+minDirLen+minModelLen {
+		return s.handleVeryConstrainedSpace(
+			availableForText, overhead,
+			minDirLen, minModelLen,
+		)
+	}
+
+	if availableForText < overhead+dirMaxLen+modelMaxLen {
+		return s.scaleDownProportionally(
+			availableForText, overhead,
+			minDirLen, minModelLen,
+		)
+	}
+
+	return dirMaxLen, modelMaxLen
+}
+
+func (s *Statusline) handleVeryConstrainedSpace(
+	availableForText, overhead int,
+	minDirLen, minModelLen int,
+) (int, int) {
+	totalMin := overhead + minDirLen + minModelLen
+	if totalMin > availableForText {
+		// Even minimums don't fit - scale them down
+		scaleRatio := float64(availableForText-overhead) / float64(minDirLen+minModelLen)
+		dirMaxLen := int(float64(minDirLen) * scaleRatio)
+		modelMaxLen := int(float64(minModelLen) * scaleRatio)
+		const absoluteMinLen = 5
+		if dirMaxLen < absoluteMinLen {
+			dirMaxLen = absoluteMinLen
+		}
+		if modelMaxLen < absoluteMinLen {
+			modelMaxLen = absoluteMinLen
+		}
+		return dirMaxLen, modelMaxLen
+	}
+	return minDirLen, minModelLen
+}
+
+func (s *Statusline) scaleDownProportionally(
+	availableForText, overhead int,
+	minDirLen, minModelLen int,
+) (int, int) {
+	const (
+		dirPercent     = 40
+		modelPercent   = 60
+		percentDivisor = 100
+	)
+	textBudget := availableForText - overhead
+	dirMaxLen := textBudget * dirPercent / percentDivisor
+	modelMaxLen := textBudget * modelPercent / percentDivisor
+	if dirMaxLen < minDirLen {
+		dirMaxLen = minDirLen
+	}
+	if modelMaxLen < minModelLen {
+		modelMaxLen = minModelLen
+	}
+	return dirMaxLen, modelMaxLen
+}
+
+func (s *Statusline) calculateComponentSizes(
+	componentCount, availableForRight int,
+	hostnameMaxLen, branchMaxLen, awsMaxLen, k8sMaxLen, devspaceMaxLen int,
+	minHostnameLen, minBranchLen, minAwsLen, minK8sLen, minDevspaceLen int,
+) (int, int, int, int, int) {
+	// Reserve space for separators, curves, spaces, and icons
+	const (
+		perComponentOverhead = 5
+		curvesOverhead       = 4
+		minAvailableForText  = 30
+	)
+	overhead := componentCount*perComponentOverhead + curvesOverhead
+	availableForText := availableForRight - overhead
+
+	if availableForText < minAvailableForText {
+		// Very constrained - use minimum sizes
+		return minHostnameLen, minBranchLen, minAwsLen, minK8sLen, minDevspaceLen
+	}
+
+	totalNeeded := hostnameMaxLen + branchMaxLen + awsMaxLen + k8sMaxLen + devspaceMaxLen
+	if availableForText < totalNeeded {
+		// Scale down proportionally
+		perComponent := availableForText / componentCount
+		return s.ensureMinimumSizes(
+			perComponent, perComponent, perComponent, perComponent, perComponent,
+			minHostnameLen, minBranchLen, minAwsLen, minK8sLen, minDevspaceLen,
+		)
+	}
+
+	return hostnameMaxLen, branchMaxLen, awsMaxLen, k8sMaxLen, devspaceMaxLen
+}
+
+func (s *Statusline) ensureMinimumSizes(
+	hostnameMaxLen, branchMaxLen, awsMaxLen, k8sMaxLen, devspaceMaxLen int,
+	minHostnameLen, minBranchLen, minAwsLen, minK8sLen, minDevspaceLen int,
+) (int, int, int, int, int) {
+	if hostnameMaxLen < minHostnameLen {
+		hostnameMaxLen = minHostnameLen
+	}
+	if branchMaxLen < minBranchLen {
+		branchMaxLen = minBranchLen
+	}
+	if awsMaxLen < minAwsLen {
+		awsMaxLen = minAwsLen
+	}
+	if k8sMaxLen < minK8sLen {
+		k8sMaxLen = minK8sLen
+	}
+	if devspaceMaxLen < minDevspaceLen {
+		devspaceMaxLen = minDevspaceLen
+	}
+	return hostnameMaxLen, branchMaxLen, awsMaxLen, k8sMaxLen, devspaceMaxLen
+}
+
+func (s *Statusline) getTermWidth(data *CachedData) int {
+	const defaultTermWidth = 200
+	if data.TermWidth == 0 {
+		return defaultTermWidth
+	}
+	return data.TermWidth
+}
+
+func (s *Statusline) selectModelIcon() string {
+	icons := []rune(ModelIcons)
+	return string(icons[rand.IntN(len(icons))]) //nolint:gosec // Non-cryptographic randomness is fine for UI
+}
+
+func (s *Statusline) isCompactMode(contextLength int) bool {
+	const compactModeThreshold = 128000
+	return contextLength >= compactModeThreshold
+}
+
+func (s *Statusline) calculateWidths(termWidth int, isCompact bool) (int, int, int) {
+	leftSpacer := 0
+	if s.config.LeftSpacerWidth > 0 {
+		leftSpacer = s.config.LeftSpacerWidth
+	}
+
+	rightSpacer := 0
+	if !isCompact && s.config.RightSpacerWidth > 0 {
+		rightSpacer = s.config.RightSpacerWidth
+	}
+
+	const compactModeReservedChars = 41
+	effectiveWidth := termWidth - leftSpacer - rightSpacer
+	if isCompact {
+		effectiveWidth -= compactModeReservedChars
+	}
+	content := effectiveWidth
+
+	const minContentWidth = 20
+	if content < minContentWidth {
+		content = minContentWidth
+		totalSpacerBudget := effectiveWidth - content
+		if totalSpacerBudget < leftSpacer+rightSpacer {
+			if totalSpacerBudget > 0 {
+				leftSpacer = totalSpacerBudget * leftSpacer / (leftSpacer + rightSpacer)
+				rightSpacer = totalSpacerBudget - leftSpacer
+			} else {
+				leftSpacer = 0
+				rightSpacer = 0
+			}
 		}
 	}
 
-	return result.String()
+	return leftSpacer, rightSpacer, content
+}
+
+func (s *Statusline) calculateAvailableBarWidth(barWidth int) int {
+	const contextBarPadding = 4
+	const paddingMultiplier = 2
+	return barWidth - (contextBarPadding * paddingMultiplier)
+}
+
+func (s *Statusline) calculateContextPercentage(contextLength int) float64 {
+	const autoCompactThreshold = 160000.0
+	const maxPercentage = 100.0
+	percentage := float64(contextLength) * maxPercentage / autoCompactThreshold
+	if percentage > maxPercentage {
+		return maxPercentage
+	}
+	return percentage
+}
+
+func (s *Statusline) getContextColors(percentage float64) (string, string, string) {
+	const (
+		greenThreshold  = 40.0
+		yellowThreshold = 60.0
+		peachThreshold  = 80.0
+	)
+	switch {
+	case percentage < greenThreshold:
+		return s.colors.GreenBG(), s.colors.GreenFG(), s.colors.GreenLightBG()
+	case percentage < yellowThreshold:
+		return s.colors.YellowBG(), s.colors.YellowFG(), s.colors.YellowLightBG()
+	case percentage < peachThreshold:
+		return s.colors.PeachBG(), s.colors.PeachFG(), s.colors.PeachLightBG()
+	default:
+		return s.colors.RedBG(), s.colors.RedFG(), s.colors.RedLightBG()
+	}
 }

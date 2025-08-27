@@ -16,7 +16,7 @@ func TestContextBarPadding(t *testing.T) {
 	}
 
 	t.Run("context bar has 4 space padding on each side", func(t *testing.T) {
-		s := New(deps)
+		s := CreateStatusline(deps)
 		data := &CachedData{
 			ModelDisplay:  "Claude",
 			CurrentDir:    "/home/user",
@@ -57,7 +57,7 @@ func TestContextBarPadding(t *testing.T) {
 	})
 
 	t.Run("context bar content shrinks with padding", func(t *testing.T) {
-		s := New(deps)
+		s := CreateStatusline(deps)
 
 		// Test with different widths to see how the bar adapts
 		testCases := []struct {
@@ -115,7 +115,7 @@ func TestContextBarPadding(t *testing.T) {
 	})
 
 	t.Run("context bar respects minimum size with padding", func(t *testing.T) {
-		s := New(deps)
+		s := CreateStatusline(deps)
 
 		// Very narrow terminal where context bar won't fit with padding
 		deps.TerminalWidth = &MockTerminalWidth{width: 50}
@@ -152,7 +152,7 @@ func TestContextBarPadding(t *testing.T) {
 
 	t.Run("padding is exactly 4 spaces on each side", func(t *testing.T) {
 		// Direct test of createContextBar method
-		s := New(deps)
+		s := CreateStatusline(deps)
 		s.colors = CatppuccinMocha{} // Initialize colors
 
 		// Give it plenty of width so we can clearly see the padding

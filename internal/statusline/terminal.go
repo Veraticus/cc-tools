@@ -1,22 +1,102 @@
 package statusline
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/term"
 )
 
-// DefaultTerminalWidth provides terminal width detection
+// DefaultTerminalWidth provides terminal width detection.
 type DefaultTerminalWidth struct{}
 
-// GetWidth returns the current terminal width
+// GetWidth returns the current terminal width.
 func (t *DefaultTerminalWidth) GetWidth() int {
+	// Try various methods in priority order
+	widthMethods := []func() int{
+		t.getTestOverride,
+		t.getColumnsEnv,
+		t.getTmuxIfAvailable,
+		t.getFromStderr,
+		t.getFromStdout,
+		t.getFromStdin,
+		t.getFromTTY,
+		t.getSSHWidth,
+		getTputWidth,
+		getSttyWidth,
+	}
 
-	// Priority 1: Explicit override for testing
+	for _, method := range widthMethods {
+		if width := method(); width > 0 {
+			return width
+		}
+	}
+
+	// Default fallback
+	return t.getDefault()
+}
+
+func (t *DefaultTerminalWidth) getColumnsEnv() int {
+	if columns := os.Getenv("COLUMNS"); columns != "" {
+		if width, err := strconv.Atoi(columns); err == nil && width > 0 {
+			return width
+		}
+	}
+	return 0
+}
+
+func (t *DefaultTerminalWidth) getTmuxIfAvailable() int {
+	if tmux := os.Getenv("TMUX"); tmux != "" {
+		return getTmuxWidth()
+	}
+	return 0
+}
+
+func (t *DefaultTerminalWidth) getFromStderr() int {
+	if width, _, err := term.GetSize(int(os.Stderr.Fd())); err == nil && width > 0 {
+		return width
+	}
+	return 0
+}
+
+func (t *DefaultTerminalWidth) getFromStdout() int {
+	if width, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && width > 0 {
+		return width
+	}
+	return 0
+}
+
+func (t *DefaultTerminalWidth) getFromStdin() int {
+	if width, _, err := term.GetSize(int(os.Stdin.Fd())); err == nil && width > 0 {
+		return width
+	}
+	return 0
+}
+
+func (t *DefaultTerminalWidth) getFromTTY() int {
+	if tty, err := os.Open("/dev/tty"); err == nil {
+		defer func() { _ = tty.Close() }()
+		if width, _, sizeErr := term.GetSize(int(tty.Fd())); sizeErr == nil && width > 0 {
+			return width
+		}
+	}
+	return 0
+}
+
+func (t *DefaultTerminalWidth) getDefault() int {
+	const defaultWidth = 200
+	if os.Getenv("DEBUG_WIDTH") == "1" {
+		fmt.Fprintf(os.Stderr, "Using default width: %d\n", defaultWidth)
+	}
+	return defaultWidth
+}
+
+func (t *DefaultTerminalWidth) getTestOverride() int {
 	if testWidth := os.Getenv("CLAUDE_STATUSLINE_WIDTH"); testWidth != "" {
 		if width, err := strconv.Atoi(testWidth); err == nil && width > 0 {
 			if os.Getenv("DEBUG_WIDTH") == "1" {
@@ -25,74 +105,26 @@ func (t *DefaultTerminalWidth) GetWidth() int {
 			return width
 		}
 	}
+	return 0
+}
 
-	// Priority 2: COLUMNS environment variable (commonly set)
-	if columns := os.Getenv("COLUMNS"); columns != "" {
-		if width, err := strconv.Atoi(columns); err == nil && width > 0 {
-			return width
-		}
-	}
-
-	// Priority 3: Check if we're in tmux and get width directly
-	if tmux := os.Getenv("TMUX"); tmux != "" {
-		if width := getTmuxWidth(); width > 0 {
-			return width
-		}
-	}
-
-	// Priority 4: Use golang.org/x/term for proper terminal detection
-	// Try stderr first (most likely to be connected to terminal when piping)
-	if width, _, err := term.GetSize(int(os.Stderr.Fd())); err == nil && width > 0 {
-		return width
-	}
-
-	// Try stdout
-	if width, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && width > 0 {
-		return width
-	}
-
-	// Try stdin
-	if width, _, err := term.GetSize(int(os.Stdin.Fd())); err == nil && width > 0 {
-		return width
-	}
-
-	// Priority 5: Try opening /dev/tty directly
-	if tty, err := os.Open("/dev/tty"); err == nil {
-		defer tty.Close()
-		if width, _, err := term.GetSize(int(tty.Fd())); err == nil && width > 0 {
-			return width
-		}
-	}
-
-	// Priority 6: Try SSH_TTY if we're in an SSH session
+func (t *DefaultTerminalWidth) getSSHWidth() int {
 	if sshTty := os.Getenv("SSH_TTY"); sshTty != "" {
-		if file, err := os.Open(sshTty); err == nil {
-			defer file.Close()
-			if width, _, err := term.GetSize(int(file.Fd())); err == nil && width > 0 {
+		if file, err := os.Open(sshTty); err == nil { //nolint:gosec // SSH_TTY is a trusted env var
+			defer func() { _ = file.Close() }()
+			if width, _, sizeErr := term.GetSize(int(file.Fd())); sizeErr == nil && width > 0 {
 				return width
 			}
 		}
 	}
-
-	// Priority 7: Try tput command (may work in some edge cases)
-	if width := getTputWidth(); width > 0 {
-		return width
-	}
-
-	// Priority 8: Try stty size command
-	if width := getSttyWidth(); width > 0 {
-		return width
-	}
-
-	// Default fallback - use a reasonable width that allows context bar
-	if os.Getenv("DEBUG_WIDTH") == "1" {
-		fmt.Fprintf(os.Stderr, "Using default width: 200\n")
-	}
-	return 200
+	return 0
 }
 
 func getTmuxWidth() int {
-	cmd := exec.Command("tmux", "display-message", "-p", "#{window_width}")
+	const commandTimeout = 2 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{window_width}")
 	output, err := cmd.Output()
 	if err != nil {
 		return 0
@@ -107,7 +139,10 @@ func getTmuxWidth() int {
 }
 
 func getTputWidth() int {
-	cmd := exec.Command("tput", "cols")
+	const commandTimeout = 2 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "tput", "cols")
 	output, err := cmd.Output()
 	if err != nil {
 		return 0
@@ -122,7 +157,10 @@ func getTputWidth() int {
 }
 
 func getSttyWidth() int {
-	cmd := exec.Command("stty", "size")
+	const commandTimeout = 2 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "stty", "size")
 	cmd.Stdin = os.Stdin // Important for stty to work
 	output, err := cmd.Output()
 	if err != nil {
@@ -130,8 +168,9 @@ func getSttyWidth() int {
 	}
 
 	// stty size returns "rows cols"
+	const expectedParts = 2
 	parts := strings.Fields(string(output))
-	if len(parts) != 2 {
+	if len(parts) != expectedParts {
 		return 0
 	}
 

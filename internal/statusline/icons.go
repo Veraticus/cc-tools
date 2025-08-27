@@ -1,25 +1,40 @@
 package statusline
 
 const (
-	LeftChevron  = ""
-	LeftCurve    = ""
-	RightCurve   = ""
+	// LeftChevron is the left chevron powerline separator.
+	LeftChevron = ""
+	// LeftCurve is the left curved powerline separator.
+	LeftCurve = ""
+	// RightCurve is the right curved powerline separator.
+	RightCurve = ""
+	// RightChevron is the right chevron powerline separator.
 	RightChevron = ""
 
-	// Icons for different sections (customize as needed)
-	GitIcon      = " "
-	AwsIcon      = " "
-	K8sIcon      = "☸ "
+	// GitIcon is the icon for git branch display.
+	GitIcon = " "
+	// AwsIcon is the icon for AWS profile display.
+	AwsIcon = " "
+	// K8sIcon is the icon for Kubernetes context display.
+	K8sIcon = "☸ "
+	// DevspaceIcon is the icon for devspace display (set dynamically).
 	DevspaceIcon = "" // Will be set based on devspace name
+	// HostnameIcon is the icon for hostname display.
 	HostnameIcon = " "
-	ContextIcon  = " "
-	ModelIcons   = "󰚩󱚝󱚟󱚡󱚣󱚥"
+	// ContextIcon is the icon for context bar display.
+	ContextIcon = " "
+	// ModelIcons contains various icons for model display.
+	ModelIcons = "󰚩󱚝󱚟󱚡󱚣󱚥"
 
-	// Context bar characters
-	ProgressLeftEmpty  = ""
-	ProgressMidEmpty   = ""
+	// ProgressLeftEmpty is the left empty progress bar character.
+	ProgressLeftEmpty = ""
+	// ProgressMidEmpty is the middle empty progress bar character.
+	ProgressMidEmpty = ""
+	// ProgressRightEmpty is the right empty progress bar character.
 	ProgressRightEmpty = ""
-	ProgressLeftFull   = ""
-	ProgressMidFull    = ""
-	ProgressRightFull  = ""
+	// ProgressLeftFull is the left filled progress bar character.
+	ProgressLeftFull = ""
+	// ProgressMidFull is the middle filled progress bar character.
+	ProgressMidFull = ""
+	// ProgressRightFull is the right filled progress bar character.
+	ProgressRightFull = ""
 )

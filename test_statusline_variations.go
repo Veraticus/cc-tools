@@ -1,12 +1,15 @@
+// Package main provides test utilities for testing statusline variations.
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mattn/go-runewidth"
 )
@@ -25,11 +28,13 @@ type TestCase struct {
 func main() {
 	// Get actual terminal width
 	termWidth := getTerminalWidth()
-	fmt.Printf("Terminal width: %d\n", termWidth)
-	fmt.Println(strings.Repeat("=", termWidth))
+	fmt.Printf("Terminal width: %d\n", termWidth) //nolint:forbidigo // Test output
+	fmt.Println(strings.Repeat("=", termWidth))   //nolint:forbidigo // Test output
 
 	// Set up environment
-	os.Setenv("COLUMNS", strconv.Itoa(termWidth))
+	if err := os.Setenv("COLUMNS", strconv.Itoa(termWidth)); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to set COLUMNS: %v\n", err)
+	}
 
 	testCases := []TestCase{
 		// Minimal
@@ -61,55 +66,71 @@ func main() {
 	}
 
 	for i, tc := range testCases {
-		fmt.Printf("\n%d. %s\n", i+1, tc.Name)
+		fmt.Printf("\n%d. %s\n", i+1, tc.Name) //nolint:forbidigo // Test output
+		runTestCase(tc, termWidth)
+		fmt.Println() //nolint:forbidigo // Test output
+	}
+}
 
-		// Build JSON input
-		input := buildJSONInput(tc)
+func runTestCase(tc TestCase, termWidth int) {
+	// Build JSON input
+	input := buildJSONInput(tc)
 
-		// Set environment variables
-		if tc.HasDevspace {
-			os.Setenv("TMUX_DEVSPACE", "mars")
-		} else {
-			os.Unsetenv("TMUX_DEVSPACE")
+	// Set environment variables
+	setupTestEnvironment(tc, termWidth)
+
+	// Clear cache
+	clearCache()
+
+	// Run Go statusline
+	runStatusline("./build/statusline", input, termWidth)
+}
+
+func setupTestEnvironment(tc TestCase, termWidth int) {
+	setEnvVar("TMUX_DEVSPACE", "mars", tc.HasDevspace)
+	setEnvVar("HOSTNAME", "vermissian", tc.HasHostname)
+	setEnvVar("AWS_PROFILE", "dev-account", tc.HasAWS)
+
+	// Set terminal width for statusline commands
+	if err := os.Setenv("CLAUDE_STATUSLINE_WIDTH", strconv.Itoa(termWidth)); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to set CLAUDE_STATUSLINE_WIDTH: %v\n", err)
+	}
+}
+
+func setEnvVar(key, value string, shouldSet bool) {
+	if shouldSet {
+		if err := os.Setenv(key, value); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to set %s: %v\n", key, err)
 		}
-
-		if tc.HasHostname {
-			os.Setenv("HOSTNAME", "vermissian")
-		} else {
-			os.Unsetenv("HOSTNAME")
+	} else {
+		if err := os.Unsetenv(key); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to unset %s: %v\n", key, err)
 		}
+	}
+}
 
-		if tc.HasAWS {
-			os.Setenv("AWS_PROFILE", "dev-account")
-		} else {
-			os.Unsetenv("AWS_PROFILE")
-		}
-
-		// Clear cache
-		exec.Command("rm", "-f", "/dev/shm/claude_statusline_*").Run()
-
-		// Set terminal width for statusline commands
-		os.Setenv("CLAUDE_STATUSLINE_WIDTH", strconv.Itoa(termWidth))
-
-		// Run Go statusline
-		runStatusline("./build/statusline", input, termWidth)
-
-		fmt.Println()
+func clearCache() {
+	const cacheTimeout = 5 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), cacheTimeout)
+	defer cancel()
+	if err := exec.CommandContext(ctx, "rm", "-f", "/dev/shm/claude_statusline_*").Run(); err != nil {
+		// Cache clear failed - continue anyway
+		_ = err
 	}
 }
 
 func buildJSONInput(tc TestCase) string {
-	data := map[string]interface{}{
-		"model": map[string]interface{}{
+	data := map[string]any{
+		"model": map[string]any{
 			"display_name": "Claude 3 Opus",
 		},
-		"workspace": map[string]interface{}{
+		"workspace": map[string]any{
 			"project_dir": os.Getenv("HOME") + "/Personal/cc-tools",
 		},
 	}
 
 	if tc.HasGit {
-		data["git_info"] = map[string]interface{}{
+		data["git_info"] = map[string]any{
 			"branch":       "main",
 			"is_git_repo":  true,
 			"has_modified": true,
@@ -118,74 +139,63 @@ func buildJSONInput(tc TestCase) string {
 
 	// Add transcript path for context bar
 	if tc.HasContext {
-		// Create a mock transcript with appropriate token count
-		transcriptPath := "/tmp/mock_transcript.jsonl"
-		var contextTokens int
-
-		// Determine token count based on test name
-		if strings.Contains(tc.Name, "25%") {
-			contextTokens = 40000 // 25% of 160k
-		} else if strings.Contains(tc.Name, "50%") {
-			contextTokens = 80000 // 50% of 160k
-		} else if strings.Contains(tc.Name, "75%") {
-			contextTokens = 120000 // 75% of 160k
-		} else if strings.Contains(tc.Name, "100%") {
-			contextTokens = 160000 // 100% of 160k
-		} else if tc.IsCompact {
-			contextTokens = 130000 // Just over compact threshold
-		} else {
-			contextTokens = 80000 // Default 50%
-		}
-
-		// Create mock transcript file
-		transcript := fmt.Sprintf(`{"message": {"usage": {"input_tokens": %d, "output_tokens": 5000}}}`, contextTokens)
-		os.WriteFile(transcriptPath, []byte(transcript), 0644)
-		data["transcript_path"] = transcriptPath
+		addContextData(data, tc)
 	}
 
 	// For compact mode without context, just set high cost to show we're in a long session
 	if tc.IsCompact && !tc.HasContext {
-		data["cost"] = map[string]interface{}{
-			"total_cost_usd": 5.50,
-			"input_tokens":   500000,
-			"output_tokens":  100000,
+		const (
+			sampleCostUSD      = 5.50
+			sampleInputTokens  = 500000
+			sampleOutputTokens = 100000
+		)
+		data["cost"] = map[string]any{
+			"total_cost_usd": sampleCostUSD,
+			"input_tokens":   sampleInputTokens,
+			"output_tokens":  sampleOutputTokens,
 		}
 	}
 
 	// Mock K8s context by creating a fake kubeconfig
-	if tc.HasK8s {
-		kubeconfig := "/tmp/mock_kubeconfig"
-		os.WriteFile(kubeconfig, []byte("current-context: production-cluster\n"), 0644)
-		os.Setenv("CLAUDE_STATUSLINE_KUBECONFIG", kubeconfig)
-	} else {
-		os.Setenv("CLAUDE_STATUSLINE_KUBECONFIG", "/dev/null")
-	}
+	setupK8sConfig(tc.HasK8s)
 
 	jsonBytes, _ := json.Marshal(data)
 	return string(jsonBytes)
 }
 
 func runStatusline(command string, input string, termWidth int) {
-	cmd := exec.Command("bash", "-c", fmt.Sprintf("echo '%s' | CLAUDE_STATUSLINE_WIDTH=%d %s 2>/dev/null", input, termWidth, command))
+	const commandTimeout = 10 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+	defer cancel()
+	cmd := exec.CommandContext( //nolint:gosec // Test command with controlled inputs
+		ctx,
+		"bash",
+		"-c",
+		fmt.Sprintf("echo '%s' | CLAUDE_STATUSLINE_WIDTH=%d %s 2>/dev/null", input, termWidth, command),
+	)
 	output, _ := cmd.Output()
 	if len(output) > 0 {
-		fmt.Print(string(output))
+		fmt.Print(string(output)) //nolint:forbidigo // Test output
 		// Measure the rune width
 		clean := stripAnsiCodes(string(output))
 		width := runewidth.StringWidth(clean)
-		fmt.Printf("\n  Width: %d, Terminal: %d, Diff: %+d", width, termWidth, width-termWidth)
+		// Display width information (test output)
+		fmt.Printf( //nolint:forbidigo // Test output
+			"\n  Width: %d, Terminal: %d, Diff: %+d",
+			width, termWidth, width-termWidth,
+		)
 
 		// Check for trailing spaces
-		if len(clean) > 0 && clean[len(clean)-1] == ' ' {
+		if clean != "" && clean[len(clean)-1] == ' ' {
 			// Count trailing spaces
 			spaces := 0
 			for i := len(clean) - 1; i >= 0 && clean[i] == ' '; i-- {
 				spaces++
 			}
-			fmt.Printf(" [%d trailing space(s)]", spaces)
+			fmt.Printf(" [%d trailing space(s)]", spaces) //nolint:forbidigo // Test output
 		}
 	} else {
-		fmt.Print("[no output]")
+		fmt.Print("[no output]") //nolint:forbidigo // Test output
 	}
 }
 
@@ -193,17 +203,72 @@ func stripAnsiCodes(text string) string {
 	var result strings.Builder
 	inEscape := false
 	for _, r := range text {
-		if r == '\033' {
+		switch {
+		case r == '\033':
 			inEscape = true
-		} else if inEscape {
+		case inEscape:
 			if r == 'm' {
 				inEscape = false
 			}
-		} else {
+		default:
 			result.WriteRune(r)
 		}
 	}
 	return result.String()
+}
+
+func addContextData(data map[string]any, tc TestCase) {
+	transcriptPath := "/tmp/mock_transcript.jsonl"
+	contextTokens := getContextTokens(tc)
+
+	// Create mock transcript file
+	transcript := fmt.Sprintf(`{"message": {"usage": {"input_tokens": %d, "output_tokens": 5000}}}`, contextTokens)
+	const fileMode = 0600
+	if err := os.WriteFile(transcriptPath, []byte(transcript), fileMode); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to write transcript: %v\n", err)
+	}
+	data["transcript_path"] = transcriptPath
+}
+
+func getContextTokens(tc TestCase) int {
+	const (
+		quarterTokens      = 40000  // 25% of 160k
+		halfTokens         = 80000  // 50% of 160k
+		threeQuarterTokens = 120000 // 75% of 160k
+		fullTokens         = 160000 // 100% of 160k
+		compactTokens      = 130000 // Just over compact threshold
+	)
+
+	switch {
+	case strings.Contains(tc.Name, "25%"):
+		return quarterTokens
+	case strings.Contains(tc.Name, "50%"):
+		return halfTokens
+	case strings.Contains(tc.Name, "75%"):
+		return threeQuarterTokens
+	case strings.Contains(tc.Name, "100%"):
+		return fullTokens
+	case tc.IsCompact:
+		return compactTokens
+	default:
+		return halfTokens // Default 50%
+	}
+}
+
+func setupK8sConfig(hasK8s bool) {
+	if hasK8s {
+		kubeconfig := "/tmp/mock_kubeconfig"
+		if err := os.WriteFile(kubeconfig, []byte("current-context: production-cluster\n"), 0600); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to write kubeconfig: %v\n", err)
+		}
+		if err := os.Setenv("CLAUDE_STATUSLINE_KUBECONFIG", kubeconfig); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to set CLAUDE_STATUSLINE_KUBECONFIG: %v\n", err)
+		}
+	} else {
+		if err := os.Setenv("CLAUDE_STATUSLINE_KUBECONFIG", "/dev/null"); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to set CLAUDE_STATUSLINE_KUBECONFIG: %v\n", err)
+		}
+	}
 }
 
 func getTerminalWidth() int {
@@ -216,23 +281,30 @@ func getTerminalWidth() int {
 
 	// Check if we're in tmux and get width directly from tmux
 	if tmux := os.Getenv("TMUX"); tmux != "" {
-		cmd := exec.Command("tmux", "display-message", "-p", "#{window_width}")
+		const commandTimeout = 5 * time.Second
+		ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{window_width}")
 		if output, err := cmd.Output(); err == nil {
-			if width, err := strconv.Atoi(strings.TrimSpace(string(output))); err == nil && width > 0 {
+			if width, parseErr := strconv.Atoi(strings.TrimSpace(string(output))); parseErr == nil && width > 0 {
 				return width
 			}
 		}
 	}
 
 	// Try tput
-	cmd := exec.Command("tput", "cols")
+	const commandTimeout = 5 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "tput", "cols")
 	output, err := cmd.Output()
 	if err == nil {
-		if width, err := strconv.Atoi(strings.TrimSpace(string(output))); err == nil && width > 0 {
+		if width, parseErr := strconv.Atoi(strings.TrimSpace(string(output))); parseErr == nil && width > 0 {
 			return width
 		}
 	}
 
 	// Default fallback
-	return 200
+	const defaultTermWidth = 200
+	return defaultTermWidth
 }

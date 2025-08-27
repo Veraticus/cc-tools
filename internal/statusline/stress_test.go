@@ -34,7 +34,7 @@ func TestStatuslineStress(t *testing.T) {
 		TerminalWidth: &MockTerminalWidth{width: 100},
 	}
 
-	s := New(deps)
+	s := CreateStatusline(deps)
 
 	// Prepare a typical input
 	input := &Input{
@@ -106,7 +106,7 @@ func TestStatuslineStress(t *testing.T) {
 		renders := int(duration / interval)
 
 		start := time.Now()
-		for i := 0; i < renders; i++ {
+		for range renders {
 			reader := bytes.NewReader(jsonData)
 			s.Generate(reader)
 			time.Sleep(interval)
@@ -136,12 +136,12 @@ func TestStatuslineStress(t *testing.T) {
 		var wg sync.WaitGroup
 		start := time.Now()
 
-		for i := 0; i < concurrency; i++ {
+		for range concurrency {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				localS := New(deps) // Each goroutine gets its own instance
-				for j := 0; j < rendersPerGoroutine; j++ {
+				localS := CreateStatusline(deps) // Each goroutine gets its own instance
+				for range rendersPerGoroutine {
 					reader := bytes.NewReader(jsonData)
 					localS.Generate(reader)
 				}
@@ -204,7 +204,7 @@ func TestStatuslineStress(t *testing.T) {
 	})
 }
 
-// countingFileReader wraps a FileReader and counts operations
+// countingFileReader wraps a FileReader and counts operations.
 type countingFileReader struct {
 	wrapped     FileReader
 	readCount   *int64

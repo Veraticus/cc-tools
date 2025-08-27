@@ -16,7 +16,7 @@ func TestConfigurableSpacers(t *testing.T) {
 	}
 
 	t.Run("default spacers", func(t *testing.T) {
-		s := New(deps)
+		s := CreateStatusline(deps)
 		data := &CachedData{
 			ModelDisplay:  "Claude",
 			CurrentDir:    "/home/user",

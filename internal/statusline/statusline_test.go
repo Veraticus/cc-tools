@@ -2,13 +2,12 @@ package statusline
 
 import (
 	"bytes"
-	"os"
 	"strings"
 	"testing"
 	"time"
 )
 
-// MockFileReader implements FileReader for testing
+// MockFileReader implements FileReader for testing.
 type MockFileReader struct {
 	files map[string][]byte
 	times map[string]time.Time
@@ -40,7 +39,7 @@ func (m *MockFileReader) ModTime(path string) (time.Time, error) {
 	return time.Now(), nil
 }
 
-// MockCommandRunner implements CommandRunner for testing
+// MockCommandRunner implements CommandRunner for testing.
 type MockCommandRunner struct {
 	responses map[string][]byte
 }
@@ -59,7 +58,7 @@ func (m *MockCommandRunner) Run(command string, args ...string) ([]byte, error) 
 	return []byte(""), nil
 }
 
-// MockEnvReader implements EnvReader for testing
+// MockEnvReader implements EnvReader for testing.
 type MockEnvReader struct {
 	vars map[string]string
 }
@@ -74,7 +73,7 @@ func (m *MockEnvReader) Get(key string) string {
 	return m.vars[key]
 }
 
-// MockTerminalWidth implements TerminalWidth for testing
+// MockTerminalWidth implements TerminalWidth for testing.
 type MockTerminalWidth struct {
 	width int
 }
@@ -100,9 +99,11 @@ func TestStatuslineGenerate(t *testing.T) {
 				"workspace": {"project_dir": "/home/user/project"}
 			}`,
 			setup: func(deps *Dependencies) {
-				deps.EnvReader.(*MockEnvReader).vars["HOME"] = "/home/user"
+				if envReader, ok := deps.EnvReader.(*MockEnvReader); ok {
+					envReader.vars["HOME"] = "/home/user"
+				}
 				// Also set actual HOME env for formatPath
-				os.Setenv("HOME", "/home/user")
+				t.Setenv("HOME", "/home/user")
 			},
 			contains: []string{
 				"~/project",     // Directory
@@ -116,11 +117,13 @@ func TestStatuslineGenerate(t *testing.T) {
 				"workspace": {"project_dir": "/home/user/project"}
 			}`,
 			setup: func(deps *Dependencies) {
-				deps.EnvReader.(*MockEnvReader).vars["HOME"] = "/home/user"
+				if envReader, ok := deps.EnvReader.(*MockEnvReader); ok {
+					envReader.vars["HOME"] = "/home/user"
+				}
 				// Also set actual HOME env for formatPath
-				os.Setenv("HOME", "/home/user")
+				t.Setenv("HOME", "/home/user")
 				// Add git files
-				fr := deps.FileReader.(*MockFileReader)
+				fr, _ := deps.FileReader.(*MockFileReader)
 				fr.files["/home/user/project/.git"] = []byte{} // Make .git exist as a directory
 				fr.files["/home/user/project/.git/HEAD"] = []byte("ref: refs/heads/main\n")
 				fr.files["/home/user/project/.git/index"] = []byte("index")
@@ -139,10 +142,14 @@ func TestStatuslineGenerate(t *testing.T) {
 				"transcript_path": "/tmp/transcript.jsonl"
 			}`,
 			setup: func(deps *Dependencies) {
-				deps.EnvReader.(*MockEnvReader).vars["HOME"] = "/home/user"
-				fr := deps.FileReader.(*MockFileReader)
+				if envReader, ok := deps.EnvReader.(*MockEnvReader); ok {
+					envReader.vars["HOME"] = "/home/user"
+				}
+				fr, _ := deps.FileReader.(*MockFileReader)
 				// Add transcript with token usage
-				fr.files["/tmp/transcript.jsonl"] = []byte(`{"message": {"usage": {"input_tokens": 1500, "output_tokens": 300}}}`)
+				fr.files["/tmp/transcript.jsonl"] = []byte(
+					`{"message": {"usage": {"input_tokens": 1500, "output_tokens": 300}}}`,
+				)
 			},
 			contains: []string{
 				"↑1.5k", // Input tokens
@@ -156,8 +163,12 @@ func TestStatuslineGenerate(t *testing.T) {
 				"workspace": {"project_dir": "/home/user/project"}
 			}`,
 			setup: func(deps *Dependencies) {
-				deps.EnvReader.(*MockEnvReader).vars["HOME"] = "/home/user"
-				deps.EnvReader.(*MockEnvReader).vars["AWS_PROFILE"] = "dev-account"
+				if envReader, ok := deps.EnvReader.(*MockEnvReader); ok {
+					envReader.vars["HOME"] = "/home/user"
+				}
+				if envReader, ok := deps.EnvReader.(*MockEnvReader); ok {
+					envReader.vars["AWS_PROFILE"] = "dev-account"
+				}
 			},
 			contains: []string{
 				"dev-account", // AWS profile
@@ -170,8 +181,10 @@ func TestStatuslineGenerate(t *testing.T) {
 				"workspace": {"project_dir": "/home/user/project"}
 			}`,
 			setup: func(deps *Dependencies) {
-				deps.EnvReader.(*MockEnvReader).vars["HOME"] = "/home/user"
-				fr := deps.FileReader.(*MockFileReader)
+				if envReader, ok := deps.EnvReader.(*MockEnvReader); ok {
+					envReader.vars["HOME"] = "/home/user"
+				}
+				fr, _ := deps.FileReader.(*MockFileReader)
 				// Add kubeconfig with context
 				fr.files["/home/user/.kube/config"] = []byte("current-context: production-cluster\n")
 			},
@@ -184,8 +197,6 @@ func TestStatuslineGenerate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Save and restore HOME env var
-			oldHome := os.Getenv("HOME")
-			defer os.Setenv("HOME", oldHome)
 
 			// Create mock dependencies
 			deps := &Dependencies{
@@ -203,7 +214,7 @@ func TestStatuslineGenerate(t *testing.T) {
 			}
 
 			// Create statusline
-			sl := New(deps)
+			sl := CreateStatusline(deps)
 
 			// Generate output
 			reader := bytes.NewReader([]byte(tt.input))
@@ -237,9 +248,7 @@ func TestFormatPath(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
 			// Set HOME env var temporarily
-			oldHome := os.Getenv("HOME")
-			os.Setenv("HOME", tt.home)
-			defer os.Setenv("HOME", oldHome)
+			t.Setenv("HOME", tt.home)
 
 			result := formatPath(tt.input)
 			if result != tt.expected {
@@ -303,7 +312,7 @@ func TestContextBar(t *testing.T) {
 		CacheDuration: 0,
 	}
 
-	sl := New(deps)
+	sl := CreateStatusline(deps)
 
 	tests := []struct {
 		contextLength int
@@ -355,7 +364,7 @@ func TestGitInfo(t *testing.T) {
 	deps := &Dependencies{
 		FileReader: fr,
 	}
-	sl := New(deps)
+	sl := CreateStatusline(deps)
 
 	// Test with main branch
 	fr.files["/project/.git"] = []byte{} // Make .git exist as a directory
@@ -386,7 +395,7 @@ func TestDevspace(t *testing.T) {
 	deps := &Dependencies{
 		EnvReader: env,
 	}
-	sl := New(deps)
+	sl := CreateStatusline(deps)
 
 	tests := []struct {
 		devspace       string

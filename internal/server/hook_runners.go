@@ -28,7 +28,7 @@ func NewHookLintRunner(debug bool, timeoutSecs, cooldownSecs int) *HookLintRunne
 }
 
 // Run executes the lint hook with the given input.
-func (r *HookLintRunner) Run(ctx context.Context, input io.Reader) (io.Reader, error) {
+func (r *HookLintRunner) Run(_ context.Context, input io.Reader) (io.Reader, error) {
 	// Read input
 	inputBytes, err := io.ReadAll(input)
 	if err != nil {
@@ -46,6 +46,7 @@ func (r *HookLintRunner) Run(ctx context.Context, input io.Reader) (io.Reader, e
 	deps.Stderr = outputWriter
 
 	// Run the hook
+	//nolint:contextcheck // hooks package doesn't support context yet
 	exitCode := hooks.RunSmartHookWithDeps(hooks.CommandTypeLint, r.debug, r.timeoutSecs, r.cooldownSecs, deps)
 
 	// Check exit code
@@ -78,7 +79,7 @@ func NewHookTestRunner(debug bool, timeoutSecs, cooldownSecs int) *HookTestRunne
 }
 
 // Run executes the test hook with the given input.
-func (r *HookTestRunner) Run(ctx context.Context, input io.Reader) (io.Reader, error) {
+func (r *HookTestRunner) Run(_ context.Context, input io.Reader) (io.Reader, error) {
 	// Read input
 	inputBytes, err := io.ReadAll(input)
 	if err != nil {
@@ -96,6 +97,7 @@ func (r *HookTestRunner) Run(ctx context.Context, input io.Reader) (io.Reader, e
 	deps.Stderr = outputWriter
 
 	// Run the hook
+	//nolint:contextcheck // hooks package doesn't support context yet
 	exitCode := hooks.RunSmartHookWithDeps(hooks.CommandTypeTest, r.debug, r.timeoutSecs, r.cooldownSecs, deps)
 
 	// Check exit code
@@ -126,7 +128,7 @@ func NewStatuslineRunner(cacheDir string, cacheDuration int) *StatuslineRunner {
 }
 
 // Generate creates a statusline from the input.
-func (r *StatuslineRunner) Generate(ctx context.Context, input io.Reader) (string, error) {
+func (r *StatuslineRunner) Generate(_ context.Context, input io.Reader) (string, error) {
 	// Create dependencies
 	deps := &statusline.Dependencies{
 		FileReader:    &statusline.DefaultFileReader{},
@@ -138,7 +140,7 @@ func (r *StatuslineRunner) Generate(ctx context.Context, input io.Reader) (strin
 	}
 
 	// Generate statusline
-	sl := statusline.New(deps)
+	sl := statusline.CreateStatusline(deps)
 	result, err := sl.Generate(input)
 	if err != nil {
 		return "", fmt.Errorf("generate statusline: %w", err)

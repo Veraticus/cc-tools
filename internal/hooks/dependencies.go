@@ -77,7 +77,7 @@ func NewStringOutputWriter() *StringOutputWriter {
 }
 
 // Write appends to the output buffer.
-func (s *StringOutputWriter) Write(p []byte) (n int, err error) {
+func (s *StringOutputWriter) Write(p []byte) (int, error) {
 	s.content = append(s.content, p...)
 	return len(p), nil
 }

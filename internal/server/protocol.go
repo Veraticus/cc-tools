@@ -1,6 +1,9 @@
 package server
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // RequestID represents a JSON-RPC request ID (can be string or number).
 type RequestID struct {
@@ -9,7 +12,11 @@ type RequestID struct {
 
 // MarshalJSON implements json.Marshaler.
 func (id RequestID) MarshalJSON() ([]byte, error) {
-	return json.Marshal(id.value)
+	data, err := json.Marshal(id.value)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request ID: %w", err)
+	}
+	return data, nil
 }
 
 // UnmarshalJSON implements json.Unmarshaler.
@@ -29,10 +36,10 @@ type Request struct {
 
 // Response represents a JSON-RPC 2.0 response with concrete types.
 type Response struct {
-	JSONRPC string     `json:"jsonrpc"`
-	ID      RequestID  `json:"id"`
-	Result  *Result    `json:"result,omitempty"`
-	Error   *Error     `json:"error,omitempty"`
+	JSONRPC string    `json:"jsonrpc"`
+	ID      RequestID `json:"id"`
+	Result  *Result   `json:"result,omitempty"`
+	Error   *Error    `json:"error,omitempty"`
 }
 
 // Result represents a successful response.

@@ -22,7 +22,7 @@ func BenchmarkStatuslineRender(b *testing.B) {
 		TerminalWidth: &MockTerminalWidth{width: 100},
 	}
 
-	s := New(deps)
+	s := CreateStatusline(deps)
 
 	// Prepare JSON input
 	input := &Input{
@@ -65,7 +65,7 @@ func BenchmarkStatuslineRender(b *testing.B) {
 	jsonData, _ := json.Marshal(input)
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		reader := bytes.NewReader(jsonData)
 		s.Generate(reader)
 	}
@@ -84,7 +84,7 @@ func TestStatuslineRenderTiming(t *testing.T) {
 		TerminalWidth: &MockTerminalWidth{width: 100},
 	}
 
-	s := New(deps)
+	s := CreateStatusline(deps)
 
 	// Test different scenarios
 	scenarios := []struct {
@@ -166,7 +166,9 @@ func TestStatuslineRenderTiming(t *testing.T) {
 			}
 
 			if sc.hasK8s {
-				deps.EnvReader.(*MockEnvReader).vars["KUBECONFIG"] = "/home/user/.kube/config"
+				if envReader, ok := deps.EnvReader.(*MockEnvReader); ok {
+					envReader.vars["KUBECONFIG"] = "/home/user/.kube/config"
+				}
 			}
 
 			jsonData, _ := json.Marshal(input)
@@ -175,7 +177,7 @@ func TestStatuslineRenderTiming(t *testing.T) {
 			const runs = 100
 			var totalDuration time.Duration
 
-			for i := 0; i < runs; i++ {
+			for range runs {
 				reader := bytes.NewReader(jsonData)
 				start := time.Now()
 				_, err := s.Generate(reader)
