@@ -1,13 +1,11 @@
 .PHONY: build clean test lint
 
-# Build all three commands
+# Build unified cc-tools binary
 build:
-	@echo "Building cc-tools commands..."
+	@echo "Building cc-tools..."
 	@mkdir -p build
-	go build -o build/smart-lint cmd/smart-lint/main.go
-	go build -o build/smart-test cmd/smart-test/main.go
-	go build -o build/statusline cmd/statusline/main.go
-	@echo "Commands built in build/"
+	go build -o build/cc-tools cmd/cc-tools/main.go
+	@echo "Binary built: build/cc-tools"
 
 # Clean build artifacts
 clean:
@@ -28,27 +26,25 @@ lint:
 	golangci-lint run
 	deadcode -test ./...
 
-# Install commands locally
+# Install cc-tools binary
 install: build
-	@echo "Installing cc-tools commands..."
+	@echo "Installing cc-tools..."
 	@mkdir -p ~/bin
-	cp build/smart-lint ~/bin/
-	cp build/smart-test ~/bin/
-	cp build/statusline ~/bin/
-	@echo "Commands installed to ~/bin/"
+	cp build/cc-tools ~/bin/
+	@echo "cc-tools installed to ~/bin/"
 	@echo "Make sure ~/bin is in your PATH"
 
-# Run smart-lint
-run-smart-lint: build
-	./build/smart-lint
+# Run lint subcommand
+run-lint: build
+	./build/cc-tools lint
 
-# Run smart-test
-run-smart-test: build
-	./build/smart-test
+# Run test subcommand
+run-test: build
+	./build/cc-tools test
 
-# Run statusline
+# Run statusline subcommand
 run-statusline: build
-	./build/statusline
+	./build/cc-tools statusline
 
 # Nix build
 nix-build:
@@ -67,10 +63,8 @@ test-nix:
 		CURRENT_SYSTEM=$$(nix eval --raw --impure --expr builtins.currentSystem); \
 		echo "Building for current system ($$CURRENT_SYSTEM)..."; \
 		nix build .#packages.$$CURRENT_SYSTEM.default -L --no-link || exit 1; \
-		echo "Testing individual tools..."; \
-		nix build .#packages.$$CURRENT_SYSTEM.smart-lint -L --no-link || exit 1; \
-		nix build .#packages.$$CURRENT_SYSTEM.smart-test -L --no-link || exit 1; \
-		nix build .#packages.$$CURRENT_SYSTEM.statusline -L --no-link || exit 1; \
+		echo "Testing cc-tools binary..."; \
+		nix build .#packages.$$CURRENT_SYSTEM.cc-tools -L --no-link || exit 1; \
 		echo "Nix build succeeded for $$CURRENT_SYSTEM!"; \
 	else \
 		echo "Nix not installed, skipping nix build test"; \
@@ -87,14 +81,14 @@ nix-shell:
 .PHONY: help nix-build test-nix nix-shell
 help:
 	@echo "Available targets:"
-	@echo "  build         - Build all three commands"
+	@echo "  build         - Build cc-tools binary"
 	@echo "  clean         - Remove build artifacts"
 	@echo "  test          - Run tests with coverage"
 	@echo "  lint          - Run linters"
 	@echo "  install       - Install commands to ~/bin"
-	@echo "  run-smart-lint - Run the smart-lint command"
-	@echo "  run-smart-test - Run the smart-test command"  
-	@echo "  run-statusline - Run the statusline command"
+	@echo "  run-lint      - Run the lint subcommand"
+	@echo "  run-test      - Run the test subcommand"  
+	@echo "  run-statusline - Run the statusline subcommand"
 	@echo "  nix-build     - Build with Nix"
 	@echo "  test-nix      - Test Nix builds"
 	@echo "  nix-shell     - Enter Nix development shell"

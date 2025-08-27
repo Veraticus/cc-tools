@@ -15,17 +15,17 @@
         version = "0.1.0";
         buildTime = "1970-01-01T00:00:00Z";
         
-        # Common build function for all three tools
-        buildTool = name: pkgs.buildGoModule rec {
-          pname = name;
+        # Build unified cc-tools binary
+        cc-tools = pkgs.buildGoModule rec {
+          pname = "cc-tools";
           inherit version;
           
           src = ./.;
           
-          # Update this hash after running: nix build .#${name} --no-link 2>&1 | grep 'got:' | cut -d: -f2 | xargs
-          vendorHash = null; # Dependencies are vendored
+          # Update this hash after running: nix build . --no-link 2>&1 | grep 'got:' | cut -d: -f2 | xargs
+          vendorHash = "sha256-yOr2HzIHYo6SWcwMK8SfBaF57uVOikUkOvZZBdgEY1Q=";
           
-          subPackages = [ "cmd/${name}" ];
+          subPackages = [ "cmd/cc-tools" ];
           
           ldflags = [
             "-s"
@@ -35,10 +35,7 @@
           ];
           
           meta = with pkgs.lib; {
-            description = 
-              if name == "smart-lint" then "Claude Code smart linting hook"
-              else if name == "smart-test" then "Claude Code smart testing hook"
-              else "Claude Code status line generator";
+            description = "Claude Code Tools - unified binary for smart hooks";
             homepage = "https://github.com/Veraticus/cc-tools";
             license = licenses.mit;
             maintainers = with maintainers; [ ];
@@ -46,29 +43,24 @@
           };
         };
         
-        # Build all three tools
-        smart-lint = buildTool "smart-lint";
-        smart-test = buildTool "smart-test";
-        statusline = buildTool "statusline";
-        
-        # Combined package with all three tools
-        cc-tools = pkgs.symlinkJoin {
-          name = "cc-tools-${version}";
-          paths = [ smart-lint smart-test statusline ];
-          meta = {
-            description = "Claude Code smart hooks collection";
-            homepage = "https://github.com/Veraticus/cc-tools";
-            license = pkgs.lib.licenses.mit;
-            platforms = pkgs.lib.platforms.unix;
-          };
-        };
+        # Create symlinks for backwards compatibility
+        cc-tools-with-compat = pkgs.runCommand "cc-tools-with-compat-${version}" {
+          buildInputs = [ cc-tools ];
+        } ''
+          mkdir -p $out/bin
+          cp ${cc-tools}/bin/cc-tools $out/bin/
+          ln -s cc-tools $out/bin/smart-lint
+          ln -s cc-tools $out/bin/smart-test
+          ln -s cc-tools $out/bin/statusline
+        '';
         
       in
       {
-        # Individual packages
+        # Packages
         packages = {
-          inherit smart-lint smart-test statusline;
-          default = cc-tools;
+          inherit cc-tools;
+          default = cc-tools-with-compat;
+          cc-tools-nocompat = cc-tools;  # Without compatibility symlinks
         };
         
         # Development shell
@@ -100,17 +92,13 @@
         
         # Apps for nix run
         apps = {
-          smart-lint = {
+          default = {
             type = "app";
-            program = "${smart-lint}/bin/smart-lint";
+            program = "${cc-tools}/bin/cc-tools";
           };
-          smart-test = {
+          cc-tools = {
             type = "app";
-            program = "${smart-test}/bin/smart-test";
-          };
-          statusline = {
-            type = "app";
-            program = "${statusline}/bin/statusline";
+            program = "${cc-tools}/bin/cc-tools";
           };
         };
       }

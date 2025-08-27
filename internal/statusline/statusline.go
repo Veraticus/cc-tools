@@ -110,7 +110,7 @@ type Config struct {
 func DefaultConfig() *Config {
 	return &Config{
 		LeftSpacerWidth:  2,
-		RightSpacerWidth: 2,
+		RightSpacerWidth: 4,
 	}
 }
 

@@ -113,18 +113,12 @@ func (s *Statusline) Render(data *CachedData) string {
 			contentWidth)
 	}
 
-	// Ensure exact width by padding
-	// The statusline should be shorter than terminal width by the spacer amounts
-	// In compact mode, we already calculated effectiveWidth with spacers
-	targetWidth := effectiveWidth
-
-	actualWidth := runewidth.StringWidth(stripAnsi(result))
-	if actualWidth < targetWidth {
-		if os.Getenv("DEBUG_WIDTH") == "1" {
-			fmt.Fprintf(os.Stderr, "Adding padding: actualWidth=%d, targetWidth=%d, padding=%d\n",
-				actualWidth, targetWidth, targetWidth-actualWidth)
-		}
-		result += strings.Repeat(" ", targetWidth-actualWidth)
+	// Don't pad - the spacers are meant to make the statusline shorter
+	// Just return the result as-is
+	if os.Getenv("DEBUG_WIDTH") == "1" {
+		actualWidth := runewidth.StringWidth(stripAnsi(result))
+		fmt.Fprintf(os.Stderr, "Final width: actualWidth=%d, effectiveWidth=%d\n",
+			actualWidth, effectiveWidth)
 	}
 
 	return result
