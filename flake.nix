@@ -27,7 +27,7 @@
           src = ./.;
           
           # Update this hash after running: nix build . --no-link 2>&1 | grep 'got:' | cut -d: -f2 | xargs
-          vendorHash = "sha256-yOr2HzIHYo6SWcwMK8SfBaF57uVOikUkOvZZBdgEY1Q=";
+          vendorHash = "sha256-qbzor2DVDqLCuNqAWNxgr8xHCljrQEm+fRh8iH5tmKc=";
           
           subPackages = [ "cmd/cc-tools" ];
           
