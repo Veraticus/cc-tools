@@ -144,7 +144,7 @@ func TestRunSmartHook(t *testing.T) { //nolint:cyclop // table-driven test with 
 		testDeps.MockProcess.processExistsFunc = func(_ int) bool { return false }
 
 		// Setup runner - no commands available
-		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, _ string, _ ...string) ([]byte, error) {
+		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, _ string, _ ...string) (*CommandOutput, error) {
 			return nil, fmt.Errorf("command not found")
 		}
 		testDeps.MockRunner.lookPathFunc = func(_ string) (string, error) {
@@ -193,14 +193,14 @@ func TestRunSmartHook(t *testing.T) { //nolint:cyclop // table-driven test with 
 		testDeps.MockClock.nowFunc = func() time.Time { return time.Unix(1700000000, 0) }
 
 		// Setup runner - Makefile with lint target that fails
-		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, name string, args ...string) ([]byte, error) {
+		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, name string, args ...string) (*CommandOutput, error) {
 			if name == "make" && len(args) > 0 {
 				if args[len(args)-1] == "lint" {
 					if len(args) > 1 && args[len(args)-2] == "-n" {
-						return []byte("golangci-lint run"), nil // dry run succeeds
+						return &CommandOutput{Stdout: []byte("golangci-lint run")}, nil // dry run succeeds
 					}
 					// Actual execution fails
-					return []byte("lint errors"), &exec.ExitError{}
+					return &CommandOutput{Stderr: []byte("lint errors")}, &exec.ExitError{}
 				}
 			}
 			return nil, fmt.Errorf("command not found")
@@ -221,7 +221,7 @@ func TestRunSmartHook(t *testing.T) { //nolint:cyclop // table-driven test with 
 		}
 	})
 
-	t.Run("exit code 0 on lint success without debug", func(t *testing.T) {
+	t.Run("exit code 2 on lint success", func(t *testing.T) {
 		testDeps := createTestDependencies()
 
 		// Setup input
@@ -257,75 +257,14 @@ func TestRunSmartHook(t *testing.T) { //nolint:cyclop // table-driven test with 
 		testDeps.MockClock.nowFunc = func() time.Time { return time.Unix(1700000000, 0) }
 
 		// Setup runner - Makefile with lint target that succeeds
-		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, name string, args ...string) ([]byte, error) {
+		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, name string, args ...string) (*CommandOutput, error) {
 			if name == "make" && len(args) > 0 && args[len(args)-1] == "lint" {
-				return []byte("lint passed"), nil
+				return &CommandOutput{Stdout: []byte("lint passed")}, nil
 			}
 			return nil, fmt.Errorf("command not found")
 		}
 
 		exitCode := RunSmartHook(context.Background(), CommandTypeLint, false, 20, 5, testDeps.Dependencies)
-		if exitCode != 0 {
-			t.Errorf("Expected exit code 0, got %d", exitCode)
-		}
-
-		// Should be silent
-		output := testDeps.MockStderr.String()
-		if output != "" {
-			t.Errorf("Expected no output without debug, got: %s", output)
-		}
-	})
-
-	t.Run("exit code 2 on lint success with debug", func(t *testing.T) {
-		testDeps := createTestDependencies()
-
-		// Setup input
-		testDeps.MockInput.isTerminalFunc = func() bool { return false }
-		testDeps.MockInput.readAllFunc = func() ([]byte, error) {
-			return []byte(`{
-				"hook_event_name": "PostToolUse",
-				"tool_name": "Edit",
-				"tool_input": {"file_path": "/project/main.go"}
-			}`), nil
-		}
-
-		// Setup filesystem
-		testDeps.MockFS.statFunc = func(path string) (os.FileInfo, error) {
-			if strings.Contains(path, ".git") || strings.Contains(path, "Makefile") {
-				return mockFileInfo{isDir: strings.Contains(path, ".git")}, nil
-			}
-			return nil, fmt.Errorf("not found")
-		}
-		testDeps.MockFS.tempDirFunc = func() string { return "/tmp" }
-		testDeps.MockFS.readFileFunc = func(_ string) ([]byte, error) {
-			return nil, fmt.Errorf("not found")
-		}
-		testDeps.MockFS.writeFileFunc = func(_ string, _ []byte, _ os.FileMode) error {
-			return nil
-		}
-
-		// Setup process
-		testDeps.MockProcess.getPIDFunc = func() int { return 99999 }
-		testDeps.MockProcess.processExistsFunc = func(_ int) bool { return false }
-
-		// Setup clock
-		testDeps.MockClock.nowFunc = func() time.Time { return time.Unix(1700000000, 0) }
-
-		// Setup runner - Makefile with lint target that succeeds
-		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, name string, args ...string) ([]byte, error) {
-			if name == "make" && len(args) > 0 && args[len(args)-1] == "lint" {
-				return []byte("lint passed"), nil
-			}
-			return nil, fmt.Errorf("command not found")
-		}
-
-		// Run with debug=true
-		exitCode := RunSmartHook(
-			context.Background(),
-			CommandTypeLint,
-			true, 20, 5,
-			testDeps.Dependencies,
-		)
 		if exitCode != 2 {
 			t.Errorf("Expected exit code 2, got %d", exitCode)
 		}
@@ -334,6 +273,67 @@ func TestRunSmartHook(t *testing.T) { //nolint:cyclop // table-driven test with 
 		output := testDeps.MockStderr.String()
 		if !strings.Contains(output, "Lints pass") {
 			t.Errorf("Expected 'Lints pass' message, got: %s", output)
+		}
+	})
+
+	t.Run("exit code 2 on test success", func(t *testing.T) {
+		testDeps := createTestDependencies()
+
+		// Setup input
+		testDeps.MockInput.isTerminalFunc = func() bool { return false }
+		testDeps.MockInput.readAllFunc = func() ([]byte, error) {
+			return []byte(`{
+				"hook_event_name": "PostToolUse",
+				"tool_name": "Edit",
+				"tool_input": {"file_path": "/project/main.go"}
+			}`), nil
+		}
+
+		// Setup filesystem
+		testDeps.MockFS.statFunc = func(path string) (os.FileInfo, error) {
+			if strings.Contains(path, ".git") || strings.Contains(path, "Makefile") {
+				return mockFileInfo{isDir: strings.Contains(path, ".git")}, nil
+			}
+			return nil, fmt.Errorf("not found")
+		}
+		testDeps.MockFS.tempDirFunc = func() string { return "/tmp" }
+		testDeps.MockFS.readFileFunc = func(_ string) ([]byte, error) {
+			return nil, fmt.Errorf("not found")
+		}
+		testDeps.MockFS.writeFileFunc = func(_ string, _ []byte, _ os.FileMode) error {
+			return nil
+		}
+
+		// Setup process
+		testDeps.MockProcess.getPIDFunc = func() int { return 99999 }
+		testDeps.MockProcess.processExistsFunc = func(_ int) bool { return false }
+
+		// Setup clock
+		testDeps.MockClock.nowFunc = func() time.Time { return time.Unix(1700000000, 0) }
+
+		// Setup runner - Makefile with test target that succeeds
+		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, name string, args ...string) (*CommandOutput, error) {
+			if name == "make" && len(args) > 0 && args[len(args)-1] == "test" {
+				return &CommandOutput{Stdout: []byte("test passed")}, nil
+			}
+			return nil, fmt.Errorf("command not found")
+		}
+
+		// Run test hook
+		exitCode := RunSmartHook(
+			context.Background(),
+			CommandTypeTest,
+			false, 20, 5,
+			testDeps.Dependencies,
+		)
+		if exitCode != 2 {
+			t.Errorf("Expected exit code 2, got %d", exitCode)
+		}
+
+		// Should show success message
+		output := testDeps.MockStderr.String()
+		if !strings.Contains(output, "Tests pass") {
+			t.Errorf("Expected 'Tests pass' message, got: %s", output)
 		}
 	})
 
@@ -373,11 +373,11 @@ func TestRunSmartHook(t *testing.T) { //nolint:cyclop // table-driven test with 
 		testDeps.MockClock.nowFunc = func() time.Time { return time.Unix(1700000000, 0) }
 
 		// Setup runner - command times out
-		testDeps.MockRunner.runContextFunc = func(ctx context.Context, _, name string, args ...string) ([]byte, error) {
+		testDeps.MockRunner.runContextFunc = func(ctx context.Context, _, name string, args ...string) (*CommandOutput, error) {
 			if name == "make" && len(args) > 0 {
 				if args[len(args)-1] == "lint" {
 					if len(args) > 1 && args[len(args)-2] == "-n" {
-						return []byte("golangci-lint run"), nil // dry run succeeds
+						return &CommandOutput{Stdout: []byte("golangci-lint run")}, nil // dry run succeeds
 					}
 					// Simulate timeout
 					<-ctx.Done()
@@ -411,9 +411,9 @@ func TestCommandExecutor(t *testing.T) {
 		testDeps := createTestDependencies()
 
 		// Mock successful command execution
-		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, name string, args ...string) ([]byte, error) {
+		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, name string, args ...string) (*CommandOutput, error) {
 			if name == "echo" && len(args) == 1 && args[0] == "hello" {
-				return []byte("hello\n"), nil
+				return &CommandOutput{Stdout: []byte("hello\n")}, nil
 			}
 			return nil, fmt.Errorf("unexpected command")
 		}
@@ -433,8 +433,8 @@ func TestCommandExecutor(t *testing.T) {
 		if result.ExitCode != 0 {
 			t.Errorf("Expected exit code 0, got %d", result.ExitCode)
 		}
-		if !strings.Contains(result.Output, "hello") {
-			t.Errorf("Expected output to contain 'hello', got: %s", result.Output)
+		if !strings.Contains(result.Stdout, "hello") {
+			t.Errorf("Expected output to contain 'hello', got: %s", result.Stdout)
 		}
 	})
 
@@ -442,11 +442,11 @@ func TestCommandExecutor(t *testing.T) {
 		testDeps := createTestDependencies()
 
 		// Mock failed command execution
-		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, name string, _ ...string) ([]byte, error) {
+		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, name string, _ ...string) (*CommandOutput, error) {
 			if name == "false" {
 				// Simulate a command that exits with code 1
 				exitErr := &exec.ExitError{}
-				return []byte(""), exitErr
+				return &CommandOutput{}, exitErr
 			}
 			return nil, fmt.Errorf("unexpected command")
 		}
@@ -472,9 +472,9 @@ func TestCommandExecutor(t *testing.T) {
 		testDeps := createTestDependencies()
 
 		// Mock failed command execution
-		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, _ string, _ ...string) ([]byte, error) {
+		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, _ string, _ ...string) (*CommandOutput, error) {
 			exitErr := &exec.ExitError{}
-			return []byte("lint errors"), exitErr
+			return &CommandOutput{Stderr: []byte("lint errors")}, exitErr
 		}
 
 		executor := NewCommandExecutor(5, false, testDeps.Dependencies)
@@ -501,9 +501,9 @@ func TestCommandExecutor(t *testing.T) {
 		testDeps := createTestDependencies()
 
 		// Mock failed command execution
-		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, _ string, _ ...string) ([]byte, error) {
+		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, _ string, _ ...string) (*CommandOutput, error) {
 			exitErr := &exec.ExitError{}
-			return []byte("test failures"), exitErr
+			return &CommandOutput{Stderr: []byte("test failures")}, exitErr
 		}
 
 		executor := NewCommandExecutor(5, false, testDeps.Dependencies)

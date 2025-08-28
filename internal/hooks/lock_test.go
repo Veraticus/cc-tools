@@ -13,11 +13,8 @@ func TestLockManagerWithMocks(t *testing.T) {
 
 		// Setup mocks
 		testDeps.MockFS.tempDirFunc = func() string { return "/tmp" }
-		testDeps.MockFS.readFileFunc = func(_ string) ([]byte, error) {
-			return nil, fmt.Errorf("file not found")
-		}
-		testDeps.MockFS.writeFileFunc = func(_ string, _ []byte, _ os.FileMode) error {
-			return nil
+		testDeps.MockFS.createExclusiveFunc = func(_ string, _ []byte, _ os.FileMode) error {
+			return nil // Successfully created exclusive file
 		}
 		testDeps.MockProcess.getPIDFunc = func() int { return 99999 }
 		testDeps.MockClock.nowFunc = func() time.Time { return time.Unix(1700000000, 0) }
@@ -38,6 +35,9 @@ func TestLockManagerWithMocks(t *testing.T) {
 
 		// Setup mocks
 		testDeps.MockFS.tempDirFunc = func() string { return "/tmp" }
+		testDeps.MockFS.createExclusiveFunc = func(_ string, _ []byte, _ os.FileMode) error {
+			return fmt.Errorf("file exists") // Can't create exclusive - file exists
+		}
 		testDeps.MockFS.readFileFunc = func(_ string) ([]byte, error) {
 			return []byte("12345\n"), nil // Lock file with PID
 		}
@@ -60,16 +60,22 @@ func TestLockManagerWithMocks(t *testing.T) {
 	t.Run("lock held by dead process", func(t *testing.T) {
 		testDeps := createTestDependencies()
 
-		var writeCallCount int
+		var createExclusiveCallCount int
 
 		// Setup mocks
 		testDeps.MockFS.tempDirFunc = func() string { return "/tmp" }
+		testDeps.MockFS.createExclusiveFunc = func(_ string, _ []byte, _ os.FileMode) error {
+			createExclusiveCallCount++
+			if createExclusiveCallCount == 1 {
+				return fmt.Errorf("file exists") // First attempt fails
+			}
+			return nil // Second attempt succeeds after removing stale lock
+		}
 		testDeps.MockFS.readFileFunc = func(_ string) ([]byte, error) {
 			return []byte("12345\n"), nil // Lock file with PID
 		}
-		testDeps.MockFS.writeFileFunc = func(_ string, _ []byte, _ os.FileMode) error {
-			writeCallCount++
-			return nil
+		testDeps.MockFS.removeFunc = func(_ string) error {
+			return nil // Successfully remove stale lock
 		}
 		testDeps.MockProcess.getPIDFunc = func() int { return 99999 }
 		testDeps.MockProcess.processExistsFunc = func(_ int) bool {
@@ -86,8 +92,8 @@ func TestLockManagerWithMocks(t *testing.T) {
 		if !acquired {
 			t.Fatal("Should acquire lock when holding process is dead")
 		}
-		if writeCallCount != 1 {
-			t.Errorf("Expected 1 write call, got %d", writeCallCount)
+		if createExclusiveCallCount != 2 {
+			t.Errorf("Expected 2 createExclusive calls, got %d", createExclusiveCallCount)
 		}
 	})
 
@@ -96,6 +102,9 @@ func TestLockManagerWithMocks(t *testing.T) {
 
 		// Setup mocks
 		testDeps.MockFS.tempDirFunc = func() string { return "/tmp" }
+		testDeps.MockFS.createExclusiveFunc = func(_ string, _ []byte, _ os.FileMode) error {
+			return fmt.Errorf("file exists") // Can't create exclusive
+		}
 		testDeps.MockFS.readFileFunc = func(_ string) ([]byte, error) {
 			// Lock file with empty PID and recent timestamp
 			return []byte("\n1700000099\n"), nil
@@ -119,17 +128,23 @@ func TestLockManagerWithMocks(t *testing.T) {
 	t.Run("acquires after cooldown expires", func(t *testing.T) {
 		testDeps := createTestDependencies()
 
-		var writeCallCount int
+		var createExclusiveCallCount int
 
 		// Setup mocks
 		testDeps.MockFS.tempDirFunc = func() string { return "/tmp" }
+		testDeps.MockFS.createExclusiveFunc = func(_ string, _ []byte, _ os.FileMode) error {
+			createExclusiveCallCount++
+			if createExclusiveCallCount == 1 {
+				return fmt.Errorf("file exists") // First attempt fails
+			}
+			return nil // Second attempt succeeds after removing expired lock
+		}
 		testDeps.MockFS.readFileFunc = func(_ string) ([]byte, error) {
 			// Lock file with empty PID and old timestamp
 			return []byte("\n1700000094\n"), nil
 		}
-		testDeps.MockFS.writeFileFunc = func(_ string, _ []byte, _ os.FileMode) error {
-			writeCallCount++
-			return nil
+		testDeps.MockFS.removeFunc = func(_ string) error {
+			return nil // Successfully remove expired lock
 		}
 		testDeps.MockProcess.getPIDFunc = func() int { return 99999 }
 		testDeps.MockClock.nowFunc = func() time.Time {
@@ -145,8 +160,8 @@ func TestLockManagerWithMocks(t *testing.T) {
 		if !acquired {
 			t.Fatal("Should acquire lock after cooldown expires")
 		}
-		if writeCallCount != 1 {
-			t.Errorf("Expected 1 write call, got %d", writeCallCount)
+		if createExclusiveCallCount != 2 {
+			t.Errorf("Expected 2 createExclusive calls, got %d", createExclusiveCallCount)
 		}
 	})
 
@@ -183,19 +198,19 @@ func TestLockManagerWithMocks(t *testing.T) {
 
 		// Setup mocks
 		testDeps.MockFS.tempDirFunc = func() string { return "/tmp" }
+		testDeps.MockFS.createExclusiveFunc = func(_ string, _ []byte, _ os.FileMode) error {
+			return fmt.Errorf("permission denied")
+		}
 		testDeps.MockFS.readFileFunc = func(_ string) ([]byte, error) {
 			return nil, fmt.Errorf("file not found")
-		}
-		testDeps.MockFS.writeFileFunc = func(_ string, _ []byte, _ os.FileMode) error {
-			return fmt.Errorf("permission denied")
 		}
 		testDeps.MockProcess.getPIDFunc = func() int { return 99999 }
 
 		lm := NewLockManager("/project", "test", 5, testDeps.Dependencies)
 
 		acquired, err := lm.TryAcquire()
-		if err == nil {
-			t.Fatal("Expected error on write failure")
+		if err != nil {
+			t.Fatal("Should not return error, just fail to acquire")
 		}
 		if acquired {
 			t.Fatal("Should not acquire lock on write failure")
@@ -205,16 +220,22 @@ func TestLockManagerWithMocks(t *testing.T) {
 	t.Run("handles malformed lock file", func(t *testing.T) {
 		testDeps := createTestDependencies()
 
-		var writeCallCount int
+		var createExclusiveCallCount int
 
 		// Setup mocks
 		testDeps.MockFS.tempDirFunc = func() string { return "/tmp" }
+		testDeps.MockFS.createExclusiveFunc = func(_ string, _ []byte, _ os.FileMode) error {
+			createExclusiveCallCount++
+			if createExclusiveCallCount == 1 {
+				return fmt.Errorf("file exists") // First attempt fails
+			}
+			return nil // Second attempt succeeds after removing malformed lock
+		}
 		testDeps.MockFS.readFileFunc = func(_ string) ([]byte, error) {
 			return []byte("not-a-number\n"), nil // Malformed PID
 		}
-		testDeps.MockFS.writeFileFunc = func(_ string, _ []byte, _ os.FileMode) error {
-			writeCallCount++
-			return nil
+		testDeps.MockFS.removeFunc = func(_ string) error {
+			return nil // Successfully remove malformed lock
 		}
 		testDeps.MockProcess.getPIDFunc = func() int { return 99999 }
 		testDeps.MockClock.nowFunc = func() time.Time { return time.Unix(1700000000, 0) }
@@ -228,24 +249,30 @@ func TestLockManagerWithMocks(t *testing.T) {
 		if !acquired {
 			t.Fatal("Should acquire lock with malformed PID")
 		}
-		if writeCallCount != 1 {
-			t.Errorf("Expected 1 write call, got %d", writeCallCount)
+		if createExclusiveCallCount != 2 {
+			t.Errorf("Expected 2 createExclusive calls, got %d", createExclusiveCallCount)
 		}
 	})
 
 	t.Run("handles malformed timestamp", func(t *testing.T) {
 		testDeps := createTestDependencies()
 
-		var writeCallCount int
+		var createExclusiveCallCount int
 
 		// Setup mocks
 		testDeps.MockFS.tempDirFunc = func() string { return "/tmp" }
+		testDeps.MockFS.createExclusiveFunc = func(_ string, _ []byte, _ os.FileMode) error {
+			createExclusiveCallCount++
+			if createExclusiveCallCount == 1 {
+				return fmt.Errorf("file exists") // First attempt fails
+			}
+			return nil // Second attempt succeeds after removing malformed lock
+		}
 		testDeps.MockFS.readFileFunc = func(_ string) ([]byte, error) {
 			return []byte("\nnot-a-timestamp\n"), nil // Malformed timestamp
 		}
-		testDeps.MockFS.writeFileFunc = func(_ string, _ []byte, _ os.FileMode) error {
-			writeCallCount++
-			return nil
+		testDeps.MockFS.removeFunc = func(_ string) error {
+			return nil // Successfully remove malformed lock
 		}
 		testDeps.MockProcess.getPIDFunc = func() int { return 99999 }
 		testDeps.MockClock.nowFunc = func() time.Time { return time.Unix(1700000000, 0) }
@@ -259,8 +286,8 @@ func TestLockManagerWithMocks(t *testing.T) {
 		if !acquired {
 			t.Fatal("Should acquire lock with malformed timestamp")
 		}
-		if writeCallCount != 1 {
-			t.Errorf("Expected 1 write call, got %d", writeCallCount)
+		if createExclusiveCallCount != 2 {
+			t.Errorf("Expected 2 createExclusive calls, got %d", createExclusiveCallCount)
 		}
 	})
 }

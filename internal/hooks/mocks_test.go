@@ -21,10 +21,12 @@ func mustMarshalJSON(v any) json.RawMessage {
 // Mock implementations for testing
 
 type mockFileSystem struct {
-	statFunc      func(string) (os.FileInfo, error)
-	readFileFunc  func(string) ([]byte, error)
-	writeFileFunc func(string, []byte, os.FileMode) error
-	tempDirFunc   func() string
+	statFunc            func(string) (os.FileInfo, error)
+	readFileFunc        func(string) ([]byte, error)
+	writeFileFunc       func(string, []byte, os.FileMode) error
+	tempDirFunc         func() string
+	createExclusiveFunc func(string, []byte, os.FileMode) error
+	removeFunc          func(string) error
 }
 
 func (m *mockFileSystem) Stat(name string) (os.FileInfo, error) {
@@ -55,8 +57,22 @@ func (m *mockFileSystem) TempDir() string {
 	return "/tmp"
 }
 
+func (m *mockFileSystem) CreateExclusive(name string, data []byte, perm os.FileMode) error {
+	if m.createExclusiveFunc != nil {
+		return m.createExclusiveFunc(name, data, perm)
+	}
+	return nil
+}
+
+func (m *mockFileSystem) Remove(name string) error {
+	if m.removeFunc != nil {
+		return m.removeFunc(name)
+	}
+	return nil
+}
+
 type mockCommandRunner struct {
-	runContextFunc func(ctx context.Context, dir, name string, args ...string) ([]byte, error)
+	runContextFunc func(ctx context.Context, dir, name string, args ...string) (*CommandOutput, error)
 	lookPathFunc   func(file string) (string, error)
 }
 
@@ -64,7 +80,7 @@ func (m *mockCommandRunner) RunContext(
 	ctx context.Context,
 	dir, name string,
 	args ...string,
-) ([]byte, error) {
+) (*CommandOutput, error) {
 	if m.runContextFunc != nil {
 		return m.runContextFunc(ctx, dir, name, args...)
 	}

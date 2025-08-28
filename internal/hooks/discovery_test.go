@@ -21,9 +21,9 @@ func TestCommandDiscovery(t *testing.T) { //nolint:cyclop // table-driven test w
 		}
 
 		// Setup runner - make dry run succeeds for lint
-		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, name string, args ...string) ([]byte, error) {
+		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, name string, args ...string) (*CommandOutput, error) {
 			if name == "make" && len(args) >= 3 && args[len(args)-1] == "lint" && args[len(args)-2] == "-n" {
-				return []byte("golangci-lint run"), nil
+				return &CommandOutput{Stdout: []byte("golangci-lint run")}, nil
 			}
 			return nil, fmt.Errorf("command failed")
 		}
@@ -57,9 +57,9 @@ func TestCommandDiscovery(t *testing.T) { //nolint:cyclop // table-driven test w
 		}
 
 		// Setup runner - just --show succeeds for test
-		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, name string, args ...string) ([]byte, error) {
+		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, name string, args ...string) (*CommandOutput, error) {
 			if name == "just" && len(args) >= 2 && args[len(args)-1] == "test" && args[len(args)-2] == "--show" {
-				return []byte("test:\n\tgo test ./..."), nil
+				return &CommandOutput{Stdout: []byte("test:\n\tgo test ./...")}, nil
 			}
 			return nil, fmt.Errorf("command failed")
 		}
@@ -90,11 +90,11 @@ func TestCommandDiscovery(t *testing.T) { //nolint:cyclop // table-driven test w
 		}
 
 		// Setup runner - jq finds lint script
-		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, name string, args ...string) ([]byte, error) {
+		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, name string, args ...string) (*CommandOutput, error) {
 			if name == "jq" && len(args) >= 2 {
 				// Check if querying for lint script
 				if strings.Contains(args[1], "lint") {
-					return []byte(`"eslint ."`), nil
+					return &CommandOutput{Stdout: []byte(`"eslint ."`)}, nil
 				}
 			}
 			return nil, fmt.Errorf("command failed")
@@ -129,9 +129,9 @@ func TestCommandDiscovery(t *testing.T) { //nolint:cyclop // table-driven test w
 		}
 
 		// Setup runner
-		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, name string, args ...string) ([]byte, error) {
+		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, name string, args ...string) (*CommandOutput, error) {
 			if name == "jq" && strings.Contains(args[1], "test") {
-				return []byte(`"jest"`), nil
+				return &CommandOutput{Stdout: []byte(`"jest"`)}, nil
 			}
 			return nil, fmt.Errorf("command failed")
 		}
@@ -162,9 +162,9 @@ func TestCommandDiscovery(t *testing.T) { //nolint:cyclop // table-driven test w
 		}
 
 		// Setup runner
-		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, name string, _ ...string) ([]byte, error) {
+		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, name string, _ ...string) (*CommandOutput, error) {
 			if name == "jq" {
-				return []byte(`"test script"`), nil
+				return &CommandOutput{Stdout: []byte(`"test script"`)}, nil
 			}
 			return nil, fmt.Errorf("command failed")
 		}
@@ -537,9 +537,9 @@ func TestCommandDiscovery(t *testing.T) { //nolint:cyclop // table-driven test w
 		}
 
 		// Setup runner
-		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, name string, args ...string) ([]byte, error) {
+		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, name string, args ...string) (*CommandOutput, error) {
 			if name == "make" && args[len(args)-1] == "lint" {
-				return []byte("lint"), nil
+				return &CommandOutput{Stdout: []byte("lint")}, nil
 			}
 			return nil, fmt.Errorf("command failed")
 		}
@@ -593,7 +593,7 @@ func TestCommandDiscovery(t *testing.T) { //nolint:cyclop // table-driven test w
 		}
 
 		// Setup runner - simulate timeout
-		testDeps.MockRunner.runContextFunc = func(ctx context.Context, _, _ string, _ ...string) ([]byte, error) {
+		testDeps.MockRunner.runContextFunc = func(ctx context.Context, _, _ string, _ ...string) (*CommandOutput, error) {
 			// Block until context is canceled
 			<-ctx.Done()
 			return nil, ctx.Err()
@@ -712,9 +712,9 @@ func BenchmarkCommandDiscovery(b *testing.B) {
 		return nil, os.ErrNotExist
 	}
 
-	testDeps.MockRunner.runContextFunc = func(_ context.Context, _, name string, args ...string) ([]byte, error) {
+	testDeps.MockRunner.runContextFunc = func(_ context.Context, _, name string, args ...string) (*CommandOutput, error) {
 		if name == "make" && args[len(args)-1] == "lint" {
-			return []byte("lint"), nil
+			return &CommandOutput{Stdout: []byte("lint")}, nil
 		}
 		return nil, fmt.Errorf("command failed")
 	}

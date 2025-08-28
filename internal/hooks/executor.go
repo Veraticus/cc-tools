@@ -20,7 +20,8 @@ const (
 type ExecutorResult struct {
 	Success  bool
 	ExitCode int
-	Output   string
+	Stdout   string
+	Stderr   string
 	Error    error
 	TimedOut bool
 }
@@ -62,10 +63,16 @@ func (ce *CommandExecutor) Execute(ctx context.Context, cmd *DiscoveredCommand) 
 
 	// Check if context timed out
 	if ctx.Err() == context.DeadlineExceeded {
+		var stdout, stderr string
+		if output != nil {
+			stdout = string(output.Stdout)
+			stderr = string(output.Stderr)
+		}
 		return &ExecutorResult{
 			Success:  false,
 			ExitCode: -1,
-			Output:   string(output),
+			Stdout:   stdout,
+			Stderr:   stderr,
 			Error:    fmt.Errorf("command timed out after %v", ce.timeout),
 			TimedOut: true,
 		}
@@ -82,10 +89,17 @@ func (ce *CommandExecutor) Execute(ctx context.Context, cmd *DiscoveredCommand) 
 		}
 	}
 
+	var stdout, stderr string
+	if output != nil {
+		stdout = string(output.Stdout)
+		stderr = string(output.Stderr)
+	}
+
 	return &ExecutorResult{
 		Success:  err == nil,
 		ExitCode: exitCode,
-		Output:   string(output),
+		Stdout:   stdout,
+		Stderr:   stderr,
 		Error:    err,
 		TimedOut: false,
 	}
@@ -106,20 +120,17 @@ func (ce *CommandExecutor) ExecuteForHook(
 	}
 
 	if result.Success {
-		// Command succeeded
-		if ce.debug {
-			var message string
-			switch hookType {
-			case CommandTypeLint:
-				message = shared.RawWarningStyle.Render("👉 Lints pass. Continue with your task.")
-			case CommandTypeTest:
-				message = shared.RawWarningStyle.Render("👉 Tests pass. Continue with your task.")
-			default:
-				message = shared.RawSuccessStyle.Render("✓ Command succeeded")
-			}
-			return ExitCodeShowMessage, message
+		// Command succeeded - always show success message
+		var message string
+		switch hookType {
+		case CommandTypeLint:
+			message = shared.RawWarningStyle.Render("👉 Lints pass. Continue with your task.")
+		case CommandTypeTest:
+			message = shared.RawWarningStyle.Render("👉 Tests pass. Continue with your task.")
+		default:
+			message = shared.RawSuccessStyle.Render("✓ Command succeeded")
 		}
-		return 0, "" // Silent success when not in debug mode
+		return ExitCodeShowMessage, message
 	}
 
 	// Command failed - format error message

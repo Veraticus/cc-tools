@@ -68,28 +68,50 @@ func (l *LockManager) isInCooldownPeriod(lines []string) bool {
 	return timeSinceCompletion < int64(l.cooldownSecs)
 }
 
-// TryAcquire attempts to acquire the lock.
+// TryAcquire attempts to acquire the lock atomically.
 // Returns true if lock acquired, false if another process has it or cooldown active.
 func (l *LockManager) TryAcquire() (bool, error) {
-	// Check if lock file exists
-	data, err := l.deps.FS.ReadFile(l.lockFile)
+	// First, try to atomically create the lock file
+	// CreateExclusive uses O_EXCL to ensure this fails if the file already exists
+	content := fmt.Sprintf("%d\n", l.pid)
+	err := l.deps.FS.CreateExclusive(l.lockFile, []byte(content), lockFileMode)
 	if err == nil {
-		// Lock file exists, check if locked
-		lines := splitLines(string(data))
-
-		if l.isAnotherProcessRunning(lines) {
-			return false, nil
-		}
-
-		if l.isInCooldownPeriod(lines) {
-			return false, nil
-		}
+		// We created the file atomically!
+		return true, nil
 	}
 
-	// Write our PID to lock file
-	content := fmt.Sprintf("%d\n", l.pid)
-	if writeErr := l.deps.FS.WriteFile(l.lockFile, []byte(content), lockFileMode); writeErr != nil {
-		return false, fmt.Errorf("writing lock file: %w", writeErr)
+	// File exists - check if it's a stale lock or in cooldown
+	data, readErr := l.deps.FS.ReadFile(l.lockFile)
+	if readErr != nil {
+		// Couldn't read the existing file - perhaps it was just deleted
+		// Not an error - just couldn't acquire lock
+		return false, nil //nolint:nilerr // Intentionally returning nil - not an error condition
+	}
+
+	lines := splitLines(string(data))
+
+	// Check if another process is running
+	if l.isAnotherProcessRunning(lines) {
+		return false, nil
+	}
+
+	// Check if in cooldown period
+	if l.isInCooldownPeriod(lines) {
+		return false, nil
+	}
+
+	// Lock is stale - try to remove it and acquire atomically
+	if removeErr := l.deps.FS.Remove(l.lockFile); removeErr != nil {
+		// Another process might have just acquired it
+		// Not an error - just couldn't acquire lock
+		return false, nil //nolint:nilerr // Intentionally returning nil - not an error condition
+	}
+
+	// Try to create again atomically
+	if createErr := l.deps.FS.CreateExclusive(l.lockFile, []byte(content), lockFileMode); createErr != nil {
+		// Another process beat us to it
+		// Not an error - just couldn't acquire lock
+		return false, nil //nolint:nilerr // Intentionally returning nil - not an error condition
 	}
 
 	return true, nil

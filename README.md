@@ -49,6 +49,31 @@ echo '{"cwd": "/path/to/project"}' | cc-tools statusline
 
 ## Usage
 
+### Smart Linting & Testing Behavior
+
+The lint and test hooks follow a precise workflow designed for seamless Claude Code integration:
+
+#### Execution Flow
+
+1. **Project Root Discovery**: Finds the top-level directory by looking for markers like `.git`, `Makefile`, `Justfile`, `package.json`, `go.mod`, etc.
+
+2. **Lock Acquisition**: Attempts to acquire an exclusive lock from `/tmp/claude-hook-{lint|test}-<workspace-hash>.lock`
+
+3. **Exit Codes and Messages**:
+   - **Lock unavailable**: Exit code `0`, no output (silent failure)
+   - **Command succeeds**: Exit code `2`, displays `👉 Lints/Tests pass. Continue with your task.`
+   - **Command fails**: Exit code `2`, displays `⛔ BLOCKING: Run 'cd <dir> && <command>' to fix failures`
+   - **Command timeout**: Exit code `2`, displays `⛔ BLOCKING: Command timed out after <timeout>`
+
+4. **Lock Release**: Writes timestamp to lock file for cooldown enforcement
+
+#### Important Notes
+
+- **Always exit code 2** when displaying messages (both success and failure)
+- **Silent exit 0** only when lock cannot be acquired
+- **Error messages include** the exact command that was run and the directory to run it from
+- **Stdout and stderr** are captured separately but not displayed to reduce noise
+
 ### Smart Linting
 
 Automatically discovers and runs your project's lint commands:
@@ -86,6 +111,31 @@ Searches for (in order):
 3. `npm/yarn/pnpm run test`
 4. `./scripts/test`
 5. Language-specific tools (go test, pytest, cargo test, etc.)
+
+### Example Hook Output
+
+#### Successful Lint
+```bash
+$ echo '{"hook_event_name": "PostToolUse", "tool_name": "Edit", "tool_input": {"file_path": "/project/src/main.go"}}' | cc-tools lint
+👉 Lints pass. Continue with your task.
+$ echo $?
+2
+```
+
+#### Failed Lint
+```bash
+$ echo '{"hook_event_name": "PostToolUse", "tool_name": "Edit", "tool_input": {"file_path": "/project/src/main.go"}}' | cc-tools lint
+⛔ BLOCKING: Run 'cd /project && make lint' to fix lint failures
+$ echo $?
+2
+```
+
+#### Lock Unavailable (Another Instance Running)
+```bash
+$ echo '{"hook_event_name": "PostToolUse", "tool_name": "Edit", "tool_input": {"file_path": "/project/src/main.go"}}' | cc-tools lint
+$ echo $?
+0
+```
 
 ### Statusline
 

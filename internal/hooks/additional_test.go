@@ -30,7 +30,7 @@ func TestExecutorEdgeCases(t *testing.T) {
 		testDeps := createTestDependencies()
 
 		// Mock command that times out
-		testDeps.MockRunner.runContextFunc = func(ctx context.Context, _, _ string, _ ...string) ([]byte, error) {
+		testDeps.MockRunner.runContextFunc = func(ctx context.Context, _, _ string, _ ...string) (*CommandOutput, error) {
 			<-ctx.Done()
 			return nil, context.DeadlineExceeded
 		}
@@ -55,7 +55,7 @@ func TestExecutorEdgeCases(t *testing.T) {
 	t.Run("ExecuteForHook with unknown command type", func(t *testing.T) {
 		testDeps := createTestDependencies()
 
-		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, _ string, _ ...string) ([]byte, error) {
+		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, _ string, _ ...string) (*CommandOutput, error) {
 			return nil, &exec.ExitError{}
 		}
 
@@ -76,14 +76,14 @@ func TestExecutorEdgeCases(t *testing.T) {
 		}
 	})
 
-	t.Run("ExecuteForHook success with debug", func(t *testing.T) {
+	t.Run("ExecuteForHook success always shows message", func(t *testing.T) {
 		testDeps := createTestDependencies()
 
-		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, _ string, _ ...string) ([]byte, error) {
-			return []byte("success"), nil
+		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, _ string, _ ...string) (*CommandOutput, error) {
+			return &CommandOutput{Stdout: []byte("success")}, nil
 		}
 
-		executor := NewCommandExecutor(5, true, testDeps.Dependencies) // debug=true
+		executor := NewCommandExecutor(5, false, testDeps.Dependencies) // debug doesn't matter anymore
 		cmd := &DiscoveredCommand{
 			Type:       CommandType("unknown"), // Use unknown type to test default case
 			Command:    "echo",
@@ -93,7 +93,7 @@ func TestExecutorEdgeCases(t *testing.T) {
 
 		exitCode, message := executor.ExecuteForHook(context.Background(), cmd, CommandType("unknown"))
 		if exitCode != 2 {
-			t.Errorf("Expected exit code 2 with debug, got %d", exitCode)
+			t.Errorf("Expected exit code 2, got %d", exitCode)
 		}
 		if !strings.Contains(message, "✓") {
 			t.Errorf("Expected success message with checkmark, got: %s", message)
@@ -113,7 +113,7 @@ func TestDiscoveryEdgeCases(t *testing.T) {
 		}
 
 		// jq fails
-		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, _ string, _ ...string) ([]byte, error) {
+		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, _ string, _ ...string) (*CommandOutput, error) {
 			return nil, fmt.Errorf("jq error")
 		}
 
@@ -138,9 +138,9 @@ func TestDiscoveryEdgeCases(t *testing.T) {
 			return nil, os.ErrNotExist
 		}
 
-		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, name string, _ ...string) ([]byte, error) {
+		testDeps.MockRunner.runContextFunc = func(_ context.Context, _, name string, _ ...string) (*CommandOutput, error) {
 			if name == "jq" {
-				return []byte(`"test script"`), nil
+				return &CommandOutput{Stdout: []byte(`"test script"`)}, nil
 			}
 			return nil, fmt.Errorf("command failed")
 		}

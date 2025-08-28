@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/Veraticus/cc-tools/internal/config"
@@ -89,12 +90,12 @@ func runStatusline() {
 	fmt.Print(result) //nolint:forbidigo // CLI output
 }
 
-func runLint() {
-	// Load configuration for timeout values
-	cfg, _ := config.Load()
+func loadLintConfig() (int, int) {
 	timeoutSecs := 30
 	cooldownSecs := 2
 
+	// Load configuration
+	cfg, _ := config.Load()
 	if cfg != nil {
 		if cfg.Hooks.Lint.TimeoutSeconds > 0 {
 			timeoutSecs = cfg.Hooks.Lint.TimeoutSeconds
@@ -104,17 +105,27 @@ func runLint() {
 		}
 	}
 
-	debug := os.Getenv("CLAUDE_HOOKS_DEBUG") == "1"
-	exitCode := hooks.RunSmartHook(context.Background(), hooks.CommandTypeLint, debug, timeoutSecs, cooldownSecs, nil)
-	os.Exit(exitCode)
+	// Support legacy environment variables for backward compatibility
+	if envTimeout := os.Getenv("CLAUDE_HOOKS_LINT_TIMEOUT"); envTimeout != "" {
+		if val, err := strconv.Atoi(envTimeout); err == nil && val > 0 {
+			timeoutSecs = val
+		}
+	}
+	if envCooldown := os.Getenv("CLAUDE_HOOKS_LINT_COOLDOWN"); envCooldown != "" {
+		if val, err := strconv.Atoi(envCooldown); err == nil && val >= 0 {
+			cooldownSecs = val
+		}
+	}
+
+	return timeoutSecs, cooldownSecs
 }
 
-func runTest() {
-	// Load configuration for timeout values
-	cfg, _ := config.Load()
+func loadTestConfig() (int, int) {
 	timeoutSecs := 60
 	cooldownSecs := 2
 
+	// Load configuration
+	cfg, _ := config.Load()
 	if cfg != nil {
 		if cfg.Hooks.Test.TimeoutSeconds > 0 {
 			timeoutSecs = cfg.Hooks.Test.TimeoutSeconds
@@ -124,6 +135,30 @@ func runTest() {
 		}
 	}
 
+	// Support legacy environment variables for backward compatibility
+	if envTimeout := os.Getenv("CLAUDE_HOOKS_TEST_TIMEOUT"); envTimeout != "" {
+		if val, err := strconv.Atoi(envTimeout); err == nil && val > 0 {
+			timeoutSecs = val
+		}
+	}
+	if envCooldown := os.Getenv("CLAUDE_HOOKS_TEST_COOLDOWN"); envCooldown != "" {
+		if val, err := strconv.Atoi(envCooldown); err == nil && val >= 0 {
+			cooldownSecs = val
+		}
+	}
+
+	return timeoutSecs, cooldownSecs
+}
+
+func runLint() {
+	timeoutSecs, cooldownSecs := loadLintConfig()
+	debug := os.Getenv("CLAUDE_HOOKS_DEBUG") == "1"
+	exitCode := hooks.RunSmartHook(context.Background(), hooks.CommandTypeLint, debug, timeoutSecs, cooldownSecs, nil)
+	os.Exit(exitCode)
+}
+
+func runTest() {
+	timeoutSecs, cooldownSecs := loadTestConfig()
 	debug := os.Getenv("CLAUDE_HOOKS_DEBUG") == "1"
 	exitCode := hooks.RunSmartHook(context.Background(), hooks.CommandTypeTest, debug, timeoutSecs, cooldownSecs, nil)
 	os.Exit(exitCode)

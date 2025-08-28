@@ -15,11 +15,19 @@ type FileSystem interface {
 	ReadFile(name string) ([]byte, error)
 	WriteFile(name string, data []byte, perm os.FileMode) error
 	TempDir() string
+	CreateExclusive(name string, data []byte, perm os.FileMode) error
+	Remove(name string) error
+}
+
+// CommandOutput contains the output from a command execution.
+type CommandOutput struct {
+	Stdout []byte
+	Stderr []byte
 }
 
 // CommandRunner executes external commands.
 type CommandRunner interface {
-	RunContext(ctx context.Context, dir, name string, args ...string) ([]byte, error)
+	RunContext(ctx context.Context, dir, name string, args ...string) (*CommandOutput, error)
 	LookPath(file string) (string, error)
 }
 
@@ -88,15 +96,73 @@ func (r *realFileSystem) TempDir() string {
 	return os.TempDir()
 }
 
+func (r *realFileSystem) CreateExclusive(name string, data []byte, perm os.FileMode) error {
+	// Use O_EXCL to atomically create the file only if it doesn't exist
+	// #nosec G304 - file path is from trusted source
+	file, err := os.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, perm)
+	if err != nil {
+		return fmt.Errorf("create exclusive %s: %w", name, err)
+	}
+	defer func() { _ = file.Close() }()
+
+	if _, writeErr := file.Write(data); writeErr != nil {
+		// Try to clean up on write failure
+		_ = os.Remove(name)
+		return fmt.Errorf("write exclusive %s: %w", name, writeErr)
+	}
+	return nil
+}
+
+func (r *realFileSystem) Remove(name string) error {
+	if err := os.Remove(name); err != nil {
+		return fmt.Errorf("remove %s: %w", name, err)
+	}
+	return nil
+}
+
 type realCommandRunner struct{}
 
-func (r *realCommandRunner) RunContext(ctx context.Context, dir, name string, args ...string) ([]byte, error) {
+func (r *realCommandRunner) RunContext(ctx context.Context, dir, name string, args ...string) (*CommandOutput, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
-	output, err := cmd.CombinedOutput()
+
+	// Capture stdout and stderr separately
+	var stdout, stderr []byte
+	var err error
+
+	// Get stdout
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("create stdout pipe: %w", err)
+	}
+
+	// Get stderr
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, fmt.Errorf("create stderr pipe: %w", err)
+	}
+
+	// Start the command
+	if startErr := cmd.Start(); startErr != nil {
+		return nil, fmt.Errorf("start command %s: %w", name, startErr)
+	}
+
+	// Read outputs
+	stdout, _ = io.ReadAll(stdoutPipe)
+	stderr, _ = io.ReadAll(stderrPipe)
+
+	// Wait for completion
+	err = cmd.Wait()
+
+	output := &CommandOutput{
+		Stdout: stdout,
+		Stderr: stderr,
+	}
+
 	if err != nil {
 		return output, fmt.Errorf("run command %s: %w", name, err)
 	}
+
 	return output, nil
 }
 
