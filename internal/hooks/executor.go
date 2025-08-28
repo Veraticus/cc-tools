@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"time"
 
+	debuglog "github.com/Veraticus/cc-tools/internal/debug"
 	"github.com/Veraticus/cc-tools/internal/shared"
 )
 
@@ -153,6 +155,56 @@ func (ce *CommandExecutor) ExecuteForHook(
 	return ExitCodeShowMessage, message
 }
 
+// initLogger initializes the debug logger.
+func initLogger(ctx context.Context) *debuglog.Logger {
+	cwd, _ := os.Getwd()
+	logger, _ := debuglog.NewLogger(ctx, cwd)
+	return logger
+}
+
+// logHookStart logs the start of a hook execution.
+func logHookStart(logger *debuglog.Logger, hookType CommandType, timeoutSecs, cooldownSecs int) {
+	if logger == nil || !logger.IsEnabled() {
+		return
+	}
+	cwd, _ := os.Getwd()
+	logger.LogSection(fmt.Sprintf("Starting %s hook", hookType))
+	logger.Log("Working directory: %s", cwd)
+	logger.Log("Timeout: %d seconds", timeoutSecs)
+	logger.Log("Cooldown: %d seconds", cooldownSecs)
+}
+
+// processHookInput reads and validates the hook input.
+func processHookInput(deps *Dependencies, logger *debuglog.Logger, debug bool) (*HookInput, string, bool) {
+	input, err := ReadHookInput(deps.Input)
+	if err != nil {
+		if logger != nil && logger.IsEnabled() {
+			logger.LogError(err, "reading hook input")
+		}
+		handleInputError(err, debug, deps.Stderr)
+		return nil, "", false
+	}
+
+	if logger != nil && logger.IsEnabled() && input != nil {
+		logger.Log("Hook event: %s", input.HookEventName)
+		logger.Log("Tool name: %s", input.ToolName)
+	}
+
+	filePath, shouldProcess := validateHookEvent(input, debug, deps.Stderr)
+	if !shouldProcess {
+		if logger != nil && logger.IsEnabled() {
+			logger.Log("Event validation failed, not processing")
+		}
+		return input, "", false
+	}
+
+	if logger != nil && logger.IsEnabled() {
+		logger.Log("Processing file: %s", filePath)
+	}
+
+	return input, filePath, true
+}
+
 // RunSmartHook is the main entry point for smart-lint and smart-test hooks.
 func RunSmartHook(
 	ctx context.Context,
@@ -166,23 +218,26 @@ func RunSmartHook(
 		deps = NewDefaultDependencies()
 	}
 
-	// Read and validate input
-	input, err := ReadHookInput(deps.Input)
-	if err != nil {
-		handleInputError(err, debug, deps.Stderr)
-		return 0
-	}
+	logger := initLogger(ctx)
+	defer func() {
+		if logger != nil {
+			_ = logger.Close()
+		}
+	}()
 
-	// Validate event and get file path
-	filePath, shouldProcess := validateHookEvent(input, debug, deps.Stderr)
+	logHookStart(logger, hookType, timeoutSecs, cooldownSecs)
+
+	// Process input
+	_, filePath, shouldProcess := processHookInput(deps, logger, debug)
 	if !shouldProcess {
 		return 0
 	}
 
 	// Check if file should be skipped
 	if shared.ShouldSkipFile(filePath) {
-		// Only output in debug mode when CLAUDE_HOOKS_DEBUG is set
-		// This matches bash behavior where log_debug checks the env var
+		if logger != nil && logger.IsEnabled() {
+			logger.Log("File skipped by filter: %s", filePath)
+		}
 		return 0
 	}
 
@@ -190,15 +245,22 @@ func RunSmartHook(
 	fileDir := filepath.Dir(filePath)
 	projectRoot, err := shared.FindProjectRoot(fileDir, nil)
 	if err != nil {
+		if logger != nil && logger.IsEnabled() {
+			logger.LogError(err, "finding project root")
+		}
 		if debug {
 			_, _ = fmt.Fprintf(deps.Stderr, "Error finding project root: %v\n", err)
 		}
 		return 0
 	}
 
+	if logger != nil && logger.IsEnabled() {
+		logger.Log("Project root: %s", projectRoot)
+	}
+
 	// Acquire lock
 	lockMgr := NewLockManager(projectRoot, string(hookType), cooldownSecs, deps)
-	if !acquireLock(lockMgr, debug, deps.Stderr) {
+	if !acquireLock(lockMgr, debug, deps.Stderr, logger) {
 		return 0
 	}
 	defer func() {
@@ -206,7 +268,7 @@ func RunSmartHook(
 	}()
 
 	// Discover and execute command
-	return discoverAndExecute(ctx, projectRoot, fileDir, hookType, timeoutSecs, debug, deps)
+	return discoverAndExecute(ctx, projectRoot, fileDir, hookType, timeoutSecs, debug, deps, logger)
 }
 
 // handleInputError handles errors from reading hook input.
@@ -239,21 +301,100 @@ func validateHookEvent(input *HookInput, debug bool, stderr OutputWriter) (strin
 }
 
 // acquireLock tries to acquire the lock for the hook.
-func acquireLock(lockMgr *LockManager, debug bool, stderr OutputWriter) bool {
+func acquireLock(lockMgr *LockManager, debug bool, stderr OutputWriter, logger *debuglog.Logger) bool {
 	acquired, err := lockMgr.TryAcquire()
 	if err != nil {
+		if logger != nil && logger.IsEnabled() {
+			logger.LogError(err, "acquiring lock")
+		}
 		if debug {
 			_, _ = fmt.Fprintf(stderr, "Error acquiring lock: %v\n", err)
 		}
 		return false
 	}
 	if !acquired {
+		if logger != nil && logger.IsEnabled() {
+			logger.Log("Another instance is running or in cooldown")
+		}
 		if debug {
 			_, _ = fmt.Fprintf(stderr, "Another instance is running or in cooldown\n")
 		}
 		return false
 	}
+	if logger != nil && logger.IsEnabled() {
+		logger.Log("Lock acquired successfully")
+	}
 	return true
+}
+
+// discoverCommand handles command discovery with logging.
+func discoverCommand(
+	ctx context.Context,
+	discovery *CommandDiscovery,
+	hookType CommandType,
+	fileDir string,
+	logger *debuglog.Logger,
+	debug bool,
+	deps *Dependencies,
+) *DiscoveredCommand {
+	if logger != nil && logger.IsEnabled() {
+		logger.LogSection(fmt.Sprintf("Discovering %s command", hookType))
+	}
+
+	cmd, err := discovery.DiscoverCommand(ctx, hookType, fileDir)
+	if err != nil {
+		if logger != nil && logger.IsEnabled() {
+			logger.LogError(err, "discovering command")
+		}
+		if debug {
+			_, _ = fmt.Fprintf(deps.Stderr, "Error discovering command: %v\n", err)
+		}
+		return nil
+	}
+
+	if cmd == nil {
+		if logger != nil && logger.IsEnabled() {
+			logger.Log("No %s command found", hookType)
+		}
+		if debug {
+			_, _ = fmt.Fprintf(deps.Stderr, "No %s command found\n", hookType)
+		}
+		return nil
+	}
+
+	if logger != nil && logger.IsEnabled() {
+		logger.LogDiscovery(string(hookType), cmd.String(), cmd.WorkingDir)
+	}
+
+	return cmd
+}
+
+// executeCommand handles command execution with logging.
+func executeCommand(
+	ctx context.Context,
+	cmd *DiscoveredCommand,
+	hookType CommandType,
+	timeoutSecs int,
+	debug bool,
+	deps *Dependencies,
+	logger *debuglog.Logger,
+) (int, string) {
+	if logger != nil && logger.IsEnabled() {
+		logger.LogSection("Executing command")
+		logger.LogCommand(cmd.Command, cmd.Args, cmd.WorkingDir)
+	}
+
+	executor := NewCommandExecutor(timeoutSecs, debug, deps)
+	exitCode, message := executor.ExecuteForHook(ctx, cmd, hookType)
+
+	if logger != nil && logger.IsEnabled() {
+		logger.Log("Exit code: %d", exitCode)
+		if message != "" {
+			logger.Log("Message: %s", message)
+		}
+	}
+
+	return exitCode, message
 }
 
 // discoverAndExecute discovers and executes the appropriate command.
@@ -264,26 +405,16 @@ func discoverAndExecute(
 	timeoutSecs int,
 	debug bool,
 	deps *Dependencies,
+	logger *debuglog.Logger,
 ) int {
-	// Discover command
 	discovery := NewCommandDiscovery(projectRoot, timeoutSecs, deps)
-	cmd, err := discovery.DiscoverCommand(ctx, hookType, fileDir)
-	if err != nil {
-		if debug {
-			_, _ = fmt.Fprintf(deps.Stderr, "Error discovering command: %v\n", err)
-		}
-		return 0
-	}
+
+	cmd := discoverCommand(ctx, discovery, hookType, fileDir, logger, debug, deps)
 	if cmd == nil {
-		if debug {
-			_, _ = fmt.Fprintf(deps.Stderr, "No %s command found\n", hookType)
-		}
 		return 0
 	}
 
-	// Execute command
-	executor := NewCommandExecutor(timeoutSecs, debug, deps)
-	exitCode, message := executor.ExecuteForHook(ctx, cmd, hookType)
+	exitCode, message := executeCommand(ctx, cmd, hookType, timeoutSecs, debug, deps, logger)
 
 	if message != "" {
 		_, _ = fmt.Fprintln(deps.Stderr, message)

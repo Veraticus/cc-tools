@@ -4,10 +4,9 @@
 build:
 	@echo "Building cc-tools binaries..."
 	@mkdir -p build
-	go build -o build/cc-tools-lint cmd/cc-tools-lint/main.go
-	go build -o build/cc-tools-test cmd/cc-tools-test/main.go
-	go build -o build/cc-tools-statusline cmd/cc-tools-statusline/main.go
-	go build -o build/cc-tools cmd/cc-tools/main.go
+	go build -o build/cc-tools-validate ./cmd/cc-tools-validate/
+	go build -o build/cc-tools-statusline ./cmd/cc-tools-statusline/
+	go build -o build/cc-tools ./cmd/cc-tools/
 	@echo "Binaries built in build/"
 	@ls -la build/
 
@@ -35,19 +34,14 @@ install: build
 	@echo "Installing cc-tools binaries..."
 	@mkdir -p ~/bin
 	cp build/cc-tools ~/bin/
-	cp build/cc-tools-lint ~/bin/
-	cp build/cc-tools-test ~/bin/
+	cp build/cc-tools-validate ~/bin/
 	cp build/cc-tools-statusline ~/bin/
 	@echo "cc-tools binaries installed to ~/bin/"
 	@echo "Make sure ~/bin is in your PATH"
 
-# Run lint subcommand
-run-lint: build
-	./build/cc-tools lint
-
-# Run test subcommand
-run-test: build
-	./build/cc-tools test
+# Run validate subcommand
+run-validate: build
+	./build/cc-tools validate
 
 # Run statusline subcommand
 run-statusline: build

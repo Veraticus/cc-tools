@@ -5,10 +5,10 @@ High-performance Go implementation of Claude Code hooks and utilities. Provides 
 ## Features
 
 ### 🚀 Smart Hooks
-- **Automatic lint/test discovery** - Finds and runs your project's existing commands
+- **Automatic validation** - Finds and runs lint and test commands in parallel
 - **Project-aware execution** - Walks up directory tree to find project root
 - **Intelligent concurrency control** - PID-based locking prevents duplicate runs
-- **Clear feedback** - Shows success messages or blocking errors in Claude
+- **Clear feedback** - Shows consolidated success messages or blocking errors in Claude
 
 ### ⚡ Performance Optimized
 - **Fast startup** - Pure Go implementation with minimal dependencies

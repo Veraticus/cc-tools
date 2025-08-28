@@ -12,9 +12,9 @@ import (
 type CommandType string
 
 const (
-	// CommandTypeLint represents lint commands.
+	// CommandTypeLint represents lint commands (used internally by validate).
 	CommandTypeLint CommandType = "lint"
-	// CommandTypeTest represents test commands.
+	// CommandTypeTest represents test commands (used internally by validate).
 	CommandTypeTest CommandType = "test"
 )
 

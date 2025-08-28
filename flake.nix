@@ -188,8 +188,8 @@
         buildTime = "1970-01-01T00:00:00Z";
         
         # Build all cc-tools binaries
-        cc-tools-lint = pkgs.buildGoModule rec {
-          pname = "cc-tools-lint";
+        cc-tools-validate = pkgs.buildGoModule rec {
+          pname = "cc-tools-validate";
           inherit version;
           
           src = ./.;
@@ -197,7 +197,7 @@
           # Update this hash after running: nix build . --no-link 2>&1 | grep 'got:' | cut -d: -f2 | xargs
           vendorHash = "sha256-qbzor2DVDqLCuNqAWNxgr8xHCljrQEm+fRh8iH5tmKc=";
           
-          subPackages = [ "cmd/cc-tools-lint" ];
+          subPackages = [ "cmd/cc-tools-validate" ];
           
           ldflags = [
             "-s"
@@ -207,7 +207,7 @@
           ];
           
           meta = with pkgs.lib; {
-            description = "Claude Code Tools - lint binary";
+            description = "Claude Code Tools - validate binary";
             homepage = "https://github.com/Veraticus/cc-tools";
             license = licenses.mit;
             maintainers = with maintainers; [ ];
@@ -215,15 +215,15 @@
           };
         };
 
-        cc-tools-test = pkgs.buildGoModule rec {
-          pname = "cc-tools-test";
+        cc-tools-main = pkgs.buildGoModule rec {
+          pname = "cc-tools";
           inherit version;
           
           src = ./.;
           
           vendorHash = "sha256-qbzor2DVDqLCuNqAWNxgr8xHCljrQEm+fRh8iH5tmKc=";
           
-          subPackages = [ "cmd/cc-tools-test" ];
+          subPackages = [ "cmd/cc-tools" ];
           
           ldflags = [
             "-s"
@@ -233,7 +233,7 @@
           ];
           
           meta = with pkgs.lib; {
-            description = "Claude Code Tools - test binary";
+            description = "Claude Code Tools - main CLI";
             homepage = "https://github.com/Veraticus/cc-tools";
             license = licenses.mit;
             maintainers = with maintainers; [ ];
@@ -270,7 +270,7 @@
         # Combined package that includes all binaries
         cc-tools = pkgs.symlinkJoin {
           name = "cc-tools-${version}";
-          paths = [ cc-tools-lint cc-tools-test cc-tools-statusline ];
+          paths = [ cc-tools-main cc-tools-validate cc-tools-statusline ];
           meta = with pkgs.lib; {
             description = "Claude Code Tools - all binaries";
             homepage = "https://github.com/Veraticus/cc-tools";
@@ -284,7 +284,7 @@
       {
         # Packages
         packages = {
-          inherit cc-tools cc-tools-lint cc-tools-test cc-tools-statusline;
+          inherit cc-tools cc-tools-main cc-tools-validate cc-tools-statusline;
           default = cc-tools;
         };
         
@@ -481,15 +481,11 @@
         apps = {
           default = {
             type = "app";
-            program = "${cc-tools-lint}/bin/cc-tools-lint";
+            program = "${cc-tools-main}/bin/cc-tools";
           };
-          lint = {
+          validate = {
             type = "app";
-            program = "${cc-tools-lint}/bin/cc-tools-lint";
-          };
-          test = {
-            type = "app";
-            program = "${cc-tools-test}/bin/cc-tools-test";
+            program = "${cc-tools-validate}/bin/cc-tools-validate";
           };
           statusline = {
             type = "app";

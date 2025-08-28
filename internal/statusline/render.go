@@ -9,6 +9,12 @@ import (
 	"github.com/mattn/go-runewidth"
 )
 
+const (
+	// Context window constants.
+	autoCompactThreshold    = 160000 // Tokens at which auto-compact triggers
+	compactThresholdPercent = 85     // Percentage of usable window to trigger compact mode
+)
+
 // Render renders the statusline with lipgloss styling and guaranteed fixed width.
 func (s *Statusline) Render(data *CachedData) string {
 	termWidth := s.getTermWidth(data)
@@ -683,10 +689,8 @@ func (s *Statusline) selectModelIcon() string {
 }
 
 func (s *Statusline) isCompactMode(contextLength int) bool {
-	const maxContextLength = 200000
-	const compactThresholdPercent = 85
 	const percentDivisor = 100
-	compactModeThreshold := (maxContextLength * compactThresholdPercent) / percentDivisor
+	compactModeThreshold := (autoCompactThreshold * compactThresholdPercent) / percentDivisor
 	return contextLength >= compactModeThreshold
 }
 
@@ -732,9 +736,8 @@ func (s *Statusline) calculateAvailableBarWidth(barWidth int) int {
 }
 
 func (s *Statusline) calculateContextPercentage(contextLength int) float64 {
-	const autoCompactThreshold = 160000.0
 	const maxPercentage = 100.0
-	percentage := float64(contextLength) * maxPercentage / autoCompactThreshold
+	percentage := float64(contextLength) * maxPercentage / float64(autoCompactThreshold)
 	if percentage > maxPercentage {
 		return maxPercentage
 	}
