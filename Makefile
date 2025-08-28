@@ -1,11 +1,15 @@
 .PHONY: build clean test lint
 
-# Build unified cc-tools binary
+# Build all cc-tools binaries
 build:
-	@echo "Building cc-tools..."
+	@echo "Building cc-tools binaries..."
 	@mkdir -p build
+	go build -o build/cc-tools-lint cmd/cc-tools-lint/main.go
+	go build -o build/cc-tools-test cmd/cc-tools-test/main.go
+	go build -o build/cc-tools-statusline cmd/cc-tools-statusline/main.go
 	go build -o build/cc-tools cmd/cc-tools/main.go
-	@echo "Binary built: build/cc-tools"
+	@echo "Binaries built in build/"
+	@ls -la build/
 
 # Clean build artifacts
 clean:
@@ -26,12 +30,15 @@ lint:
 	golangci-lint run
 	deadcode -test ./...
 
-# Install cc-tools binary
+# Install all cc-tools binaries
 install: build
-	@echo "Installing cc-tools..."
+	@echo "Installing cc-tools binaries..."
 	@mkdir -p ~/bin
 	cp build/cc-tools ~/bin/
-	@echo "cc-tools installed to ~/bin/"
+	cp build/cc-tools-lint ~/bin/
+	cp build/cc-tools-test ~/bin/
+	cp build/cc-tools-statusline ~/bin/
+	@echo "cc-tools binaries installed to ~/bin/"
 	@echo "Make sure ~/bin is in your PATH"
 
 # Run lint subcommand

@@ -187,9 +187,9 @@
         version = shortRev;
         buildTime = "1970-01-01T00:00:00Z";
         
-        # Build unified cc-tools binary
-        cc-tools = pkgs.buildGoModule rec {
-          pname = "cc-tools";
+        # Build all cc-tools binaries
+        cc-tools-lint = pkgs.buildGoModule rec {
+          pname = "cc-tools-lint";
           inherit version;
           
           src = ./.;
@@ -197,7 +197,7 @@
           # Update this hash after running: nix build . --no-link 2>&1 | grep 'got:' | cut -d: -f2 | xargs
           vendorHash = "sha256-qbzor2DVDqLCuNqAWNxgr8xHCljrQEm+fRh8iH5tmKc=";
           
-          subPackages = [ "cmd/cc-tools" ];
+          subPackages = [ "cmd/cc-tools-lint" ];
           
           ldflags = [
             "-s"
@@ -207,7 +207,72 @@
           ];
           
           meta = with pkgs.lib; {
-            description = "Claude Code Tools - unified binary for smart hooks";
+            description = "Claude Code Tools - lint binary";
+            homepage = "https://github.com/Veraticus/cc-tools";
+            license = licenses.mit;
+            maintainers = with maintainers; [ ];
+            platforms = platforms.unix;
+          };
+        };
+
+        cc-tools-test = pkgs.buildGoModule rec {
+          pname = "cc-tools-test";
+          inherit version;
+          
+          src = ./.;
+          
+          vendorHash = "sha256-qbzor2DVDqLCuNqAWNxgr8xHCljrQEm+fRh8iH5tmKc=";
+          
+          subPackages = [ "cmd/cc-tools-test" ];
+          
+          ldflags = [
+            "-s"
+            "-w"
+            "-X main.version=${version}"
+            "-X main.buildTime=${buildTime}"
+          ];
+          
+          meta = with pkgs.lib; {
+            description = "Claude Code Tools - test binary";
+            homepage = "https://github.com/Veraticus/cc-tools";
+            license = licenses.mit;
+            maintainers = with maintainers; [ ];
+            platforms = platforms.unix;
+          };
+        };
+
+        cc-tools-statusline = pkgs.buildGoModule rec {
+          pname = "cc-tools-statusline";
+          inherit version;
+          
+          src = ./.;
+          
+          vendorHash = "sha256-qbzor2DVDqLCuNqAWNxgr8xHCljrQEm+fRh8iH5tmKc=";
+          
+          subPackages = [ "cmd/cc-tools-statusline" ];
+          
+          ldflags = [
+            "-s"
+            "-w"
+            "-X main.version=${version}"
+            "-X main.buildTime=${buildTime}"
+          ];
+          
+          meta = with pkgs.lib; {
+            description = "Claude Code Tools - statusline binary";
+            homepage = "https://github.com/Veraticus/cc-tools";
+            license = licenses.mit;
+            maintainers = with maintainers; [ ];
+            platforms = platforms.unix;
+          };
+        };
+
+        # Combined package that includes all binaries
+        cc-tools = pkgs.symlinkJoin {
+          name = "cc-tools-${version}";
+          paths = [ cc-tools-lint cc-tools-test cc-tools-statusline ];
+          meta = with pkgs.lib; {
+            description = "Claude Code Tools - all binaries";
             homepage = "https://github.com/Veraticus/cc-tools";
             license = licenses.mit;
             maintainers = with maintainers; [ ];
@@ -219,7 +284,7 @@
       {
         # Packages
         packages = {
-          inherit cc-tools;
+          inherit cc-tools cc-tools-lint cc-tools-test cc-tools-statusline;
           default = cc-tools;
         };
         
@@ -416,11 +481,19 @@
         apps = {
           default = {
             type = "app";
-            program = "${cc-tools}/bin/cc-tools";
+            program = "${cc-tools-lint}/bin/cc-tools-lint";
           };
-          cc-tools = {
+          lint = {
             type = "app";
-            program = "${cc-tools}/bin/cc-tools";
+            program = "${cc-tools-lint}/bin/cc-tools-lint";
+          };
+          test = {
+            type = "app";
+            program = "${cc-tools-test}/bin/cc-tools-test";
+          };
+          statusline = {
+            type = "app";
+            program = "${cc-tools-statusline}/bin/cc-tools-statusline";
           };
         };
       }
