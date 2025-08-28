@@ -32,10 +32,8 @@ func main() {
 	switch os.Args[1] {
 	case "statusline":
 		runStatusline()
-	case "lint":
-		runLint()
-	case "test":
-		runTest()
+	case "validate":
+		runValidate()
 	case "version":
 		// Print version to stdout as intended output
 		fmt.Printf("cc-tools %s\n", version) //nolint:forbidigo // CLI output
@@ -56,15 +54,13 @@ Usage:
 
 Commands:
   statusline    Generate a status line for the prompt
-  lint          Run smart linting
-  test          Run smart testing
+  validate      Run smart validation (lint and test in parallel)
   version       Print version information
   help          Show this help message
 
 Examples:
   echo '{"cwd": "/path"}' | cc-tools statusline
-  echo '{"file_path": "main.go"}' | cc-tools lint
-  echo '{"file_path": "main_test.go"}' | cc-tools test
+  echo '{"file_path": "main.go"}' | cc-tools validate
 `)
 }
 
@@ -90,58 +86,28 @@ func runStatusline() {
 	fmt.Print(result) //nolint:forbidigo // CLI output
 }
 
-func loadLintConfig() (int, int) {
-	timeoutSecs := 30
-	cooldownSecs := 2
-
-	// Load configuration
-	cfg, _ := config.Load()
-	if cfg != nil {
-		if cfg.Hooks.Lint.TimeoutSeconds > 0 {
-			timeoutSecs = cfg.Hooks.Lint.TimeoutSeconds
-		}
-		if cfg.Hooks.Lint.CooldownSeconds > 0 {
-			cooldownSecs = cfg.Hooks.Lint.CooldownSeconds
-		}
-	}
-
-	// Support legacy environment variables for backward compatibility
-	if envTimeout := os.Getenv("CLAUDE_HOOKS_LINT_TIMEOUT"); envTimeout != "" {
-		if val, err := strconv.Atoi(envTimeout); err == nil && val > 0 {
-			timeoutSecs = val
-		}
-	}
-	if envCooldown := os.Getenv("CLAUDE_HOOKS_LINT_COOLDOWN"); envCooldown != "" {
-		if val, err := strconv.Atoi(envCooldown); err == nil && val >= 0 {
-			cooldownSecs = val
-		}
-	}
-
-	return timeoutSecs, cooldownSecs
-}
-
-func loadTestConfig() (int, int) {
+func loadValidateConfig() (int, int) {
 	timeoutSecs := 60
-	cooldownSecs := 2
+	cooldownSecs := 5
 
 	// Load configuration
 	cfg, _ := config.Load()
 	if cfg != nil {
-		if cfg.Hooks.Test.TimeoutSeconds > 0 {
-			timeoutSecs = cfg.Hooks.Test.TimeoutSeconds
+		if cfg.Hooks.Validate.TimeoutSeconds > 0 {
+			timeoutSecs = cfg.Hooks.Validate.TimeoutSeconds
 		}
-		if cfg.Hooks.Test.CooldownSeconds > 0 {
-			cooldownSecs = cfg.Hooks.Test.CooldownSeconds
+		if cfg.Hooks.Validate.CooldownSeconds > 0 {
+			cooldownSecs = cfg.Hooks.Validate.CooldownSeconds
 		}
 	}
 
-	// Support legacy environment variables for backward compatibility
-	if envTimeout := os.Getenv("CLAUDE_HOOKS_TEST_TIMEOUT"); envTimeout != "" {
+	// Environment variables override config
+	if envTimeout := os.Getenv("CC_TOOLS_HOOKS_VALIDATE_TIMEOUT_SECONDS"); envTimeout != "" {
 		if val, err := strconv.Atoi(envTimeout); err == nil && val > 0 {
 			timeoutSecs = val
 		}
 	}
-	if envCooldown := os.Getenv("CLAUDE_HOOKS_TEST_COOLDOWN"); envCooldown != "" {
+	if envCooldown := os.Getenv("CC_TOOLS_HOOKS_VALIDATE_COOLDOWN_SECONDS"); envCooldown != "" {
 		if val, err := strconv.Atoi(envCooldown); err == nil && val >= 0 {
 			cooldownSecs = val
 		}
@@ -150,17 +116,10 @@ func loadTestConfig() (int, int) {
 	return timeoutSecs, cooldownSecs
 }
 
-func runLint() {
-	timeoutSecs, cooldownSecs := loadLintConfig()
+func runValidate() {
+	timeoutSecs, cooldownSecs := loadValidateConfig()
 	debug := os.Getenv("CLAUDE_HOOKS_DEBUG") == "1"
-	exitCode := hooks.RunSmartHook(context.Background(), hooks.CommandTypeLint, debug, timeoutSecs, cooldownSecs, nil)
-	os.Exit(exitCode)
-}
-
-func runTest() {
-	timeoutSecs, cooldownSecs := loadTestConfig()
-	debug := os.Getenv("CLAUDE_HOOKS_DEBUG") == "1"
-	exitCode := hooks.RunSmartHook(context.Background(), hooks.CommandTypeTest, debug, timeoutSecs, cooldownSecs, nil)
+	exitCode := hooks.RunValidateHook(context.Background(), debug, timeoutSecs, cooldownSecs, nil)
 	os.Exit(exitCode)
 }
 

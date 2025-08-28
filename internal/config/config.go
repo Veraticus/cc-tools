@@ -20,18 +20,11 @@ type Config struct {
 
 // HooksConfig represents hook-related settings.
 type HooksConfig struct {
-	Lint LintConfig `mapstructure:"lint"`
-	Test TestConfig `mapstructure:"test"`
+	Validate ValidateConfig `mapstructure:"validate"`
 }
 
-// LintConfig represents lint hook settings.
-type LintConfig struct {
-	CooldownSeconds int `mapstructure:"cooldown_seconds"`
-	TimeoutSeconds  int `mapstructure:"timeout_seconds"`
-}
-
-// TestConfig represents test hook settings.
-type TestConfig struct {
+// ValidateConfig represents validate hook settings.
+type ValidateConfig struct {
 	CooldownSeconds int `mapstructure:"cooldown_seconds"`
 	TimeoutSeconds  int `mapstructure:"timeout_seconds"`
 }
@@ -54,14 +47,11 @@ func Load() (*Config, error) {
 
 	// Set defaults for hooks
 	const (
-		defaultCooldownSeconds = 2
-		defaultLintTimeout     = 30
-		defaultTestTimeout     = 60
+		defaultCooldownSeconds = 5
+		defaultValidateTimeout = 60
 	)
-	v.SetDefault("hooks.lint.cooldown_seconds", defaultCooldownSeconds)
-	v.SetDefault("hooks.lint.timeout_seconds", defaultLintTimeout)
-	v.SetDefault("hooks.test.cooldown_seconds", defaultCooldownSeconds)
-	v.SetDefault("hooks.test.timeout_seconds", defaultTestTimeout)
+	v.SetDefault("hooks.validate.cooldown_seconds", defaultCooldownSeconds)
+	v.SetDefault("hooks.validate.timeout_seconds", defaultValidateTimeout)
 
 	// Set config file name (without extension)
 	v.SetConfigName("config")
