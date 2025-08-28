@@ -36,6 +36,10 @@ func main() {
 		runLint()
 	case "test":
 		runTest()
+	case "skip":
+		runSkipCommand()
+	case "unskip":
+		runUnskipCommand()
 	case "version":
 		// Print version to stdout as intended output
 		fmt.Printf("cc-tools %s\n", version) //nolint:forbidigo // CLI output
@@ -58,6 +62,8 @@ Commands:
   statusline    Generate a status line for the prompt
   lint          Run smart linting
   test          Run smart testing
+  skip          Configure skip settings for directories
+  unskip        Remove skip settings from directories
   version       Print version information
   help          Show this help message
 
