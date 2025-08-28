@@ -78,17 +78,7 @@ func TestLoadWithEnvironmentVariables(t *testing.T) {
 	envKey := "CC_TOOLS_NOTIFICATIONS_NTFY_TOPIC"
 	envValue := "test-topic-from-env"
 
-	// Store original value and restore it after test
-	originalValue := os.Getenv(envKey)
-	defer func() {
-		if originalValue != "" {
-			os.Setenv(envKey, originalValue)
-		} else {
-			os.Unsetenv(envKey)
-		}
-	}()
-
-	os.Setenv(envKey, envValue)
+	t.Setenv(envKey, envValue)
 
 	// Create Viper instance with env support
 	v := viper.New()
@@ -127,17 +117,7 @@ ntfy_topic = "topic-from-toml"
 	envKey := "CC_TOOLS_NOTIFICATIONS_NTFY_TOPIC"
 	envValue := "topic-from-env-override"
 
-	// Store original value and restore it after test
-	originalValue := os.Getenv(envKey)
-	defer func() {
-		if originalValue != "" {
-			os.Setenv(envKey, originalValue)
-		} else {
-			os.Unsetenv(envKey)
-		}
-	}()
-
-	os.Setenv(envKey, envValue)
+	t.Setenv(envKey, envValue)
 
 	// Create Viper instance
 	v := viper.New()
@@ -199,21 +179,11 @@ func TestGetXDGConfigPath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Store original value
-			originalXDG := os.Getenv("XDG_CONFIG_HOME")
-			defer func() {
-				if originalXDG != "" {
-					os.Setenv("XDG_CONFIG_HOME", originalXDG)
-				} else {
-					os.Unsetenv("XDG_CONFIG_HOME")
-				}
-			}()
-
 			// Set test value
 			if tt.xdgConfig != "" {
-				os.Setenv("XDG_CONFIG_HOME", tt.xdgConfig)
+				t.Setenv("XDG_CONFIG_HOME", tt.xdgConfig)
 			} else {
-				os.Unsetenv("XDG_CONFIG_HOME")
+				t.Setenv("XDG_CONFIG_HOME", "")
 			}
 
 			path := getXDGConfigPath()

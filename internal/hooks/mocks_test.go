@@ -60,7 +60,11 @@ type mockCommandRunner struct {
 	lookPathFunc   func(file string) (string, error)
 }
 
-func (m *mockCommandRunner) RunContext(ctx context.Context, dir, name string, args ...string) ([]byte, error) {
+func (m *mockCommandRunner) RunContext(
+	ctx context.Context,
+	dir, name string,
+	args ...string,
+) ([]byte, error) {
 	if m.runContextFunc != nil {
 		return m.runContextFunc(ctx, dir, name, args...)
 	}
@@ -201,4 +205,5 @@ func (m mockFileInfo) Size() int64        { return m.size }
 func (m mockFileInfo) Mode() os.FileMode  { return m.mode }
 func (m mockFileInfo) ModTime() time.Time { return m.modTime }
 func (m mockFileInfo) IsDir() bool        { return m.isDir }
-func (m mockFileInfo) Sys() any           { return nil } //nolint:ireturn // Required by os.FileInfo interface
+
+func (m mockFileInfo) Sys() any { return nil }

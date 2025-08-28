@@ -685,7 +685,8 @@ func (s *Statusline) selectModelIcon() string {
 func (s *Statusline) isCompactMode(contextLength int) bool {
 	const maxContextLength = 200000
 	const compactThresholdPercent = 85
-	compactModeThreshold := (maxContextLength * compactThresholdPercent) / 100
+	const percentDivisor = 100
+	compactModeThreshold := (maxContextLength * compactThresholdPercent) / percentDivisor
 	return contextLength >= compactModeThreshold
 }
 

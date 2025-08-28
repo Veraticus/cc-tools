@@ -662,6 +662,7 @@ linters:
           - containedctx  # Tests might store context for lifecycle
           - forbidigo     # Allow mocks in test files
           - testpackage   # Allow tests in same package for mock sharing
+          - ireturn       # Test mocks need to return interfaces like os.FileInfo
           
       # Allow panic in main.go for CLI apps
       - path: main\.go

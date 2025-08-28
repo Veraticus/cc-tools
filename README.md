@@ -1,6 +1,6 @@
 # cc-tools
 
-High-performance Go implementation of Claude Code hooks and utilities. Provides smart linting, testing, and statusline generation with improved performance through client-server architecture.
+High-performance Go implementation of Claude Code hooks and utilities. Provides smart linting, testing, and statusline generation with minimal overhead.
 
 ## Features
 
@@ -11,10 +11,9 @@ High-performance Go implementation of Claude Code hooks and utilities. Provides 
 - **Clear feedback** - Shows success messages or blocking errors in Claude
 
 ### ⚡ Performance Optimized
-- **Client-server architecture** - Daemon mode eliminates startup overhead
-- **Unix socket communication** - Fast IPC between client and server
+- **Fast startup** - Pure Go implementation with minimal dependencies
 - **Efficient caching** - Reuses project discovery across requests
-- **Minimal dependencies** - Pure Go implementation
+- **Smart command execution** - Runs in user's current shell environment
 
 ### 📊 Rich Statusline
 - **Model information** - Shows current Claude model
@@ -27,23 +26,13 @@ High-performance Go implementation of Claude Code hooks and utilities. Provides 
 
 ### NixOS (Recommended)
 
-The project is designed for NixOS and integrates with home-manager:
+The project is designed for NixOS and can be built with Nix:
 
-```nix
-# In your home-manager configuration
-{
-  imports = [ ./path-to/cc-tools/nix/module.nix ];
-  
-  services.cc-tools = {
-    enable = true;
-    settings = {
-      lintEnabled = true;
-      testEnabled = true;
-      lintTimeout = 30;
-      testTimeout = 60;
-    };
-  };
-}
+```bash
+# Build the binary
+nix-build
+
+# Or add to your system packages
 ```
 
 ### Manual Installation
@@ -52,9 +41,6 @@ The project is designed for NixOS and integrates with home-manager:
 # Build the binary
 go build -o cc-tools cmd/cc-tools/main.go
 
-# Start the server
-cc-tools serve
-
 # Use the tools
 echo '{"file_path": "main.go"}' | cc-tools lint
 echo '{"file_path": "main_test.go"}' | cc-tools test
@@ -62,18 +48,6 @@ echo '{"cwd": "/path/to/project"}' | cc-tools statusline
 ```
 
 ## Usage
-
-### Server Mode
-
-For best performance, run cc-tools as a daemon:
-
-```bash
-# Start server (usually done via systemd)
-cc-tools serve --socket /run/user/$(id -u)/cc-tools.sock
-
-# Check server status
-cc-tools status
-```
 
 ### Smart Linting
 
@@ -140,9 +114,6 @@ export CLAUDE_HOOKS_LINT_COOLDOWN=2      # Seconds between lint runs
 export CLAUDE_HOOKS_TEST_COOLDOWN=2      # Seconds between test runs
 export CLAUDE_HOOKS_DEBUG=1              # Enable debug output
 
-# Server settings
-export CC_TOOLS_SOCKET=/run/user/$(id -u)/cc-tools.sock  # Socket path
-
 # Statusline customization
 export TMUX_DEVSPACE=myproject           # Custom workspace label
 export CLAUDE_STATUSLINE_K8S_ENABLED=false  # Disable k8s context
@@ -187,19 +158,13 @@ node_modules/
 
 ## Architecture
 
-### Client-Server Model
+### Direct Execution Model
 
-```
-┌─────────────┐     Unix Socket      ┌──────────────┐
-│ Claude Code │ ──────────────────>  │   cc-tools   │
-│   (client)  │ <──────────────────  │   (server)   │
-└─────────────┘     JSON-RPC          └──────────────┘
-                                             │
-                                             ├── Lint Runner
-                                             ├── Test Runner
-                                             ├── Lock Manager
-                                             └── Status Generator
-```
+cc-tools runs commands directly in the user's current shell environment, ensuring access to:
+- Nix shell environments (nix develop)
+- Virtual environments (Python venv, node_modules/.bin, Ruby gems)
+- Dynamic PATH modifications (direnv, asdf, etc.)
+- Project-specific environment variables
 
 ### Lock Management
 
@@ -211,10 +176,9 @@ Uses PID-based file locking to prevent concurrent executions:
 
 ### Performance Characteristics
 
-- **Startup time**: < 5ms (client mode with running server)
+- **Startup time**: ~20-30ms (Go binary startup + execution)
 - **Command discovery**: Cached per project root
-- **Memory usage**: ~10-20MB for server process
-- **CPU usage**: Near-zero when idle
+- **Memory usage**: Minimal (~5MB during execution)
 
 ## Development
 
@@ -256,28 +220,14 @@ go test -v ./...
 cc-tools/
 ├── cmd/cc-tools/       # Main CLI application
 ├── internal/
+│   ├── config/         # Configuration management
 │   ├── hooks/          # Smart lint/test discovery and execution
-│   ├── server/         # Client-server implementation
 │   ├── statusline/     # Statusline generation
 │   └── shared/         # Shared utilities
-├── nix/                # NixOS module and derivation
 └── test_fixtures/      # Test data
 ```
 
 ## Troubleshooting
-
-### Server Not Running
-
-```bash
-# Check status
-cc-tools status
-
-# Start manually
-cc-tools serve --verbose
-
-# Check socket exists
-ls -la /run/user/$(id -u)/cc-tools.sock
-```
 
 ### Commands Not Found
 
@@ -290,12 +240,10 @@ echo '{"file_path": "main.go"}' | cc-tools lint
 
 ### Performance Issues
 
-```bash
-# Check server stats
-cc-tools status
+Check debug logs:
 
-# Monitor server logs
-journalctl -u cc-tools --follow  # If using systemd
+```bash
+tail -f /tmp/cc-tools.debug
 ```
 
 ## Migration from Bash Hooks

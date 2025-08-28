@@ -3,6 +3,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -47,15 +48,20 @@ type NotificationsConfig struct {
 // 3. ./config.{toml,yaml,yml}
 //
 // Environment variables override file settings using the prefix CC_TOOLS_
-// For example: CC_TOOLS_NOTIFICATIONS_NTFY_TOPIC
+// For example: CC_TOOLS_NOTIFICATIONS_NTFY_TOPIC.
 func Load() (*Config, error) {
-	v := viper.New()
+	v := viper.New() //nolint:forbidigo // viper.New is required for configuration
 
 	// Set defaults for hooks
-	v.SetDefault("hooks.lint.cooldown_seconds", 2)
-	v.SetDefault("hooks.lint.timeout_seconds", 30)
-	v.SetDefault("hooks.test.cooldown_seconds", 2)
-	v.SetDefault("hooks.test.timeout_seconds", 60)
+	const (
+		defaultCooldownSeconds = 2
+		defaultLintTimeout     = 30
+		defaultTestTimeout     = 60
+	)
+	v.SetDefault("hooks.lint.cooldown_seconds", defaultCooldownSeconds)
+	v.SetDefault("hooks.lint.timeout_seconds", defaultLintTimeout)
+	v.SetDefault("hooks.test.cooldown_seconds", defaultCooldownSeconds)
+	v.SetDefault("hooks.test.timeout_seconds", defaultTestTimeout)
 
 	// Set config file name (without extension)
 	v.SetConfigName("config")
@@ -73,7 +79,8 @@ func Load() (*Config, error) {
 	// Try to read config file (it's OK if it doesn't exist)
 	if err := v.ReadInConfig(); err != nil {
 		// Only return error if it's not a "not found" error
-		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
+		var configFileNotFoundError viper.ConfigFileNotFoundError
+		if !errors.As(err, &configFileNotFoundError) {
 			return nil, fmt.Errorf("read config file: %w", err)
 		}
 		// Config file not found is OK, we'll use defaults and env vars
@@ -111,9 +118,4 @@ func getXDGConfigPath() string {
 	}
 
 	return filepath.Join(homeDir, ".config", "cc-tools")
-}
-
-// ConfigFileUsed returns the path of the config file that was loaded, if any.
-func ConfigFileUsed() string {
-	return viper.ConfigFileUsed()
 }

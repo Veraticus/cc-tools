@@ -4,18 +4,18 @@ This document provides guidance for Claude when working on the cc-tools codebase
 
 ## Project Overview
 
-cc-tools is a high-performance Go implementation of Claude Code hooks and utilities. It replaces the original bash implementation with a client-server architecture for improved performance and reliability.
+cc-tools is a high-performance Go implementation of Claude Code hooks and utilities. It provides smart linting, testing, and statusline generation that runs directly in the user's shell environment.
 
 ## Architecture Principles
 
-### Client-Server Design
+### Direct Execution Model
 
-The project uses a daemon architecture to eliminate startup overhead:
+The project runs commands directly in the user's current shell context to ensure access to:
 
-1. **Server runs continuously** - Started via systemd or manually with `cc-tools serve`
-2. **Clients are lightweight** - Connect via Unix socket, send request, receive response
-3. **Protocol is JSON-RPC** - Simple, standard protocol for IPC
-4. **Socket at** `/run/user/$(id -u)/cc-tools.sock`
+1. **Nix shell environments** - nix develop, nix-shell
+2. **Virtual environments** - Python venv, node_modules/.bin, Ruby gems
+3. **Dynamic PATH** - direnv, asdf, and other environment managers
+4. **Project variables** - Environment-specific configurations
 
 ### Hook Philosophy
 
@@ -32,42 +32,39 @@ Hooks follow these principles:
 
 ```
 internal/
+├── config/         # Configuration management
+│   └── config.go       # Config loading and structures
 ├── hooks/          # Core hook logic
 │   ├── discovery.go    # Command discovery
 │   ├── executor.go     # Command execution
 │   ├── lock.go         # PID-based locking
 │   └── input.go        # JSON input parsing
-├── server/         # Client-server implementation
-│   ├── server.go       # Server main logic
-│   ├── client.go       # Client implementation
-│   ├── protocol.go     # JSON-RPC protocol
-│   └── hook_runners.go # Hook runner implementations
 ├── statusline/     # Statusline generation
 │   ├── statusline.go   # Main statusline logic
 │   ├── render.go       # Rendering logic
 │   └── colors.go       # Color schemes
 └── shared/         # Shared utilities
     ├── project.go      # Project detection
-    └── dependencies.go # Dependency injection
+    └── colors.go       # Color utilities
 ```
 
 ### Key Interfaces
 
 ```go
-// LintRunner runs lint commands
-type LintRunner interface {
-    Run(ctx context.Context, input string) (string, error)
-}
-
-// TestRunner runs test commands  
-type TestRunner interface {
-    Run(ctx context.Context, input string) (string, error)
+// CommandDiscoverer finds commands in project
+type CommandDiscoverer interface {
+    Discover(startDir string, commandType string) *DiscoveredCommand
 }
 
 // LockManager manages resource locks
 type LockManager interface {
-    Acquire(key, holder string) bool
-    Release(key string)
+    TryAcquire(key string) (bool, string, error)
+    Release(key string) error
+}
+
+// Statusline generates status lines
+type Statusline interface {
+    Generate(reader io.Reader) (string, error)
 }
 ```
 
@@ -128,37 +125,6 @@ func TestDiscovery(t *testing.T) {
 
 ## Adding Features
 
-### Adding a New Hook
-
-1. Create runner in `internal/server/hook_runners.go`:
-
-```go
-type MyHookRunner struct {
-    enabled bool
-    timeout time.Duration
-}
-
-func (r *MyHookRunner) Run(ctx context.Context, input string) (string, error) {
-    // Implementation
-}
-```
-
-2. Add to server dependencies:
-
-```go
-deps := &ServerDependencies{
-    MyRunner: NewMyHookRunner(),
-    // ...
-}
-```
-
-3. Add command in `cmd/cc-tools/main.go`:
-
-```go
-case "myhook":
-    runMyHookWithServer()
-```
-
 ### Adding Command Discovery
 
 Edit `internal/hooks/discovery.go`:
@@ -182,26 +148,35 @@ func (cd *CommandDiscoverer) discoverInDirectory(dir string) *DiscoveredCommand 
 }
 ```
 
+### Adding Configuration Options
+
+Edit `internal/config/config.go` to add new configuration fields:
+
+```go
+type Config struct {
+    Hooks HooksConfig `mapstructure:"hooks"`
+    // Add new sections here
+}
+```
+
 ## Performance Considerations
 
 ### Startup Time
 
-- **Client mode**: < 5ms with running server
-- **Direct mode**: ~20-30ms (Go startup + execution)
-- **Server mode**: One-time startup cost
+- **Direct execution**: ~20-30ms (Go startup + execution)
+- **No daemon overhead**: Commands run immediately
 
 ### Memory Usage
 
-- **Server**: ~10-20MB resident
-- **Client**: ~5MB (temporary)
-- **Caching**: Project discovery cached in server
+- **Minimal footprint**: ~5MB during execution
+- **No persistent processes**: Memory freed after command completes
 
 ### Optimization Techniques
 
-1. **Reuse server connection** - Don't create new connections repeatedly
-2. **Cache project roots** - Discovery is expensive
-3. **Batch operations** - Send multiple requests in one connection
-4. **Timeout appropriately** - Don't wait forever for slow commands
+1. **Cache project roots** - Discovery is expensive
+2. **Reuse compiled patterns** - Compile regexes once
+3. **Timeout appropriately** - Don't wait forever for slow commands
+4. **Stream output** - Don't buffer large outputs
 
 ## Debugging
 
@@ -211,19 +186,16 @@ func (cd *CommandDiscoverer) discoverInDirectory(dir string) *DiscoveredCommand 
 # Environment variable
 export CLAUDE_HOOKS_DEBUG=1
 
-# Server verbose mode
-cc-tools serve --verbose
-
-# Check server stats
-cc-tools status
+# Check debug logs
+tail -f /tmp/cc-tools.debug
 ```
 
 ### Common Issues
 
-1. **Socket permission errors**: Ensure socket directory is writable
-2. **Command not found**: Check PATH is set correctly
-3. **Timeouts**: Increase timeout or optimize commands
-4. **Lock contention**: Check for stale lock files
+1. **Command not found**: Check PATH is set correctly
+2. **Timeouts**: Increase timeout or optimize commands
+3. **Lock contention**: Check for stale lock files
+4. **Wrong environment**: Ensure running in correct shell context
 
 ### Testing Hooks Locally
 
@@ -234,8 +206,8 @@ echo '{"hook_event_name": "PostToolUse", "tool_name": "Edit", "tool_input": {"fi
 # Test with debug
 CLAUDE_HOOKS_DEBUG=1 echo '{"file_path": "main.go"}' | cc-tools lint
 
-# Test server directly
-echo '{"method": "lint", "params": {"file_path": "main.go"}}' | nc -U /run/user/$(id -u)/cc-tools.sock
+# Test statusline
+echo '{"cwd": "$(pwd)"}' | cc-tools statusline
 ```
 
 ## Integration with Claude Code
@@ -283,48 +255,9 @@ Messages shown to user (exit code 2) should be concise:
 1. **Update version** in build process
 2. **Run full test suite**: `make check`
 3. **Test with Claude Code**: Manual integration test
-4. **Update NixOS module**: Ensure compatibility
-5. **Tag release**: `git tag v1.0.0`
-
-## NixOS Integration
-
-The project includes a NixOS module for easy deployment:
-
-```nix
-# nix/module.nix provides:
-- systemd service definition
-- socket activation support
-- environment variable configuration
-- wrapper script generation
-```
+4. **Tag release**: `git tag v1.0.0`
 
 ## Troubleshooting Production Issues
-
-### Server Crashes
-
-```bash
-# Check systemd logs
-journalctl -u cc-tools -n 100
-
-# Check for core dumps
-coredumpctl list
-
-# Manual restart
-systemctl --user restart cc-tools
-```
-
-### Performance Degradation
-
-```bash
-# Check server stats
-cc-tools status
-
-# Monitor resource usage
-htop -p $(pgrep cc-tools)
-
-# Profile if needed
-go tool pprof http://localhost:6060/debug/pprof/profile
-```
 
 ### Lock File Issues
 
@@ -337,6 +270,19 @@ cat /tmp/claude-hook-lint-*.lock
 
 # Verify PID exists
 ps -p $(head -1 /tmp/claude-hook-lint-*.lock)
+```
+
+### Performance Degradation
+
+```bash
+# Check execution time
+time echo '{"file_path": "main.go"}' | cc-tools lint
+
+# Monitor system resources during execution
+top -p $(pgrep cc-tools)
+
+# Enable debug logging
+CLAUDE_HOOKS_DEBUG=1 cc-tools lint
 ```
 
 ## Best Practices
