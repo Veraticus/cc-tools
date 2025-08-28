@@ -34,6 +34,12 @@ func main() {
 		runStatusline()
 	case "validate":
 		runValidate()
+	case "skip":
+		runSkipCommand()
+	case "unskip":
+		runUnskipCommand()
+	case "debug":
+		runDebugCommand()
 	case "version":
 		// Print version to stdout as intended output
 		fmt.Printf("cc-tools %s\n", version) //nolint:forbidigo // CLI output
@@ -55,6 +61,9 @@ Usage:
 Commands:
   statusline    Generate a status line for the prompt
   validate      Run smart validation (lint and test in parallel)
+  skip          Configure skip settings for directories
+  unskip        Remove skip settings from directories
+  debug         Configure debug logging for directories
   version       Print version information
   help          Show this help message
 
