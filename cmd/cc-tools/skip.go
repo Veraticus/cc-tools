@@ -9,9 +9,16 @@ import (
 	"github.com/Veraticus/cc-tools/internal/skipregistry"
 )
 
+const (
+	skipLint    = "lint"
+	skipTest    = "test"
+	skipAll     = "all"
+	minSkipArgs = 3
+)
+
 // runSkipCommand handles the skip command and its subcommands.
 func runSkipCommand() {
-	if len(os.Args) < 3 {
+	if len(os.Args) < minSkipArgs {
 		printSkipUsage()
 		os.Exit(1)
 	}
@@ -21,17 +28,17 @@ func runSkipCommand() {
 	registry := skipregistry.NewRegistry(storage)
 
 	switch os.Args[2] {
-	case "lint":
+	case skipLint:
 		if err := addSkip(ctx, registry, skipregistry.SkipTypeLint); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
-	case "test":
+	case skipTest:
 		if err := addSkip(ctx, registry, skipregistry.SkipTypeTest); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
-	case "all":
+	case skipAll:
 		if err := addSkip(ctx, registry, skipregistry.SkipTypeAll); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
@@ -55,7 +62,7 @@ func runSkipCommand() {
 
 // runUnskipCommand handles the unskip command.
 func runUnskipCommand() {
-	if len(os.Args) < 3 {
+	if len(os.Args) < minSkipArgs {
 		printUnskipUsage()
 		os.Exit(1)
 	}
@@ -65,17 +72,17 @@ func runUnskipCommand() {
 	registry := skipregistry.NewRegistry(storage)
 
 	switch os.Args[2] {
-	case "lint":
+	case skipLint:
 		if err := removeSkip(ctx, registry, skipregistry.SkipTypeLint); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
-	case "test":
+	case skipTest:
 		if err := removeSkip(ctx, registry, skipregistry.SkipTypeTest); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
-	case "all":
+	case skipAll:
 		if err := clearSkips(ctx, registry); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
@@ -129,8 +136,8 @@ func addSkip(ctx context.Context, registry skipregistry.Registry, skipType skipr
 		return fmt.Errorf("get current directory: %w", err)
 	}
 
-	if err := registry.AddSkip(ctx, skipregistry.DirectoryPath(dir), skipType); err != nil {
-		return fmt.Errorf("add skip: %w", err)
+	if addErr := registry.AddSkip(ctx, skipregistry.DirectoryPath(dir), skipType); addErr != nil {
+		return fmt.Errorf("add skip: %w", addErr)
 	}
 
 	// Print confirmation
@@ -152,8 +159,8 @@ func removeSkip(ctx context.Context, registry skipregistry.Registry, skipType sk
 		return fmt.Errorf("get current directory: %w", err)
 	}
 
-	if err := registry.RemoveSkip(ctx, skipregistry.DirectoryPath(dir), skipType); err != nil {
-		return fmt.Errorf("remove skip: %w", err)
+	if removeErr := registry.RemoveSkip(ctx, skipregistry.DirectoryPath(dir), skipType); removeErr != nil {
+		return fmt.Errorf("remove skip: %w", removeErr)
 	}
 
 	// Print confirmation
@@ -162,6 +169,8 @@ func removeSkip(ctx context.Context, registry skipregistry.Registry, skipType sk
 		fmt.Printf("✓ Linting will no longer be skipped in %s\n", dir) //nolint:forbidigo // CLI output
 	case skipregistry.SkipTypeTest:
 		fmt.Printf("✓ Testing will no longer be skipped in %s\n", dir) //nolint:forbidigo // CLI output
+	case skipregistry.SkipTypeAll:
+		// This case won't occur as we expand SkipTypeAll earlier
 	}
 
 	return nil
@@ -173,8 +182,8 @@ func clearSkips(ctx context.Context, registry skipregistry.Registry) error {
 		return fmt.Errorf("get current directory: %w", err)
 	}
 
-	if err := registry.Clear(ctx, skipregistry.DirectoryPath(dir)); err != nil {
-		return fmt.Errorf("clear skips: %w", err)
+	if clearErr := registry.Clear(ctx, skipregistry.DirectoryPath(dir)); clearErr != nil {
+		return fmt.Errorf("clear skips: %w", clearErr)
 	}
 
 	fmt.Printf("✓ All skips removed from %s\n", dir) //nolint:forbidigo // CLI output
@@ -232,6 +241,8 @@ func showStatus(ctx context.Context, registry skipregistry.Registry) error {
 			fmt.Println("  - Linting: SKIPPED") //nolint:forbidigo // CLI output
 		case skipregistry.SkipTypeTest:
 			fmt.Println("  - Testing: SKIPPED") //nolint:forbidigo // CLI output
+		case skipregistry.SkipTypeAll:
+			// This case won't occur as we don't store SkipTypeAll
 		}
 	}
 

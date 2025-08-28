@@ -18,7 +18,7 @@ type registry struct {
 }
 
 // NewRegistry creates a new registry with the given storage backend.
-func NewRegistry(storage Storage) *registry {
+func NewRegistry(storage Storage) Registry {
 	return &registry{
 		storage: storage,
 		cache:   make(RegistryData),

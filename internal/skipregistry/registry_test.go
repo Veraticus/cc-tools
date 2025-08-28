@@ -3,41 +3,8 @@ package skipregistry
 import (
 	"context"
 	"errors"
-	"fmt"
 	"testing"
 )
-
-// mockFileSystem is a mock implementation of FileSystem for testing.
-type mockFileSystem struct {
-	files map[string][]byte
-}
-
-func newMockFileSystem() *mockFileSystem {
-	return &mockFileSystem{
-		files: make(map[string][]byte),
-	}
-}
-
-func (m *mockFileSystem) ReadFile(name string) ([]byte, error) {
-	data, ok := m.files[name]
-	if !ok {
-		return nil, fmt.Errorf("file not found: %w", ErrNotFound)
-	}
-	return data, nil
-}
-
-func (m *mockFileSystem) WriteFile(name string, data []byte, _ FileMode) error {
-	m.files[name] = data
-	return nil
-}
-
-func (m *mockFileSystem) MkdirAll(_ string, _ FileMode) error {
-	return nil
-}
-
-func (m *mockFileSystem) UserHomeDir() (string, error) {
-	return "/home/test", nil
-}
 
 // mockStorage is a mock implementation of Storage for testing.
 type mockStorage struct {
@@ -60,12 +27,12 @@ func (m *mockStorage) Load(_ context.Context) (RegistryData, error) {
 		return nil, m.loadErr
 	}
 	// Return a copy to prevent mutations
-	copy := make(RegistryData)
+	dataCopy := make(RegistryData)
 	for k, v := range m.data {
-		types := make([]string, len(v))
-		copy[k] = append(types, v...)
+		types := make([]string, 0, len(v))
+		dataCopy[k] = append(types, v...)
 	}
-	return copy, nil
+	return dataCopy, nil
 }
 
 func (m *mockStorage) Save(_ context.Context, data RegistryData) error {
@@ -76,7 +43,7 @@ func (m *mockStorage) Save(_ context.Context, data RegistryData) error {
 	// Save a copy to prevent mutations
 	m.data = make(RegistryData)
 	for k, v := range data {
-		types := make([]string, len(v))
+		types := make([]string, 0, len(v))
 		m.data[k] = append(types, v...)
 	}
 	return nil

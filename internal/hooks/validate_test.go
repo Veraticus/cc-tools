@@ -276,7 +276,7 @@ func TestParallelValidateExecutor_ExecuteValidations(t *testing.T) {
 			testDeps := createTestDependencies()
 			tt.setupDeps(testDeps)
 
-			executor := NewParallelValidateExecutor("/project", 10, false, testDeps.Dependencies)
+			executor := NewParallelValidateExecutor("/project", 10, false, nil, testDeps.Dependencies)
 			result, err := executor.ExecuteValidations(context.Background(), "/project", "/project")
 
 			if err != nil {
@@ -442,7 +442,7 @@ func TestValidateExecutor_Parallelism(t *testing.T) {
 		return nil, fmt.Errorf("unknown command: %s", fullCmd)
 	}
 
-	executor := NewParallelValidateExecutor("/project", 10, false, testDeps.Dependencies)
+	executor := NewParallelValidateExecutor("/project", 10, false, nil, testDeps.Dependencies)
 	result, err := executor.ExecuteValidations(context.Background(), "/project", "/project")
 
 	if err != nil {

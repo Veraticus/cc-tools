@@ -15,7 +15,7 @@ type jsonStorage struct {
 }
 
 // NewJSONStorage creates a new JSON storage backend.
-func NewJSONStorage(fs FileSystem, filePath string) *jsonStorage {
+func NewJSONStorage(fs FileSystem, filePath string) Storage {
 	return &jsonStorage{
 		fs:       fs,
 		filePath: filePath,
@@ -130,6 +130,6 @@ func (fs *realFileSystem) UserHomeDir() (string, error) {
 }
 
 // DefaultStorage creates a storage instance with the default file path.
-func DefaultStorage() *jsonStorage {
+func DefaultStorage() Storage {
 	return NewJSONStorage(newRealFileSystem(), getRegistryPath())
 }

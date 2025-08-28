@@ -9,6 +9,12 @@ import (
 	"github.com/Veraticus/cc-tools/internal/shared"
 )
 
+// SkipConfig represents which validations should be skipped.
+type SkipConfig struct {
+	SkipLint bool
+	SkipTest bool
+}
+
 // ValidationResult represents the result of a single validation (lint or test).
 type ValidationResult struct {
 	Type     CommandType
@@ -73,10 +79,11 @@ func (vr *ValidateResult) FormatMessage() string {
 
 // ParallelValidateExecutor implements ValidateExecutor with parallel execution.
 type ParallelValidateExecutor struct {
-	discovery *CommandDiscovery
-	executor  *CommandExecutor
-	timeout   int
-	debug     bool
+	discovery  *CommandDiscovery
+	executor   *CommandExecutor
+	timeout    int
+	debug      bool
+	skipConfig *SkipConfig
 }
 
 // NewParallelValidateExecutor creates a new parallel validate executor.
@@ -84,16 +91,18 @@ func NewParallelValidateExecutor(
 	projectRoot string,
 	timeout int,
 	debug bool,
+	skipConfig *SkipConfig,
 	deps *Dependencies,
 ) *ParallelValidateExecutor {
 	if deps == nil {
 		deps = NewDefaultDependencies()
 	}
 	return &ParallelValidateExecutor{
-		discovery: NewCommandDiscovery(projectRoot, timeout, deps),
-		executor:  NewCommandExecutor(timeout, debug, deps),
-		timeout:   timeout,
-		debug:     debug,
+		discovery:  NewCommandDiscovery(projectRoot, timeout, deps),
+		executor:   NewCommandExecutor(timeout, debug, deps),
+		timeout:    timeout,
+		debug:      debug,
+		skipConfig: skipConfig,
 	}
 }
 
@@ -102,9 +111,8 @@ func (pve *ParallelValidateExecutor) ExecuteValidations(
 	ctx context.Context,
 	_, fileDir string,
 ) (*ValidateResult, error) {
-	// Discover commands first (sequential, fast)
-	lintCmd, _ := pve.discovery.DiscoverCommand(ctx, CommandTypeLint, fileDir)
-	testCmd, _ := pve.discovery.DiscoverCommand(ctx, CommandTypeTest, fileDir)
+	// Discover commands
+	lintCmd, testCmd := pve.discoverCommands(ctx, fileDir)
 
 	// If neither command found, return empty result
 	if lintCmd == nil && testCmd == nil {
@@ -112,11 +120,46 @@ func (pve *ParallelValidateExecutor) ExecuteValidations(
 	}
 
 	// Execute commands in parallel
+	result := pve.executeParallel(ctx, lintCmd, testCmd)
+
+	// Determine overall success
+	result.BothPassed = pve.checkSuccess(result)
+
+	return result, nil
+}
+
+// discoverCommands discovers lint and test commands based on skip configuration.
+func (pve *ParallelValidateExecutor) discoverCommands(
+	ctx context.Context,
+	fileDir string,
+) (*DiscoveredCommand, *DiscoveredCommand) {
+	skipLint := pve.skipConfig != nil && pve.skipConfig.SkipLint
+	skipTest := pve.skipConfig != nil && pve.skipConfig.SkipTest
+
+	var lintCmd, testCmd *DiscoveredCommand
+	if !skipLint {
+		lintCmd, _ = pve.discovery.DiscoverCommand(ctx, CommandTypeLint, fileDir)
+	}
+	if !skipTest {
+		testCmd, _ = pve.discovery.DiscoverCommand(ctx, CommandTypeTest, fileDir)
+	}
+
+	return lintCmd, testCmd
+}
+
+// executeParallel runs lint and test commands in parallel.
+func (pve *ParallelValidateExecutor) executeParallel(
+	ctx context.Context,
+	lintCmd, testCmd *DiscoveredCommand,
+) *ValidateResult {
 	var wg sync.WaitGroup
 	result := &ValidateResult{}
 
-	// Launch lint if available
-	if lintCmd != nil {
+	skipLint := pve.skipConfig != nil && pve.skipConfig.SkipLint
+	skipTest := pve.skipConfig != nil && pve.skipConfig.SkipTest
+
+	// Launch lint if available and not skipped
+	if lintCmd != nil && !skipLint {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -124,8 +167,8 @@ func (pve *ParallelValidateExecutor) ExecuteValidations(
 		}()
 	}
 
-	// Launch test if available
-	if testCmd != nil {
+	// Launch test if available and not skipped
+	if testCmd != nil && !skipTest {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -133,15 +176,19 @@ func (pve *ParallelValidateExecutor) ExecuteValidations(
 		}()
 	}
 
-	// Wait for both to complete
 	wg.Wait()
+	return result
+}
 
-	// Determine overall success
-	lintPassed := result.LintResult == nil || result.LintResult.Success
-	testPassed := result.TestResult == nil || result.TestResult.Success
-	result.BothPassed = lintPassed && testPassed
+// checkSuccess determines if both lint and test passed.
+func (pve *ParallelValidateExecutor) checkSuccess(result *ValidateResult) bool {
+	skipLint := pve.skipConfig != nil && pve.skipConfig.SkipLint
+	skipTest := pve.skipConfig != nil && pve.skipConfig.SkipTest
 
-	return result, nil
+	lintPassed := result.LintResult == nil || result.LintResult.Success || skipLint
+	testPassed := result.TestResult == nil || result.TestResult.Success || skipTest
+
+	return lintPassed && testPassed
 }
 
 // executeCommand runs a single command and returns its validation result.
@@ -161,12 +208,36 @@ func (pve *ParallelValidateExecutor) executeCommand(
 	}
 }
 
+// RunValidateHookWithSkip is the main entry point for the validate hook with skip configuration.
+func RunValidateHookWithSkip(
+	ctx context.Context,
+	debug bool,
+	timeoutSecs int,
+	cooldownSecs int,
+	skipConfig *SkipConfig,
+	deps *Dependencies,
+) int {
+	return runValidateHookInternal(ctx, debug, timeoutSecs, cooldownSecs, skipConfig, deps)
+}
+
 // RunValidateHook is the main entry point for the validate hook.
 func RunValidateHook(
 	ctx context.Context,
 	debug bool,
 	timeoutSecs int,
 	cooldownSecs int,
+	deps *Dependencies,
+) int {
+	return runValidateHookInternal(ctx, debug, timeoutSecs, cooldownSecs, nil, deps)
+}
+
+// runValidateHookInternal contains the shared logic for running validation.
+func runValidateHookInternal(
+	ctx context.Context,
+	debug bool,
+	timeoutSecs int,
+	cooldownSecs int,
+	skipConfig *SkipConfig,
 	deps *Dependencies,
 ) int {
 	if deps == nil {
@@ -203,15 +274,15 @@ func RunValidateHook(
 
 	// Acquire lock for validate
 	lockMgr := NewLockManager(projectRoot, "validate", cooldownSecs, deps)
-	if !acquireLock(lockMgr, debug, deps.Stderr) {
+	if !acquireLock(lockMgr, debug, deps.Stderr, nil) {
 		return 0
 	}
 	defer func() {
 		_ = lockMgr.Release()
 	}()
 
-	// Execute validations in parallel
-	validateExecutor := NewParallelValidateExecutor(projectRoot, timeoutSecs, debug, deps)
+	// Execute validations in parallel with optional skip configuration
+	validateExecutor := NewParallelValidateExecutor(projectRoot, timeoutSecs, debug, skipConfig, deps)
 	result, err := validateExecutor.ExecuteValidations(ctx, projectRoot, fileDir)
 	if err != nil {
 		if debug {

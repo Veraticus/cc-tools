@@ -4,9 +4,9 @@
 build:
 	@echo "Building cc-tools binaries..."
 	@mkdir -p build
-	go build -o build/cc-tools-validate cmd/cc-tools-validate/main.go
-	go build -o build/cc-tools-statusline cmd/cc-tools-statusline/main.go
-	go build -o build/cc-tools cmd/cc-tools/main.go
+	go build -o build/cc-tools-validate ./cmd/cc-tools-validate/
+	go build -o build/cc-tools-statusline ./cmd/cc-tools-statusline/
+	go build -o build/cc-tools ./cmd/cc-tools/
 	@echo "Binaries built in build/"
 	@ls -la build/
 
