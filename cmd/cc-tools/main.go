@@ -17,7 +17,7 @@ import (
 
 const minArgs = 2
 
-// Build-time variables set during compilation.
+// Build-time variables.
 var version = "dev"
 
 func main() {
