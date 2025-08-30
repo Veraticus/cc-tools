@@ -50,6 +50,8 @@ func main() {
 		runDebugCommand()
 	case "mcp":
 		runMCPCommand()
+	case "config":
+		runConfigCommand()
 	case "version":
 		// Print version to stdout as intended output
 		out.Raw(fmt.Sprintf("cc-tools %s\n", version))
@@ -75,6 +77,7 @@ Commands:
   unskip        Remove skip settings from directories
   debug         Configure debug logging for directories
   mcp           Manage Claude MCP servers
+  config        Manage configuration settings
   version       Print version information
   help          Show this help message
 
@@ -207,19 +210,22 @@ func debugLog() {
 	defer func() { _ = f.Close() }()
 
 	// Read stdin and save it for both debug and actual use
+	// Only read stdin for commands that actually need it
 	var stdinDebugData []byte
-	if stat, _ := os.Stdin.Stat(); (stat.Mode() & os.ModeCharDevice) == 0 {
-		// There's data in stdin
-		stdinDebugData, _ = io.ReadAll(os.Stdin)
-		// Create a new reader from the data we just read
-		// This will be used by the actual commands
-		newStdin, _ := os.Open("/dev/stdin") // Reset stdin
-		os.Stdin = newStdin                  //nolint:reassign // Resetting stdin for subsequent reads
-		// Actually, we need to pipe it back - create a temp file
-		if tmpFile, tmpErr := os.CreateTemp("", "cc-tools-stdin-"); tmpErr == nil { //nolint:forbidigo // Debug temp file
-			_, _ = tmpFile.Write(stdinDebugData)
-			_, _ = tmpFile.Seek(0, 0)
-			os.Stdin = tmpFile //nolint:reassign // Resetting stdin for subsequent reads
+	needsStdin := len(os.Args) > 1 && (os.Args[1] == "statusline" || os.Args[1] == "validate")
+
+	if needsStdin {
+		if stat, _ := os.Stdin.Stat(); (stat.Mode() & os.ModeCharDevice) == 0 {
+			// There's data in stdin
+			stdinDebugData, _ = io.ReadAll(os.Stdin)
+			// Create a new reader from the data we just read
+			// This will be used by the actual commands
+			// Actually, we need to pipe it back - create a temp file
+			if tmpFile, tmpErr := os.CreateTemp("", "cc-tools-stdin-"); tmpErr == nil { //nolint:forbidigo // Debug temp file
+				_, _ = tmpFile.Write(stdinDebugData)
+				_, _ = tmpFile.Seek(0, 0)
+				os.Stdin = tmpFile //nolint:reassign // Resetting stdin for subsequent reads
+			}
 		}
 	}
 

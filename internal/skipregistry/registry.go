@@ -9,8 +9,8 @@ import (
 	"sync"
 )
 
-// registry is the concrete implementation with thread safety.
-type registry struct {
+// JSONRegistry is the concrete implementation with thread safety backed by JSON storage.
+type JSONRegistry struct {
 	mu      sync.RWMutex
 	storage Storage
 	cache   RegistryData
@@ -18,8 +18,8 @@ type registry struct {
 }
 
 // NewRegistry creates a new registry with the given storage backend.
-func NewRegistry(storage Storage) Registry {
-	return &registry{
+func NewRegistry(storage Storage) *JSONRegistry {
+	return &JSONRegistry{
 		storage: storage,
 		cache:   make(RegistryData),
 		loaded:  false,
@@ -27,7 +27,7 @@ func NewRegistry(storage Storage) Registry {
 }
 
 // ensureLoaded loads the registry from storage if not already loaded.
-func (r *registry) ensureLoaded(ctx context.Context) error {
+func (r *JSONRegistry) ensureLoaded(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -52,7 +52,7 @@ func (r *registry) ensureLoaded(ctx context.Context) error {
 }
 
 // IsSkipped checks if a directory has a specific skip type configured.
-func (r *registry) IsSkipped(ctx context.Context, dir DirectoryPath, skipType SkipType) (bool, error) {
+func (r *JSONRegistry) IsSkipped(ctx context.Context, dir DirectoryPath, skipType SkipType) (bool, error) {
 	if err := dir.Validate(); err != nil {
 		return false, fmt.Errorf("%w: %w", ErrInvalidPath, err)
 	}
@@ -84,7 +84,7 @@ func (r *registry) IsSkipped(ctx context.Context, dir DirectoryPath, skipType Sk
 }
 
 // GetSkipTypes returns all skip types configured for a directory.
-func (r *registry) GetSkipTypes(ctx context.Context, dir DirectoryPath) ([]SkipType, error) {
+func (r *JSONRegistry) GetSkipTypes(ctx context.Context, dir DirectoryPath) ([]SkipType, error) {
 	if err := dir.Validate(); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidPath, err)
 	}
@@ -111,7 +111,7 @@ func (r *registry) GetSkipTypes(ctx context.Context, dir DirectoryPath) ([]SkipT
 }
 
 // ListAll returns all directories and their skip configurations.
-func (r *registry) ListAll(ctx context.Context) ([]RegistryEntry, error) {
+func (r *JSONRegistry) ListAll(ctx context.Context) ([]RegistryEntry, error) {
 	if err := r.ensureLoaded(ctx); err != nil {
 		return nil, err
 	}
@@ -136,7 +136,7 @@ func (r *registry) ListAll(ctx context.Context) ([]RegistryEntry, error) {
 }
 
 // AddSkip adds a skip type to a directory.
-func (r *registry) AddSkip(ctx context.Context, dir DirectoryPath, skipType SkipType) error {
+func (r *JSONRegistry) AddSkip(ctx context.Context, dir DirectoryPath, skipType SkipType) error {
 	if err := dir.Validate(); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidPath, err)
 	}
@@ -194,7 +194,7 @@ func (r *registry) AddSkip(ctx context.Context, dir DirectoryPath, skipType Skip
 }
 
 // RemoveSkip removes a skip type from a directory.
-func (r *registry) RemoveSkip(ctx context.Context, dir DirectoryPath, skipType SkipType) error {
+func (r *JSONRegistry) RemoveSkip(ctx context.Context, dir DirectoryPath, skipType SkipType) error {
 	if err := dir.Validate(); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidPath, err)
 	}
@@ -253,7 +253,7 @@ func (r *registry) RemoveSkip(ctx context.Context, dir DirectoryPath, skipType S
 }
 
 // Clear removes all skip configurations for a directory.
-func (r *registry) Clear(ctx context.Context, dir DirectoryPath) error {
+func (r *JSONRegistry) Clear(ctx context.Context, dir DirectoryPath) error {
 	if err := dir.Validate(); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidPath, err)
 	}

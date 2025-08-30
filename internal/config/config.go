@@ -1,111 +1,118 @@
-// Package config manages application configuration using Viper.
-// Test edit to trigger hooks - checking hook output.
+// Package config manages application configuration.
 package config
 
 import (
-	"errors"
+	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
-
-	"github.com/spf13/viper"
 )
 
 // Config represents the application configuration.
 type Config struct {
-	Hooks         HooksConfig         `mapstructure:"hooks"`
-	Notifications NotificationsConfig `mapstructure:"notifications"`
+	Hooks         HooksConfig         `json:"hooks"`
+	Notifications NotificationsConfig `json:"notifications"`
 }
 
 // HooksConfig represents hook-related settings.
 type HooksConfig struct {
-	Validate ValidateConfig `mapstructure:"validate"`
+	Validate ValidateConfig `json:"validate"`
 }
 
 // ValidateConfig represents validate hook settings.
 type ValidateConfig struct {
-	CooldownSeconds int `mapstructure:"cooldown_seconds"`
-	TimeoutSeconds  int `mapstructure:"timeout_seconds"`
+	CooldownSeconds int `json:"cooldown_seconds"`
+	TimeoutSeconds  int `json:"timeout_seconds"`
 }
 
 // NotificationsConfig represents notification settings.
 type NotificationsConfig struct {
-	NtfyTopic string `mapstructure:"ntfy_topic"`
+	NtfyTopic string `json:"ntfy_topic"`
 }
 
-// Load loads configuration from files and environment variables.
-// It searches for config files in the following order:
-// 1. /etc/cc-tools/config.{toml,yaml,yml}
-// 2. $XDG_CONFIG_HOME/cc-tools/config.{toml,yaml,yml} (or ~/.config/cc-tools/)
-// 3. ./config.{toml,yaml,yml}
-//
-// Environment variables override file settings using the prefix CC_TOOLS_
-// For example: CC_TOOLS_NOTIFICATIONS_NTFY_TOPIC.
+const (
+	defaultCooldownSeconds = 5
+	defaultTimeoutSeconds  = 60
+)
+
+// Load loads configuration from the config file.
+// It reads from ~/.config/cc-tools/config.json.
 func Load() (*Config, error) {
-	v := viper.New() //nolint:forbidigo // viper.New is required for configuration
+	// Set defaults
+	cfg := &Config{
+		Hooks: HooksConfig{
+			Validate: ValidateConfig{
+				CooldownSeconds: defaultCooldownSeconds,
+				TimeoutSeconds:  defaultTimeoutSeconds,
+			},
+		},
+	}
 
-	// Set defaults for hooks
-	const (
-		defaultCooldownSeconds = 5
-		defaultValidateTimeout = 60
-	)
-	v.SetDefault("hooks.validate.cooldown_seconds", defaultCooldownSeconds)
-	v.SetDefault("hooks.validate.timeout_seconds", defaultValidateTimeout)
-
-	// Set config file name (without extension)
-	v.SetConfigName("config")
-
-	// Add config search paths
-	v.AddConfigPath("/etc/cc-tools/")
-	v.AddConfigPath(getXDGConfigPath())
-	v.AddConfigPath(".")
-
-	// Set environment variable prefix
-	v.SetEnvPrefix("CC_TOOLS")
-	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
-	v.AutomaticEnv()
-
-	// Try to read config file (it's OK if it doesn't exist)
-	if err := v.ReadInConfig(); err != nil {
-		// Only return error if it's not a "not found" error
-		var configFileNotFoundError viper.ConfigFileNotFoundError
-		if !errors.As(err, &configFileNotFoundError) {
+	// Try to read config file
+	configPath := getConfigPath()
+	data, err := os.ReadFile(configPath) //nolint:gosec // Path is controlled by our code
+	if err != nil {
+		if !os.IsNotExist(err) {
 			return nil, fmt.Errorf("read config file: %w", err)
 		}
-		// Config file not found is OK, we'll use defaults and env vars
+		// Config file not found is OK, we'll use defaults
+		return cfg, nil
 	}
 
-	// Unmarshal config into struct
-	var cfg Config
-	if err := v.Unmarshal(&cfg); err != nil {
-		return nil, fmt.Errorf("unmarshal config: %w", err)
+	// Parse the JSON config
+	var fileConfig map[string]any
+	if unmarshalErr := json.Unmarshal(data, &fileConfig); unmarshalErr != nil {
+		return nil, fmt.Errorf("parse config file: %w", unmarshalErr)
 	}
 
-	return &cfg, nil
+	// Extract validate settings if they exist
+	if validate, validateOk := fileConfig["validate"].(map[string]any); validateOk {
+		if timeout, timeoutOk := validate["timeout"].(float64); timeoutOk {
+			cfg.Hooks.Validate.TimeoutSeconds = int(timeout)
+		}
+		if cooldown, cooldownOk := validate["cooldown"].(float64); cooldownOk {
+			cfg.Hooks.Validate.CooldownSeconds = int(cooldown)
+		}
+	}
+
+	// Extract notification settings if they exist
+	if notifications, notifOk := fileConfig["notifications"].(map[string]any); notifOk {
+		if topic, topicOk := notifications["ntfy_topic"].(string); topicOk {
+			cfg.Notifications.NtfyTopic = topic
+		}
+	}
+
+	return cfg, nil
 }
 
-// LoadWithViper loads configuration using a provided Viper instance.
-// This is useful for testing or when you want to configure Viper differently.
-func LoadWithViper(v *viper.Viper) (*Config, error) {
-	var cfg Config
-	if err := v.Unmarshal(&cfg); err != nil {
-		return nil, fmt.Errorf("unmarshal config: %w", err)
+// LoadFromManager loads configuration using the Manager for consistent config access.
+// This is equivalent to Load() but ensures the config file exists.
+func LoadFromManager(ctx context.Context) (*Config, error) {
+	manager := NewManager()
+
+	// Ensure config exists
+	if err := manager.EnsureConfig(ctx); err != nil {
+		return nil, fmt.Errorf("ensure config: %w", err)
 	}
-	return &cfg, nil
+
+	// Now just use the regular Load function which reads from the same file
+	return Load()
 }
 
-// getXDGConfigPath returns the XDG config directory for cc-tools.
-func getXDGConfigPath() string {
+// getConfigPath returns the path to the configuration file.
+func getConfigPath() string {
+	// Check XDG_CONFIG_HOME first
 	if xdgConfig := os.Getenv("XDG_CONFIG_HOME"); xdgConfig != "" {
-		return filepath.Join(xdgConfig, "cc-tools")
+		return filepath.Join(xdgConfig, "cc-tools", "config.json")
 	}
 
+	// Default to ~/.config/cc-tools/config.json
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		// Fallback to current directory if we can't get home
-		return "."
+		return "config.json"
 	}
 
-	return filepath.Join(homeDir, ".config", "cc-tools")
+	return filepath.Join(homeDir, ".config", "cc-tools", "config.json")
 }

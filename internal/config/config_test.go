@@ -1,201 +1,139 @@
 package config
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
-
-	"github.com/spf13/viper"
 )
 
-func TestLoadWithTOML(t *testing.T) {
+func TestLoadFromJSON(t *testing.T) {
 	// Create a temporary directory for test config
 	tempDir := t.TempDir()
-	configFile := filepath.Join(tempDir, "config.toml")
 
-	// Write test TOML config
-	tomlContent := `
-[notifications]
-ntfy_topic = "test-topic-from-toml"
-`
-	if err := os.WriteFile(configFile, []byte(tomlContent), 0644); err != nil {
-		t.Fatalf("Failed to write test config: %v", err)
+	// Set XDG_CONFIG_HOME to use our temp directory
+	t.Setenv("XDG_CONFIG_HOME", tempDir)
+
+	// Create cc-tools directory
+	ccToolsDir := filepath.Join(tempDir, "cc-tools")
+	if err := os.MkdirAll(ccToolsDir, 0755); err != nil {
+		t.Fatalf("Failed to create directory: %v", err)
 	}
 
-	// Create Viper instance for testing
-	v := viper.New()
-	v.SetConfigFile(configFile)
-
-	if err := v.ReadInConfig(); err != nil {
-		t.Fatalf("Failed to read config: %v", err)
-	}
-
-	cfg, err := LoadWithViper(v)
-	if err != nil {
-		t.Fatalf("Failed to load config: %v", err)
-	}
-
-	if cfg.Notifications.NtfyTopic != "test-topic-from-toml" {
-		t.Errorf("Expected ntfy_topic to be 'test-topic-from-toml', got '%s'", cfg.Notifications.NtfyTopic)
-	}
-}
-
-func TestLoadWithYAML(t *testing.T) {
-	// Create a temporary directory for test config
-	tempDir := t.TempDir()
-	configFile := filepath.Join(tempDir, "config.yaml")
-
-	// Write test YAML config
-	yamlContent := `
-notifications:
-  ntfy_topic: test-topic-from-yaml
-`
-	if err := os.WriteFile(configFile, []byte(yamlContent), 0644); err != nil {
-		t.Fatalf("Failed to write test config: %v", err)
-	}
-
-	// Create Viper instance for testing
-	v := viper.New()
-	v.SetConfigFile(configFile)
-
-	if err := v.ReadInConfig(); err != nil {
-		t.Fatalf("Failed to read config: %v", err)
-	}
-
-	cfg, err := LoadWithViper(v)
-	if err != nil {
-		t.Fatalf("Failed to load config: %v", err)
-	}
-
-	if cfg.Notifications.NtfyTopic != "test-topic-from-yaml" {
-		t.Errorf("Expected ntfy_topic to be 'test-topic-from-yaml', got '%s'", cfg.Notifications.NtfyTopic)
-	}
-}
-
-func TestLoadWithEnvironmentVariables(t *testing.T) {
-	// Set environment variable
-	envKey := "CC_TOOLS_NOTIFICATIONS_NTFY_TOPIC"
-	envValue := "test-topic-from-env"
-
-	t.Setenv(envKey, envValue)
-
-	// Create Viper instance with env support
-	v := viper.New()
-	v.SetEnvPrefix("CC_TOOLS")
-	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
-	v.AutomaticEnv()
-
-	// Bind the env var to the config key
-	v.BindEnv("notifications.ntfy_topic")
-
-	cfg, err := LoadWithViper(v)
-	if err != nil {
-		t.Fatalf("Failed to load config: %v", err)
-	}
-
-	if cfg.Notifications.NtfyTopic != envValue {
-		t.Errorf("Expected ntfy_topic to be '%s' from env, got '%s'", envValue, cfg.Notifications.NtfyTopic)
-	}
-}
-
-func TestLoadWithTOMLAndEnvOverride(t *testing.T) {
-	// Create a temporary directory for test config
-	tempDir := t.TempDir()
-	configFile := filepath.Join(tempDir, "config.toml")
-
-	// Write test TOML config
-	tomlContent := `
-[notifications]
-ntfy_topic = "topic-from-toml"
-`
-	if err := os.WriteFile(configFile, []byte(tomlContent), 0644); err != nil {
-		t.Fatalf("Failed to write test config: %v", err)
-	}
-
-	// Set environment variable to override TOML value
-	envKey := "CC_TOOLS_NOTIFICATIONS_NTFY_TOPIC"
-	envValue := "topic-from-env-override"
-
-	t.Setenv(envKey, envValue)
-
-	// Create Viper instance
-	v := viper.New()
-	v.SetConfigFile(configFile)
-	v.SetEnvPrefix("CC_TOOLS")
-	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
-	v.AutomaticEnv()
-
-	if err := v.ReadInConfig(); err != nil {
-		t.Fatalf("Failed to read config: %v", err)
-	}
-
-	cfg, err := LoadWithViper(v)
-	if err != nil {
-		t.Fatalf("Failed to load config: %v", err)
-	}
-
-	// Environment variable should override TOML value
-	if cfg.Notifications.NtfyTopic != envValue {
-		t.Errorf("Expected ntfy_topic to be '%s' from env override, got '%s'", envValue, cfg.Notifications.NtfyTopic)
-	}
-}
-
-func TestLoadWithNoConfig(t *testing.T) {
-	// Create Viper instance with no config file
-	v := viper.New()
-	v.SetEnvPrefix("CC_TOOLS")
-	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
-	v.AutomaticEnv()
-
-	cfg, err := LoadWithViper(v)
-	if err != nil {
-		t.Fatalf("Failed to load config: %v", err)
-	}
-
-	// Should load successfully with empty values
-	if cfg.Notifications.NtfyTopic != "" {
-		t.Errorf("Expected empty ntfy_topic, got '%s'", cfg.Notifications.NtfyTopic)
-	}
-}
-
-func TestGetXDGConfigPath(t *testing.T) {
-	tests := []struct {
-		name         string
-		xdgConfig    string
-		wantContains string
-	}{
-		{
-			name:         "with XDG_CONFIG_HOME set",
-			xdgConfig:    "/custom/config",
-			wantContains: "/custom/config/cc-tools",
+	// Write test JSON config
+	configPath := filepath.Join(ccToolsDir, "config.json")
+	jsonContent := map[string]any{
+		"validate": map[string]any{
+			"timeout":  90,
+			"cooldown": 10,
 		},
-		{
-			name:         "without XDG_CONFIG_HOME",
-			xdgConfig:    "",
-			wantContains: ".config/cc-tools",
+		"notifications": map[string]any{
+			"ntfy_topic": "test-topic",
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Set test value
-			if tt.xdgConfig != "" {
-				t.Setenv("XDG_CONFIG_HOME", tt.xdgConfig)
-			} else {
-				t.Setenv("XDG_CONFIG_HOME", "")
-			}
+	data, err := json.MarshalIndent(jsonContent, "", "  ")
+	if err != nil {
+		t.Fatalf("Failed to marshal config: %v", err)
+	}
 
-			path := getXDGConfigPath()
-			if !filepath.IsAbs(path) && tt.xdgConfig == "" {
-				// If XDG_CONFIG_HOME is not set and we can't get home dir,
-				// it should return "."
-				if path != "." {
-					t.Errorf("Expected '.', got '%s'", path)
-				}
-			} else if !strings.Contains(path, tt.wantContains) {
-				t.Errorf("Expected path to contain '%s', got '%s'", tt.wantContains, path)
-			}
-		})
+	if writeErr := os.WriteFile(configPath, data, 0644); writeErr != nil {
+		t.Fatalf("Failed to write test config: %v", writeErr)
+	}
+
+	// Load config
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+
+	// Check values
+	if cfg.Hooks.Validate.TimeoutSeconds != 90 {
+		t.Errorf("Expected timeout to be 90, got %d", cfg.Hooks.Validate.TimeoutSeconds)
+	}
+	if cfg.Hooks.Validate.CooldownSeconds != 10 {
+		t.Errorf("Expected cooldown to be 10, got %d", cfg.Hooks.Validate.CooldownSeconds)
+	}
+	if cfg.Notifications.NtfyTopic != "test-topic" {
+		t.Errorf("Expected ntfy_topic to be 'test-topic', got '%s'", cfg.Notifications.NtfyTopic)
+	}
+}
+
+func TestLoadDefaults(t *testing.T) {
+	// Set XDG_CONFIG_HOME to a non-existent directory
+	tempDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempDir, "nonexistent"))
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+
+	// Check default values
+	if cfg.Hooks.Validate.TimeoutSeconds != 60 {
+		t.Errorf("Expected default timeout to be 60, got %d", cfg.Hooks.Validate.TimeoutSeconds)
+	}
+	if cfg.Hooks.Validate.CooldownSeconds != 5 {
+		t.Errorf("Expected default cooldown to be 5, got %d", cfg.Hooks.Validate.CooldownSeconds)
+	}
+}
+
+func TestLoadFromManager(t *testing.T) {
+	ctx := context.Background()
+
+	// Create a temporary directory for test config
+	tempDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tempDir)
+
+	// Use manager to set some values
+	manager := NewManager()
+	if err := manager.EnsureConfig(ctx); err != nil {
+		t.Fatalf("Failed to ensure config: %v", err)
+	}
+
+	if err := manager.Set(ctx, "validate.timeout", "100"); err != nil {
+		t.Fatalf("Failed to set timeout: %v", err)
+	}
+
+	if err := manager.Set(ctx, "validate.cooldown", "8"); err != nil {
+		t.Fatalf("Failed to set cooldown: %v", err)
+	}
+
+	// Load config using manager
+	cfg, err := LoadFromManager(ctx)
+	if err != nil {
+		t.Fatalf("Failed to load config from manager: %v", err)
+	}
+
+	// Check values
+	if cfg.Hooks.Validate.TimeoutSeconds != 100 {
+		t.Errorf("Expected timeout to be 100, got %d", cfg.Hooks.Validate.TimeoutSeconds)
+	}
+	if cfg.Hooks.Validate.CooldownSeconds != 8 {
+		t.Errorf("Expected cooldown to be 8, got %d", cfg.Hooks.Validate.CooldownSeconds)
+	}
+}
+
+func TestGetConfigPath(t *testing.T) {
+	// Test with XDG_CONFIG_HOME set
+	t.Setenv("XDG_CONFIG_HOME", "/custom/config")
+
+	path := getConfigPath()
+	expected := "/custom/config/cc-tools/config.json"
+	if path != expected {
+		t.Errorf("Expected config path to be %s, got %s", expected, path)
+	}
+
+	// Test without XDG_CONFIG_HOME
+	os.Unsetenv("XDG_CONFIG_HOME")
+	path = getConfigPath()
+
+	// Should contain .config/cc-tools/config.json
+	if !filepath.IsAbs(path) {
+		t.Errorf("Expected absolute path, got %s", path)
+	}
+	if filepath.Base(path) != "config.json" {
+		t.Errorf("Expected file name to be config.json, got %s", filepath.Base(path))
 	}
 }

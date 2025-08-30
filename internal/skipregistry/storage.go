@@ -9,22 +9,22 @@ import (
 	"path/filepath"
 )
 
-// jsonStorage implements Storage using JSON files.
-type jsonStorage struct {
+// JSONStorage implements Storage using JSON files.
+type JSONStorage struct {
 	fs       FileSystem
 	filePath string
 }
 
 // NewJSONStorage creates a new JSON storage backend.
-func NewJSONStorage(fs FileSystem, filePath string) Storage {
-	return &jsonStorage{
+func NewJSONStorage(fs FileSystem, filePath string) *JSONStorage {
+	return &JSONStorage{
 		fs:       fs,
 		filePath: filePath,
 	}
 }
 
 // Load reads the registry from the JSON file.
-func (s *jsonStorage) Load(_ context.Context) (RegistryData, error) {
+func (s *JSONStorage) Load(_ context.Context) (RegistryData, error) {
 	// Read the file
 	data, err := s.fs.ReadFile(s.filePath)
 	if err != nil {
@@ -54,7 +54,7 @@ func (s *jsonStorage) Load(_ context.Context) (RegistryData, error) {
 }
 
 // Save atomically writes the registry to the JSON file.
-func (s *jsonStorage) Save(_ context.Context, data RegistryData) error {
+func (s *JSONStorage) Save(_ context.Context, data RegistryData) error {
 	// Ensure directory exists
 	dir := filepath.Dir(s.filePath)
 	const dirPerm = 0755
@@ -131,6 +131,6 @@ func (fs *realFileSystem) UserHomeDir() (string, error) {
 }
 
 // DefaultStorage creates a storage instance with the default file path.
-func DefaultStorage() Storage {
+func DefaultStorage() *JSONStorage {
 	return NewJSONStorage(newRealFileSystem(), getRegistryPath())
 }

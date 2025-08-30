@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 
 	"github.com/Veraticus/cc-tools/internal/output"
 	"github.com/Veraticus/cc-tools/internal/skipregistry"
@@ -46,7 +47,7 @@ func runSkipCommand() {
 			out.Error("Error: %v", err)
 			os.Exit(1)
 		}
-	case "list":
+	case listCommand:
 		if err := listSkips(ctx, out, registry); err != nil {
 			out.Error("Error: %v", err)
 			os.Exit(1)
@@ -229,18 +230,25 @@ func listSkips(
 		return entries[i].Path.String() < entries[j].Path.String()
 	})
 
-	list := output.NewListRenderer()
-	groups := make(map[string][]string)
+	// Create table for skip configurations
+	table := output.NewTable(
+		[]string{"Directory", "Skip Types"},
+		[]int{50, 30},
+	)
 
 	for _, entry := range entries {
 		var typeStrs []string
 		for _, t := range entry.Types {
 			typeStrs = append(typeStrs, string(t))
 		}
-		groups[entry.Path.String()] = typeStrs
+		table.AddRow([]string{
+			entry.Path.String(),
+			strings.Join(typeStrs, ", "),
+		})
 	}
 
-	_ = out.Write(list.RenderGrouped("Skip configurations:", groups))
+	out.Info("Skip configurations:")
+	_ = out.Write(table.Render())
 
 	return nil
 }
@@ -265,21 +273,42 @@ func showStatus(
 		return nil
 	}
 
-	list := output.NewListRenderer()
-	items := []string{}
+	// Create table for skip status
+	table := output.NewTable(
+		[]string{"Type", "Status"},
+		[]int{20, 30},
+	)
 
+	// Add status for each possible type
+	hasLint := false
+	hasTest := false
 	for _, t := range types {
 		switch t {
 		case skipregistry.SkipTypeLint:
-			items = append(items, "Linting: SKIPPED")
+			hasLint = true
 		case skipregistry.SkipTypeTest:
-			items = append(items, "Testing: SKIPPED")
+			hasTest = true
 		case skipregistry.SkipTypeAll:
 			// This case won't occur as we don't store SkipTypeAll
+			hasLint = true
+			hasTest = true
 		}
 	}
 
-	_ = out.Write(list.Render(fmt.Sprintf("Skip status for %s:", dir), items))
+	if hasLint {
+		table.AddRow([]string{"Linting", "SKIPPED"})
+	} else {
+		table.AddRow([]string{"Linting", "Active"})
+	}
+
+	if hasTest {
+		table.AddRow([]string{"Testing", "SKIPPED"})
+	} else {
+		table.AddRow([]string{"Testing", "Active"})
+	}
+
+	out.Info("Skip status for %s:", dir)
+	_ = out.Write(table.Render())
 
 	return nil
 }

@@ -121,18 +121,22 @@ func showDebugStatus(ctx context.Context, out *output.Terminal, manager *debug.M
 		return fmt.Errorf("check debug status: %w", err)
 	}
 
-	list := output.NewListRenderer()
-	items := map[string]string{}
+	// Create table for debug status
+	table := output.NewTable(
+		[]string{"Property", "Value"},
+		[]int{15, 60},
+	)
 
 	if enabled {
 		logFile := debug.GetLogFilePath(dir)
-		items["Status"] = "ENABLED"
-		items["Log file"] = logFile
+		table.AddRow([]string{"Status", "ENABLED"})
+		table.AddRow([]string{"Log file", logFile})
 	} else {
-		items["Status"] = "DISABLED"
+		table.AddRow([]string{"Status", "DISABLED"})
 	}
 
-	_ = out.Write(list.RenderMap(fmt.Sprintf("Debug status for %s:", dir), items))
+	out.Info("Debug status for %s:", dir)
+	_ = out.Write(table.Render())
 
 	return nil
 }
@@ -150,19 +154,24 @@ func listDebugDirs(ctx context.Context, out *output.Terminal, manager *debug.Man
 
 	sort.Strings(dirs)
 
-	list := output.NewListRenderer()
-	groups := make(map[string][]string)
+	// Create table for debug directories
+	table := output.NewTable(
+		[]string{"Directory", "Log File", "Debug File"},
+		[]int{30, 35, 35},
+	)
 
 	for _, dir := range dirs {
 		logFile := debug.GetLogFilePath(dir)
 		debugLogFile := shared.GetDebugLogPathForDir(dir)
-		groups[dir] = []string{
-			fmt.Sprintf("Log: %s", logFile),
-			fmt.Sprintf("Debug: %s", debugLogFile),
-		}
+		table.AddRow([]string{
+			dir,
+			logFile,
+			debugLogFile,
+		})
 	}
 
-	_ = out.Write(list.RenderGrouped("Directories with debug logging enabled:", groups))
+	out.Info("Directories with debug logging enabled:")
+	_ = out.Write(table.Render())
 
 	return nil
 }
