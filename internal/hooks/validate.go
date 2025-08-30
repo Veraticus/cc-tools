@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/Veraticus/cc-tools/internal/output"
 	"github.com/Veraticus/cc-tools/internal/shared"
 )
 
@@ -39,9 +40,11 @@ type ValidateResult struct {
 
 // FormatMessage returns the appropriate user message based on validation results.
 func (vr *ValidateResult) FormatMessage() string {
+	formatter := output.NewHookFormatter()
+
 	// Both passed
 	if vr.BothPassed {
-		return shared.RawWarningStyle.Render("👉 Validations pass. Continue with your task.")
+		return formatter.FormatValidationPass()
 	}
 
 	// Determine what failed
@@ -52,25 +55,25 @@ func (vr *ValidateResult) FormatMessage() string {
 	if lintFailed && testFailed {
 		lintCmd := vr.LintResult.Command.String()
 		testCmd := vr.TestResult.Command.String()
-		return shared.RawErrorStyle.Render(
-			fmt.Sprintf("⛔ BLOCKING: Lint and test failures. Run 'cd %s && %s' and '%s'",
-				vr.LintResult.Command.WorkingDir, lintCmd, testCmd))
+		return formatter.FormatBlockingError(
+			"⛔ BLOCKING: Lint and test failures. Run 'cd %s && %s' and '%s'",
+			vr.LintResult.Command.WorkingDir, lintCmd, testCmd)
 	}
 
 	// Only lint failed
 	if lintFailed {
 		cmdStr := vr.LintResult.Command.String()
-		return shared.RawErrorStyle.Render(
-			fmt.Sprintf("⛔ BLOCKING: Run 'cd %s && %s' to fix lint failures",
-				vr.LintResult.Command.WorkingDir, cmdStr))
+		return formatter.FormatBlockingError(
+			"⛔ BLOCKING: Run 'cd %s && %s' to fix lint failures",
+			vr.LintResult.Command.WorkingDir, cmdStr)
 	}
 
 	// Only test failed
 	if testFailed {
 		cmdStr := vr.TestResult.Command.String()
-		return shared.RawErrorStyle.Render(
-			fmt.Sprintf("⛔ BLOCKING: Run 'cd %s && %s' to fix test failures",
-				vr.TestResult.Command.WorkingDir, cmdStr))
+		return formatter.FormatBlockingError(
+			"⛔ BLOCKING: Run 'cd %s && %s' to fix test failures",
+			vr.TestResult.Command.WorkingDir, cmdStr)
 	}
 
 	// Neither command was found (both nil results)

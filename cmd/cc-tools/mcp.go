@@ -2,11 +2,11 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"time"
 
 	"github.com/Veraticus/cc-tools/internal/mcp"
+	"github.com/Veraticus/cc-tools/internal/output"
 )
 
 const (
@@ -16,77 +16,103 @@ const (
 )
 
 func runMCPCommand() {
+	out := output.NewTerminal(os.Stdout, os.Stderr)
+
 	if len(os.Args) < mcpMinArgs {
-		printMCPUsage()
+		printMCPUsage(out)
 		os.Exit(1)
 	}
-
-	manager := mcp.NewManager()
 
 	subcommand := os.Args[2]
 
 	// Handle help separately to avoid defer issues
 	if subcommand == "help" || subcommand == "-h" || subcommand == "--help" {
-		printMCPUsage()
+		printMCPUsage(out)
 		return
 	}
 
+	// Run the actual command and get exit code
+	exitCode := executeMCPCommand(out, subcommand)
+	if exitCode != 0 {
+		os.Exit(exitCode)
+	}
+}
+
+func executeMCPCommand(out *output.Terminal, subcommand string) int {
+	manager := mcp.NewManager(out)
 	ctx, cancel := context.WithTimeout(context.Background(), mcpTimeout)
 	defer cancel()
 
 	switch subcommand {
 	case "list":
-		if err := manager.List(ctx); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-
+		return handleMCPList(ctx, out, manager)
 	case "enable":
-		if len(os.Args) < mcpSubCmdArgs {
-			fmt.Fprintf(os.Stderr, "Error: 'enable' requires an MCP name\n")
-			printMCPUsage()
-			os.Exit(1)
-		}
-		if err := manager.Enable(ctx, os.Args[3]); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-
+		return handleMCPEnable(ctx, out, manager)
 	case "disable":
-		if len(os.Args) < mcpSubCmdArgs {
-			fmt.Fprintf(os.Stderr, "Error: 'disable' requires an MCP name\n")
-			printMCPUsage()
-			os.Exit(1)
-		}
-		if err := manager.Disable(ctx, os.Args[3]); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-
+		return handleMCPDisable(ctx, out, manager)
 	case "enable-all":
-		if err := manager.EnableAll(ctx); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-
+		return handleMCPEnableAll(ctx, out, manager)
 	case "disable-all":
-		if err := manager.DisableAll(ctx); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-
-	case "help", "-h", "--help":
-		printMCPUsage()
-
+		return handleMCPDisableAll(ctx, out, manager)
 	default:
-		fmt.Fprintf(os.Stderr, "Unknown MCP subcommand: %s\n", subcommand)
-		printMCPUsage()
-		os.Exit(1)
+		out.Error("Unknown MCP subcommand: %s", subcommand)
+		printMCPUsage(out)
+		return 1
 	}
 }
 
-func printMCPUsage() {
-	fmt.Fprintf(os.Stderr, `cc-tools mcp - Manage Claude MCP servers
+func handleMCPList(ctx context.Context, out *output.Terminal, manager *mcp.Manager) int {
+	if err := manager.List(ctx); err != nil {
+		out.Error("Error: %v", err)
+		return 1
+	}
+	return 0
+}
+
+func handleMCPEnable(ctx context.Context, out *output.Terminal, manager *mcp.Manager) int {
+	if len(os.Args) < mcpSubCmdArgs {
+		out.Error("Error: 'enable' requires an MCP name")
+		printMCPUsage(out)
+		return 1
+	}
+	if err := manager.Enable(ctx, os.Args[3]); err != nil {
+		out.Error("Error: %v", err)
+		return 1
+	}
+	return 0
+}
+
+func handleMCPDisable(ctx context.Context, out *output.Terminal, manager *mcp.Manager) int {
+	if len(os.Args) < mcpSubCmdArgs {
+		out.Error("Error: 'disable' requires an MCP name")
+		printMCPUsage(out)
+		return 1
+	}
+	if err := manager.Disable(ctx, os.Args[3]); err != nil {
+		out.Error("Error: %v", err)
+		return 1
+	}
+	return 0
+}
+
+func handleMCPEnableAll(ctx context.Context, out *output.Terminal, manager *mcp.Manager) int {
+	if err := manager.EnableAll(ctx); err != nil {
+		out.Error("Error: %v", err)
+		return 1
+	}
+	return 0
+}
+
+func handleMCPDisableAll(ctx context.Context, out *output.Terminal, manager *mcp.Manager) int {
+	if err := manager.DisableAll(ctx); err != nil {
+		out.Error("Error: %v", err)
+		return 1
+	}
+	return 0
+}
+
+func printMCPUsage(out *output.Terminal) {
+	out.RawError(`cc-tools mcp - Manage Claude MCP servers
 
 Usage:
   cc-tools mcp <subcommand> [arguments]

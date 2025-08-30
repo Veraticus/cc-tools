@@ -10,6 +10,7 @@ import (
 	"time"
 
 	debuglog "github.com/Veraticus/cc-tools/internal/debug"
+	"github.com/Veraticus/cc-tools/internal/output"
 	"github.com/Veraticus/cc-tools/internal/shared"
 )
 
@@ -114,10 +115,11 @@ func (ce *CommandExecutor) ExecuteForHook(
 	hookType CommandType,
 ) (int, string) {
 	result := ce.Execute(ctx, cmd)
+	formatter := output.NewHookFormatter()
 
 	if result.TimedOut {
-		message := shared.RawErrorStyle.Render(
-			fmt.Sprintf("⛔ BLOCKING: Command timed out after %v", ce.timeout))
+		message := formatter.FormatBlockingError(
+			"⛔ BLOCKING: Command timed out after %v", ce.timeout)
 		return ExitCodeShowMessage, message
 	}
 
@@ -126,11 +128,11 @@ func (ce *CommandExecutor) ExecuteForHook(
 		var message string
 		switch hookType {
 		case CommandTypeLint:
-			message = shared.RawWarningStyle.Render("👉 Lints pass. Continue with your task.")
+			message = formatter.FormatLintPass()
 		case CommandTypeTest:
-			message = shared.RawWarningStyle.Render("👉 Tests pass. Continue with your task.")
+			message = formatter.FormatTestPass()
 		default:
-			message = shared.RawSuccessStyle.Render("✓ Command succeeded")
+			message = formatter.FormatSuccess("✓ Command succeeded")
 		}
 		return ExitCodeShowMessage, message
 	}
@@ -140,16 +142,16 @@ func (ce *CommandExecutor) ExecuteForHook(
 	var message string
 	switch hookType {
 	case CommandTypeLint:
-		message = shared.RawErrorStyle.Render(
-			fmt.Sprintf("⛔ BLOCKING: Run 'cd %s && %s' to fix lint failures",
-				cmd.WorkingDir, cmdStr))
+		message = formatter.FormatBlockingError(
+			"⛔ BLOCKING: Run 'cd %s && %s' to fix lint failures",
+			cmd.WorkingDir, cmdStr)
 	case CommandTypeTest:
-		message = shared.RawErrorStyle.Render(
-			fmt.Sprintf("⛔ BLOCKING: Run 'cd %s && %s' to fix test failures",
-				cmd.WorkingDir, cmdStr))
+		message = formatter.FormatBlockingError(
+			"⛔ BLOCKING: Run 'cd %s && %s' to fix test failures",
+			cmd.WorkingDir, cmdStr)
 	default:
-		message = shared.RawErrorStyle.Render(
-			fmt.Sprintf("⛔ BLOCKING: Command failed: %s", cmdStr))
+		message = formatter.FormatBlockingError(
+			"⛔ BLOCKING: Command failed: %s", cmdStr)
 	}
 
 	return ExitCodeShowMessage, message

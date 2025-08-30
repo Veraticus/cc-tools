@@ -6,6 +6,7 @@ import (
 	"os"
 	"sort"
 
+	"github.com/Veraticus/cc-tools/internal/output"
 	"github.com/Veraticus/cc-tools/internal/skipregistry"
 )
 
@@ -18,8 +19,10 @@ const (
 
 // runSkipCommand handles the skip command and its subcommands.
 func runSkipCommand() {
+	out := output.NewTerminal(os.Stdout, os.Stderr)
+
 	if len(os.Args) < minSkipArgs {
-		printSkipUsage()
+		printSkipUsage(out)
 		os.Exit(1)
 	}
 
@@ -29,41 +32,43 @@ func runSkipCommand() {
 
 	switch os.Args[2] {
 	case skipLint:
-		if err := addSkip(ctx, registry, skipregistry.SkipTypeLint); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		if err := addSkip(ctx, out, registry, skipregistry.SkipTypeLint); err != nil {
+			out.Error("Error: %v", err)
 			os.Exit(1)
 		}
 	case skipTest:
-		if err := addSkip(ctx, registry, skipregistry.SkipTypeTest); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		if err := addSkip(ctx, out, registry, skipregistry.SkipTypeTest); err != nil {
+			out.Error("Error: %v", err)
 			os.Exit(1)
 		}
 	case skipAll:
-		if err := addSkip(ctx, registry, skipregistry.SkipTypeAll); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		if err := addSkip(ctx, out, registry, skipregistry.SkipTypeAll); err != nil {
+			out.Error("Error: %v", err)
 			os.Exit(1)
 		}
 	case "list":
-		if err := listSkips(ctx, registry); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		if err := listSkips(ctx, out, registry); err != nil {
+			out.Error("Error: %v", err)
 			os.Exit(1)
 		}
 	case "status":
-		if err := showStatus(ctx, registry); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		if err := showStatus(ctx, out, registry); err != nil {
+			out.Error("Error: %v", err)
 			os.Exit(1)
 		}
 	default:
-		fmt.Fprintf(os.Stderr, "Unknown skip subcommand: %s\n", os.Args[2])
-		printSkipUsage()
+		out.Error("Unknown skip subcommand: %s", os.Args[2])
+		printSkipUsage(out)
 		os.Exit(1)
 	}
 }
 
 // runUnskipCommand handles the unskip command.
 func runUnskipCommand() {
+	out := output.NewTerminal(os.Stdout, os.Stderr)
+
 	if len(os.Args) < minSkipArgs {
-		printUnskipUsage()
+		printUnskipUsage(out)
 		os.Exit(1)
 	}
 
@@ -73,31 +78,31 @@ func runUnskipCommand() {
 
 	switch os.Args[2] {
 	case skipLint:
-		if err := removeSkip(ctx, registry, skipregistry.SkipTypeLint); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		if err := removeSkip(ctx, out, registry, skipregistry.SkipTypeLint); err != nil {
+			out.Error("Error: %v", err)
 			os.Exit(1)
 		}
 	case skipTest:
-		if err := removeSkip(ctx, registry, skipregistry.SkipTypeTest); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		if err := removeSkip(ctx, out, registry, skipregistry.SkipTypeTest); err != nil {
+			out.Error("Error: %v", err)
 			os.Exit(1)
 		}
 	case skipAll:
-		if err := clearSkips(ctx, registry); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		if err := clearSkips(ctx, out, registry); err != nil {
+			out.Error("Error: %v", err)
 			os.Exit(1)
 		}
 	default:
 		// If no argument, default to "all"
-		if err := clearSkips(ctx, registry); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		if err := clearSkips(ctx, out, registry); err != nil {
+			out.Error("Error: %v", err)
 			os.Exit(1)
 		}
 	}
 }
 
-func printSkipUsage() {
-	fmt.Fprintf(os.Stderr, `Usage: cc-tools skip <subcommand>
+func printSkipUsage(out *output.Terminal) {
+	out.RawError(`Usage: cc-tools skip <subcommand>
 
 Subcommands:
   lint      Skip linting in the current directory
@@ -114,8 +119,8 @@ Examples:
 `)
 }
 
-func printUnskipUsage() {
-	fmt.Fprintf(os.Stderr, `Usage: cc-tools unskip [<type>]
+func printUnskipUsage(out *output.Terminal) {
+	out.RawError(`Usage: cc-tools unskip [<type>]
 
 Types:
   lint      Remove skip for linting in the current directory
@@ -130,7 +135,12 @@ Examples:
 `)
 }
 
-func addSkip(ctx context.Context, registry skipregistry.Registry, skipType skipregistry.SkipType) error {
+func addSkip(
+	ctx context.Context,
+	out *output.Terminal,
+	registry skipregistry.Registry,
+	skipType skipregistry.SkipType,
+) error {
 	dir, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("get current directory: %w", err)
@@ -143,17 +153,22 @@ func addSkip(ctx context.Context, registry skipregistry.Registry, skipType skipr
 	// Print confirmation
 	switch skipType {
 	case skipregistry.SkipTypeLint:
-		fmt.Printf("✓ Linting will be skipped in %s\n", dir) //nolint:forbidigo // CLI output
+		out.Success("✓ Linting will be skipped in %s", dir)
 	case skipregistry.SkipTypeTest:
-		fmt.Printf("✓ Testing will be skipped in %s\n", dir) //nolint:forbidigo // CLI output
+		out.Success("✓ Testing will be skipped in %s", dir)
 	case skipregistry.SkipTypeAll:
-		fmt.Printf("✓ Linting and testing will be skipped in %s\n", dir) //nolint:forbidigo // CLI output
+		out.Success("✓ Linting and testing will be skipped in %s", dir)
 	}
 
 	return nil
 }
 
-func removeSkip(ctx context.Context, registry skipregistry.Registry, skipType skipregistry.SkipType) error {
+func removeSkip(
+	ctx context.Context,
+	out *output.Terminal,
+	registry skipregistry.Registry,
+	skipType skipregistry.SkipType,
+) error {
 	dir, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("get current directory: %w", err)
@@ -166,9 +181,9 @@ func removeSkip(ctx context.Context, registry skipregistry.Registry, skipType sk
 	// Print confirmation
 	switch skipType {
 	case skipregistry.SkipTypeLint:
-		fmt.Printf("✓ Linting will no longer be skipped in %s\n", dir) //nolint:forbidigo // CLI output
+		out.Success("✓ Linting will no longer be skipped in %s", dir)
 	case skipregistry.SkipTypeTest:
-		fmt.Printf("✓ Testing will no longer be skipped in %s\n", dir) //nolint:forbidigo // CLI output
+		out.Success("✓ Testing will no longer be skipped in %s", dir)
 	case skipregistry.SkipTypeAll:
 		// This case won't occur as we expand SkipTypeAll earlier
 	}
@@ -176,7 +191,11 @@ func removeSkip(ctx context.Context, registry skipregistry.Registry, skipType sk
 	return nil
 }
 
-func clearSkips(ctx context.Context, registry skipregistry.Registry) error {
+func clearSkips(
+	ctx context.Context,
+	out *output.Terminal,
+	registry skipregistry.Registry,
+) error {
 	dir, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("get current directory: %w", err)
@@ -186,18 +205,22 @@ func clearSkips(ctx context.Context, registry skipregistry.Registry) error {
 		return fmt.Errorf("clear skips: %w", clearErr)
 	}
 
-	fmt.Printf("✓ All skips removed from %s\n", dir) //nolint:forbidigo // CLI output
+	out.Success("✓ All skips removed from %s", dir)
 	return nil
 }
 
-func listSkips(ctx context.Context, registry skipregistry.Registry) error {
+func listSkips(
+	ctx context.Context,
+	out *output.Terminal,
+	registry skipregistry.Registry,
+) error {
 	entries, err := registry.ListAll(ctx)
 	if err != nil {
 		return fmt.Errorf("list all: %w", err)
 	}
 
 	if len(entries) == 0 {
-		fmt.Println("No directories have skip configurations") //nolint:forbidigo // CLI output
+		out.Info("No directories have skip configurations")
 		return nil
 	}
 
@@ -206,19 +229,27 @@ func listSkips(ctx context.Context, registry skipregistry.Registry) error {
 		return entries[i].Path.String() < entries[j].Path.String()
 	})
 
-	fmt.Println("Skip configurations:") //nolint:forbidigo // CLI output
+	list := output.NewListRenderer()
+	groups := make(map[string][]string)
+
 	for _, entry := range entries {
 		var typeStrs []string
 		for _, t := range entry.Types {
 			typeStrs = append(typeStrs, string(t))
 		}
-		fmt.Printf("  %s: %v\n", entry.Path, typeStrs) //nolint:forbidigo // CLI output
+		groups[entry.Path.String()] = typeStrs
 	}
+
+	_ = out.Write(list.RenderGrouped("Skip configurations:", groups))
 
 	return nil
 }
 
-func showStatus(ctx context.Context, registry skipregistry.Registry) error {
+func showStatus(
+	ctx context.Context,
+	out *output.Terminal,
+	registry skipregistry.Registry,
+) error {
 	dir, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("get current directory: %w", err)
@@ -230,21 +261,25 @@ func showStatus(ctx context.Context, registry skipregistry.Registry) error {
 	}
 
 	if len(types) == 0 {
-		fmt.Printf("No skips configured for %s\n", dir) //nolint:forbidigo // CLI output
+		out.Info("No skips configured for %s", dir)
 		return nil
 	}
 
-	fmt.Printf("Skip status for %s:\n", dir) //nolint:forbidigo // CLI output
+	list := output.NewListRenderer()
+	items := []string{}
+
 	for _, t := range types {
 		switch t {
 		case skipregistry.SkipTypeLint:
-			fmt.Println("  - Linting: SKIPPED") //nolint:forbidigo // CLI output
+			items = append(items, "Linting: SKIPPED")
 		case skipregistry.SkipTypeTest:
-			fmt.Println("  - Testing: SKIPPED") //nolint:forbidigo // CLI output
+			items = append(items, "Testing: SKIPPED")
 		case skipregistry.SkipTypeAll:
 			// This case won't occur as we don't store SkipTypeAll
 		}
 	}
+
+	_ = out.Write(list.Render(fmt.Sprintf("Skip status for %s:", dir), items))
 
 	return nil
 }

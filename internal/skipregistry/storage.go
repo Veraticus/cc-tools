@@ -3,6 +3,7 @@ package skipregistry
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,8 +28,8 @@ func (s *jsonStorage) Load(_ context.Context) (RegistryData, error) {
 	// Read the file
 	data, err := s.fs.ReadFile(s.filePath)
 	if err != nil {
-		// Check if file doesn't exist
-		if os.IsNotExist(err) {
+		// Check if file doesn't exist using errors.Is to handle wrapped errors
+		if errors.Is(err, os.ErrNotExist) {
 			return nil, ErrNotFound
 		}
 		return nil, fmt.Errorf("read registry file: %w", err)

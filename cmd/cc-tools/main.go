@@ -12,20 +12,28 @@ import (
 
 	"github.com/Veraticus/cc-tools/internal/config"
 	"github.com/Veraticus/cc-tools/internal/hooks"
+	"github.com/Veraticus/cc-tools/internal/output"
+	"github.com/Veraticus/cc-tools/internal/shared"
 	"github.com/Veraticus/cc-tools/internal/statusline"
 )
 
-const minArgs = 2
+const (
+	minArgs     = 2
+	helpFlag    = "--help"
+	helpCommand = "help"
+)
 
 // Build-time variables.
 var version = "dev"
 
 func main() {
+	out := output.NewTerminal(os.Stdout, os.Stderr)
+
 	// Debug logging - log all invocations to a file
 	debugLog()
 
 	if len(os.Args) < minArgs {
-		printUsage()
+		printUsage(out)
 		os.Exit(1)
 	}
 
@@ -44,18 +52,18 @@ func main() {
 		runMCPCommand()
 	case "version":
 		// Print version to stdout as intended output
-		fmt.Printf("cc-tools %s\n", version) //nolint:forbidigo // CLI output
-	case "help", "-h", "--help":
-		printUsage()
+		out.Raw(fmt.Sprintf("cc-tools %s\n", version))
+	case helpCommand, "-h", helpFlag:
+		printUsage(out)
 	default:
-		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1])
-		printUsage()
+		out.Error("Unknown command: %s", os.Args[1])
+		printUsage(out)
 		os.Exit(1)
 	}
 }
 
-func printUsage() {
-	fmt.Fprintf(os.Stderr, `cc-tools - Claude Code Tools
+func printUsage(out *output.Terminal) {
+	out.RawError(`cc-tools - Claude Code Tools
 
 Usage:
   cc-tools <command> [arguments]
@@ -79,11 +87,13 @@ Examples:
 }
 
 func runStatusline() {
+	out := output.NewTerminal(os.Stdout, os.Stderr)
+
 	// Read stdin
 	input, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		// Fallback prompt output to stdout
-		fmt.Print(" > ") //nolint:forbidigo // CLI output
+		out.Raw(" > ")
 		os.Exit(0)
 	}
 
@@ -93,11 +103,11 @@ func runStatusline() {
 	result, err := runStatuslineWithInput(reader)
 	if err != nil {
 		// Fallback prompt output to stdout
-		fmt.Print(" > ") //nolint:forbidigo // CLI output
+		out.Raw(" > ")
 		os.Exit(0)
 	}
 	// Output statusline result to stdout
-	fmt.Print(result) //nolint:forbidigo // CLI output
+	out.Raw(result)
 }
 
 func loadValidateConfig() (int, int) {
@@ -133,7 +143,16 @@ func loadValidateConfig() (int, int) {
 func runValidate() {
 	timeoutSecs, cooldownSecs := loadValidateConfig()
 	debug := os.Getenv("CLAUDE_HOOKS_DEBUG") == "1"
-	exitCode := hooks.RunValidateHook(context.Background(), debug, timeoutSecs, cooldownSecs, nil)
+
+	exitCode := hooks.ValidateWithSkipCheck(
+		context.Background(),
+		os.Stdin,
+		os.Stdout,
+		os.Stderr,
+		debug,
+		timeoutSecs,
+		cooldownSecs,
+	)
 	os.Exit(exitCode)
 }
 
@@ -178,8 +197,9 @@ func getCacheDuration() time.Duration {
 }
 
 func debugLog() {
-	// Create or append to debug log file
-	debugFile := "/tmp/cc-tools.debug"
+	// Create or append to debug log file for current directory
+	debugFile := getDebugLogPath()
+	//nolint:gosec // Debug log file path is controlled
 	f, err := os.OpenFile(debugFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return // Silently fail if we can't write debug log
@@ -229,4 +249,14 @@ func debugLog() {
 		}
 		return "(none)"
 	}())
+}
+
+// getDebugLogPath returns the debug log path for the current directory.
+func getDebugLogPath() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		// Fallback to generic log if we can't get working directory
+		return "/tmp/cc-tools.debug"
+	}
+	return shared.GetDebugLogPathForDir(wd)
 }

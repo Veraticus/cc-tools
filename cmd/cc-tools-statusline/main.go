@@ -8,15 +8,18 @@ import (
 	"os"
 	"time"
 
+	"github.com/Veraticus/cc-tools/internal/output"
 	"github.com/Veraticus/cc-tools/internal/statusline"
 )
 
 func main() {
+	out := output.NewTerminal(os.Stdout, os.Stderr)
+
 	// Read stdin
 	input, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		// Fallback prompt output to stdout
-		fmt.Print(" > ") //nolint:forbidigo // CLI output
+		out.Raw(" > ")
 		os.Exit(0)
 	}
 
@@ -26,11 +29,11 @@ func main() {
 	result, err := runStatuslineWithInput(reader)
 	if err != nil {
 		// Fallback prompt output to stdout
-		fmt.Print(" > ") //nolint:forbidigo // CLI output
+		out.Raw(" > ")
 		os.Exit(0)
 	}
 	// Output statusline result to stdout
-	fmt.Print(result) //nolint:forbidigo // CLI output
+	out.Raw(result)
 }
 
 func runStatuslineWithInput(reader io.Reader) (string, error) {

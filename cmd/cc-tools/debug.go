@@ -7,13 +7,20 @@ import (
 	"sort"
 
 	"github.com/Veraticus/cc-tools/internal/debug"
+	"github.com/Veraticus/cc-tools/internal/output"
+	"github.com/Veraticus/cc-tools/internal/shared"
 )
 
-const minDebugArgs = 3
+const (
+	minDebugArgs = 3
+	listCommand  = "list"
+)
 
 func runDebugCommand() {
+	out := output.NewTerminal(os.Stdout, os.Stderr)
+
 	if len(os.Args) < minDebugArgs {
-		printDebugUsage()
+		printDebugUsage(out)
 		os.Exit(1)
 	}
 
@@ -22,50 +29,54 @@ func runDebugCommand() {
 
 	switch os.Args[2] {
 	case "enable":
-		if err := enableDebug(ctx, manager); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		if err := enableDebug(ctx, out, manager); err != nil {
+			out.Error("Error: %v", err)
 			os.Exit(1)
 		}
 	case "disable":
-		if err := disableDebug(ctx, manager); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		if err := disableDebug(ctx, out, manager); err != nil {
+			out.Error("Error: %v", err)
 			os.Exit(1)
 		}
 	case "status":
-		if err := showDebugStatus(ctx, manager); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		if err := showDebugStatus(ctx, out, manager); err != nil {
+			out.Error("Error: %v", err)
 			os.Exit(1)
 		}
-	case "list":
-		if err := listDebugDirs(ctx, manager); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+	case listCommand:
+		if err := listDebugDirs(ctx, out, manager); err != nil {
+			out.Error("Error: %v", err)
 			os.Exit(1)
 		}
+	case "filename":
+		showDebugFilename(out)
 	default:
-		fmt.Fprintf(os.Stderr, "Unknown debug subcommand: %s\n", os.Args[2])
-		printDebugUsage()
+		out.Error("Unknown debug subcommand: %s", os.Args[2])
+		printDebugUsage(out)
 		os.Exit(1)
 	}
 }
 
-func printDebugUsage() {
-	fmt.Fprintf(os.Stderr, `Usage: cc-tools debug <subcommand>
+func printDebugUsage(out *output.Terminal) {
+	out.RawError(`Usage: cc-tools debug <subcommand>
 
 Subcommands:
   enable    Enable debug logging for the current directory
   disable   Disable debug logging for the current directory
   status    Show debug status for the current directory
   list      Show all directories with debug logging enabled
+  filename  Print the debug log filename for the current directory
 
 Examples:
   cc-tools debug enable     # Enable debug logging in current directory
   cc-tools debug disable    # Disable debug logging in current directory
   cc-tools debug status     # Check if debug logging is enabled
   cc-tools debug list       # List all directories with debug enabled
+  cc-tools debug filename   # Get the debug log file path for current directory
 `)
 }
 
-func enableDebug(ctx context.Context, manager *debug.Manager) error {
+func enableDebug(ctx context.Context, out *output.Terminal, manager *debug.Manager) error {
 	dir, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("get current directory: %w", err)
@@ -76,14 +87,15 @@ func enableDebug(ctx context.Context, manager *debug.Manager) error {
 		return fmt.Errorf("enable debug: %w", err)
 	}
 
-	fmt.Printf("✓ Debug logging enabled for %s\n", dir)                     //nolint:forbidigo // CLI output
-	fmt.Printf("  Log file: %s\n", logFile)                                 //nolint:forbidigo // CLI output
-	fmt.Printf("\ncc-tools-validate will write debug logs to this file.\n") //nolint:forbidigo // CLI output
+	out.Success("✓ Debug logging enabled for %s", dir)
+	out.Info("  Log file: %s", logFile)
+	_ = out.Write("")
+	out.Info("cc-tools-validate will write debug logs to this file.")
 
 	return nil
 }
 
-func disableDebug(ctx context.Context, manager *debug.Manager) error {
+func disableDebug(ctx context.Context, out *output.Terminal, manager *debug.Manager) error {
 	dir, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("get current directory: %w", err)
@@ -93,12 +105,12 @@ func disableDebug(ctx context.Context, manager *debug.Manager) error {
 		return fmt.Errorf("disable debug: %w", disableErr)
 	}
 
-	fmt.Printf("✓ Debug logging disabled for %s\n", dir) //nolint:forbidigo // CLI output
+	out.Success("✓ Debug logging disabled for %s", dir)
 
 	return nil
 }
 
-func showDebugStatus(ctx context.Context, manager *debug.Manager) error {
+func showDebugStatus(ctx context.Context, out *output.Terminal, manager *debug.Manager) error {
 	dir, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("get current directory: %w", err)
@@ -109,38 +121,59 @@ func showDebugStatus(ctx context.Context, manager *debug.Manager) error {
 		return fmt.Errorf("check debug status: %w", err)
 	}
 
+	list := output.NewListRenderer()
+	items := map[string]string{}
+
 	if enabled {
 		logFile := debug.GetLogFilePath(dir)
-		fmt.Printf("Debug status for %s:\n", dir) //nolint:forbidigo // CLI output
-		fmt.Printf("  Status: ENABLED\n")         //nolint:forbidigo // CLI output
-		fmt.Printf("  Log file: %s\n", logFile)   //nolint:forbidigo // CLI output
+		items["Status"] = "ENABLED"
+		items["Log file"] = logFile
 	} else {
-		fmt.Printf("Debug status for %s:\n", dir) //nolint:forbidigo // CLI output
-		fmt.Printf("  Status: DISABLED\n")        //nolint:forbidigo // CLI output
+		items["Status"] = "DISABLED"
 	}
+
+	_ = out.Write(list.RenderMap(fmt.Sprintf("Debug status for %s:", dir), items))
 
 	return nil
 }
 
-func listDebugDirs(ctx context.Context, manager *debug.Manager) error {
+func listDebugDirs(ctx context.Context, out *output.Terminal, manager *debug.Manager) error {
 	dirs, err := manager.GetEnabledDirs(ctx)
 	if err != nil {
 		return fmt.Errorf("list debug directories: %w", err)
 	}
 
 	if len(dirs) == 0 {
-		fmt.Println("No directories have debug logging enabled") //nolint:forbidigo // CLI output
+		out.Info("No directories have debug logging enabled")
 		return nil
 	}
 
 	sort.Strings(dirs)
 
-	fmt.Println("Directories with debug logging enabled:") //nolint:forbidigo // CLI output
+	list := output.NewListRenderer()
+	groups := make(map[string][]string)
+
 	for _, dir := range dirs {
 		logFile := debug.GetLogFilePath(dir)
-		fmt.Printf("  %s\n", dir)              //nolint:forbidigo // CLI output
-		fmt.Printf("    → Log: %s\n", logFile) //nolint:forbidigo // CLI output
+		debugLogFile := shared.GetDebugLogPathForDir(dir)
+		groups[dir] = []string{
+			fmt.Sprintf("Log: %s", logFile),
+			fmt.Sprintf("Debug: %s", debugLogFile),
+		}
 	}
 
+	_ = out.Write(list.RenderGrouped("Directories with debug logging enabled:", groups))
+
 	return nil
+}
+
+func showDebugFilename(out *output.Terminal) {
+	// Print the debug log filename for the current directory
+	wd, err := os.Getwd()
+	if err != nil {
+		out.Error("Error getting current directory: %v", err)
+		os.Exit(1)
+	}
+	out.Raw(shared.GetDebugLogPathForDir(wd))
+	out.Raw("\n")
 }
