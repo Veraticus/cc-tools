@@ -55,7 +55,7 @@ func TestValidateWithSkipCheck_RealIntegration(t *testing.T) {
 			debug:        true,
 			wantExitCode: 2, // Shows validation pass message even with skips
 			wantInStderr: []string{
-				"Checking skips for directory",
+				"Checking skips for project root",
 			},
 		},
 	}
@@ -130,7 +130,7 @@ func TestCheckSkipsFromInput_Unit(t *testing.T) {
 			}`,
 			debug: true,
 			wantLogs: []string{
-				"Checking skips for directory: /tmp",
+				"Checking skips for project root: /tmp",
 			},
 		},
 		{
@@ -162,7 +162,7 @@ func TestCheckSkipsFromInput_Unit(t *testing.T) {
 			}`,
 			debug: true,
 			wantLogs: []string{
-				"Checking skips for directory: /home/user/project/src",
+				"Checking skips for project root: /home/user/project/src",
 			},
 		},
 	}

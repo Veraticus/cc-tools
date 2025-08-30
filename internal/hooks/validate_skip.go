@@ -7,6 +7,7 @@ import (
 	"io"
 	"path/filepath"
 
+	"github.com/Veraticus/cc-tools/internal/shared"
 	"github.com/Veraticus/cc-tools/internal/skipregistry"
 )
 
@@ -101,10 +102,20 @@ func checkSkipsFromInput(ctx context.Context, stdinData []byte, debug bool, stde
 	}
 
 	// Get directory from file path
-	dir := filepath.Dir(filePath)
+	fileDir := filepath.Dir(filePath)
+
+	// Find the project root - same as we do for discovering lint/test commands
+	projectRoot, err := shared.FindProjectRoot(fileDir, nil)
+	if err != nil {
+		if debug {
+			_, _ = fmt.Fprintf(stderr, "Failed to find project root: %v\n", err)
+		}
+		// If we can't find project root, check the file's directory as fallback
+		projectRoot = fileDir
+	}
 
 	// Convert to absolute path
-	absDir, err := filepath.Abs(dir)
+	absProjectRoot, err := filepath.Abs(projectRoot)
 	if err != nil {
 		if debug {
 			_, _ = fmt.Fprintf(stderr, "Failed to get absolute path: %v\n", err)
@@ -112,20 +123,22 @@ func checkSkipsFromInput(ctx context.Context, stdinData []byte, debug bool, stde
 		return false, false
 	}
 
-	// Check skip registry
+	// Check skip registry for the project root
 	storage := skipregistry.DefaultStorage()
 	registry := skipregistry.NewRegistry(storage)
 
-	skipLint, _ := registry.IsSkipped(ctx, skipregistry.DirectoryPath(absDir), skipregistry.SkipTypeLint)
-	skipTest, _ := registry.IsSkipped(ctx, skipregistry.DirectoryPath(absDir), skipregistry.SkipTypeTest)
+	skipLint, _ := registry.IsSkipped(ctx, skipregistry.DirectoryPath(absProjectRoot), skipregistry.SkipTypeLint)
+	skipTest, _ := registry.IsSkipped(ctx, skipregistry.DirectoryPath(absProjectRoot), skipregistry.SkipTypeTest)
 
 	if debug {
-		_, _ = fmt.Fprintf(stderr, "Checking skips for directory: %s\n", absDir)
+		_, _ = fmt.Fprintf(stderr, "File: %s\n", filePath)
+		_, _ = fmt.Fprintf(stderr, "Project root: %s\n", absProjectRoot)
+		_, _ = fmt.Fprintf(stderr, "Checking skips for project root: %s\n", absProjectRoot)
 		if skipLint {
-			_, _ = fmt.Fprintf(stderr, "Skipping lint for directory: %s\n", absDir)
+			_, _ = fmt.Fprintf(stderr, "Skipping lint for project: %s\n", absProjectRoot)
 		}
 		if skipTest {
-			_, _ = fmt.Fprintf(stderr, "Skipping test for directory: %s\n", absDir)
+			_, _ = fmt.Fprintf(stderr, "Skipping test for project: %s\n", absProjectRoot)
 		}
 	}
 
