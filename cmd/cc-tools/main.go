@@ -40,6 +40,8 @@ func main() {
 		runUnskipCommand()
 	case "debug":
 		runDebugCommand()
+	case "mcp":
+		runMCPCommand()
 	case "version":
 		// Print version to stdout as intended output
 		fmt.Printf("cc-tools %s\n", version) //nolint:forbidigo // CLI output
@@ -64,12 +66,15 @@ Commands:
   skip          Configure skip settings for directories
   unskip        Remove skip settings from directories
   debug         Configure debug logging for directories
+  mcp           Manage Claude MCP servers
   version       Print version information
   help          Show this help message
 
 Examples:
   echo '{"cwd": "/path"}' | cc-tools statusline
   echo '{"file_path": "main.go"}' | cc-tools validate
+  cc-tools mcp list
+  cc-tools mcp enable jira
 `)
 }
 
