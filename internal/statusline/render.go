@@ -679,6 +679,9 @@ func (s *Statusline) getTermWidth(data *CachedData) int {
 
 func (s *Statusline) selectModelIcon() string {
 	icons := []rune(ModelIcons)
+	if s.deps.IconIndex != nil {
+		return string(icons[s.deps.IconIndex(len(icons))])
+	}
 	return string(icons[rand.IntN(len(icons))]) //nolint:gosec // Non-cryptographic randomness is fine for UI
 }
 

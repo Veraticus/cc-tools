@@ -70,6 +70,13 @@ type Dependencies struct {
 	Resolver      *aliases.Resolver
 	CacheDir      string
 	CacheDuration time.Duration
+
+	// IconIndex selects which rune index into ModelIcons is displayed
+	// by selectModelIcon, given the icon count. nil (the production
+	// default) preserves the existing math/rand/v2-based behavior;
+	// golden/scenario tests inject a fixed function (e.g. always 0)
+	// so rendered output is byte-for-byte reproducible.
+	IconIndex func(n int) int
 }
 
 // FileReader interface for reading files.
