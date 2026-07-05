@@ -174,11 +174,14 @@ func TestGitStatus_CorruptCacheReRuns(t *testing.T) {
 
 	// Pre-seed a corrupt cache file at the exact path gitStatus computes
 	// (inside the per-uid subdirectory).
-	dir, ok := ensureGitCacheDir(cacheDir)
+	root, ok := openGitCacheRoot(cacheDir)
 	if !ok {
-		t.Fatal("ensureGitCacheDir failed in a fresh temp dir")
+		t.Fatal("openGitCacheRoot failed in a fresh temp dir")
 	}
-	path := gitStatusCachePath(dir, cwd)
+	if closeErr := root.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	path := filepath.Join(gitCacheSubdir(cacheDir), gitStatusCacheName(cwd))
 	if err := os.WriteFile(path, []byte("not json {"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -237,18 +240,23 @@ func TestGitStatus_EmptyCacheDirSkipsDiskEntirely(t *testing.T) {
 
 // --- per-uid cache-dir hardening ------------------------------------------
 
-func TestEnsureGitCacheDir_CreatesOwnedPrivateSubdir(t *testing.T) {
+// gitCacheSubdir mirrors openGitCacheRoot's per-uid path construction
+// for tests that need to inspect or manipulate the directory from
+// outside the root handle.
+func gitCacheSubdir(cacheDir string) string {
+	return filepath.Join(cacheDir, "cc-tools-"+strconv.Itoa(os.Getuid()))
+}
+
+func TestOpenGitCacheRoot_CreatesOwnedPrivateSubdir(t *testing.T) {
 	cacheDir := t.TempDir()
 
-	dir, ok := ensureGitCacheDir(cacheDir)
+	root, ok := openGitCacheRoot(cacheDir)
 	if !ok {
 		t.Fatal("expected ok=true in a fresh temp dir")
 	}
-	if filepath.Dir(dir) != cacheDir {
-		t.Errorf("subdir %q should live directly inside %q", dir, cacheDir)
-	}
+	defer func() { _ = root.Close() }()
 
-	info, err := os.Lstat(dir)
+	info, err := os.Lstat(gitCacheSubdir(cacheDir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,35 +268,67 @@ func TestEnsureGitCacheDir_CreatesOwnedPrivateSubdir(t *testing.T) {
 	}
 }
 
-func TestEnsureGitCacheDir_RejectsPlantedSymlink(t *testing.T) {
+func TestOpenGitCacheRoot_RejectsPlantedSymlink(t *testing.T) {
 	cacheDir := t.TempDir()
 	target := t.TempDir()
 
 	// An attacker pre-plants a symlink at the exact per-uid path,
 	// pointing at a directory they control.
-	planted := filepath.Join(cacheDir, "cc-tools-"+strconv.Itoa(os.Getuid()))
-	if err := os.Symlink(target, planted); err != nil {
+	if err := os.Symlink(target, gitCacheSubdir(cacheDir)); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, ok := ensureGitCacheDir(cacheDir); ok {
+	if _, ok := openGitCacheRoot(cacheDir); ok {
 		t.Error("a symlink at the per-uid path must disable caching, got ok=true")
 	}
 }
 
-func TestEnsureGitCacheDir_RejectsWrongMode(t *testing.T) {
+func TestOpenGitCacheRoot_RejectsWrongMode(t *testing.T) {
 	cacheDir := t.TempDir()
 
 	// A pre-existing per-uid dir with loose permissions (e.g. created
 	// by something else, or tampered) must not be trusted; MkdirAll
 	// won't tighten an existing directory's mode.
-	pre := filepath.Join(cacheDir, "cc-tools-"+strconv.Itoa(os.Getuid()))
-	if err := os.Mkdir(pre, 0o755); err != nil {
+	if err := os.Mkdir(gitCacheSubdir(cacheDir), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, ok := ensureGitCacheDir(cacheDir); ok {
+	if _, ok := openGitCacheRoot(cacheDir); ok {
 		t.Error("a per-uid dir that isn't mode 0700 must disable caching, got ok=true")
+	}
+}
+
+func TestWriteGitStatusCache_DirSwapCannotRedirectWrite(t *testing.T) {
+	cacheDir := t.TempDir()
+
+	root, ok := openGitCacheRoot(cacheDir)
+	if !ok {
+		t.Fatal("openGitCacheRoot failed in a fresh temp dir")
+	}
+	defer func() { _ = root.Close() }()
+
+	// After verification, an attacker swaps the per-uid dir for a
+	// symlink to a directory they choose. The write must go through
+	// the held handle (openat semantics) into the original,
+	// verified directory — never through the swapped-in symlink.
+	uidDir := gitCacheSubdir(cacheDir)
+	moved := filepath.Join(cacheDir, "moved-aside")
+	if err := os.Rename(uidDir, moved); err != nil {
+		t.Fatal(err)
+	}
+	target := t.TempDir()
+	if err := os.Symlink(target, uidDir); err != nil {
+		t.Fatal(err)
+	}
+
+	name := gitStatusCacheName("/some/project")
+	writeGitStatusCache(root, name, gitState{OK: true, Branch: "main"})
+
+	if _, err := os.Stat(filepath.Join(target, name)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("write followed the swapped-in symlink into the attacker-chosen dir (stat err=%v)", err)
+	}
+	if _, err := os.Stat(filepath.Join(moved, name)); err != nil {
+		t.Errorf("write should land in the originally verified directory: %v", err)
 	}
 }
 

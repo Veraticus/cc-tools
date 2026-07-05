@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -78,67 +79,84 @@ func gitStatus(runner CommandRunner, cacheDir string, ttl time.Duration, cwd str
 		return runGitStatus(runner, cwd)
 	}
 
-	dir, dirTrusted := ensureGitCacheDir(cacheDir)
-	if !dirTrusted {
+	root, trusted := openGitCacheRoot(cacheDir)
+	if !trusted {
 		return runGitStatus(runner, cwd)
 	}
+	defer func() { _ = root.Close() }()
 
-	cachePath := gitStatusCachePath(dir, cwd)
-	if state, ok := readFreshGitStatusCache(cachePath, ttl, now); ok {
+	name := gitStatusCacheName(cwd)
+	if state, fresh := readFreshGitStatusCache(root, name, ttl, now); fresh {
 		return state
 	}
 
 	state := runGitStatus(runner, cwd)
 	if state.OK {
-		writeGitStatusCache(cachePath, state)
+		writeGitStatusCache(root, name, state)
 	}
 	return state
 }
 
-// ensureGitCacheDir creates (or verifies) the per-uid subdirectory of
-// cacheDir that all git-status cache files live in. CacheDir is
-// typically a shared, world-writable location (/dev/shm, /tmp) where
-// the cache filename is predictable, so another local user could
-// pre-plant a symlink at that path and redirect our 0600 write onto a
-// file they choose. Confining every write to a directory that is (a)
-// a real directory, not a symlink, (b) owned by this uid, and (c)
-// mode 0700 closes that off. Any failure to establish those three
-// properties returns ok=false, which disables caching for the call —
-// the statusline just runs git fresh, exactly as with CacheDir "".
-func ensureGitCacheDir(cacheDir string) (string, bool) {
+// openGitCacheRoot creates (or verifies) the per-uid subdirectory of
+// cacheDir that all git-status cache files live in, and returns it as
+// an opened os.Root handle. CacheDir is typically a shared,
+// world-writable location (/dev/shm, /tmp) where the cache filename is
+// predictable, so another local user could pre-plant a symlink at that
+// path and redirect our 0600 write onto a file they choose. Confining
+// every access to a directory that is (a) a real directory, not a
+// symlink, (b) owned by this uid, and (c) mode 0700 closes that off —
+// and doing all subsequent reads/writes through the returned handle
+// (openat semantics) means the verification and the file operations
+// target the same inode: swapping the directory for a symlink after
+// the check cannot redirect them, even in a non-sticky parent. The
+// ownership/mode checks fstat the handle actually held, not a
+// re-resolved path. Any failure returns ok=false, which disables
+// caching for the call — the statusline just runs git fresh, exactly
+// as with CacheDir "". The caller must Close the returned root.
+func openGitCacheRoot(cacheDir string) (*os.Root, bool) {
 	dir := filepath.Join(cacheDir, fmt.Sprintf("cc-tools-%d", os.Getuid()))
 	if err := os.MkdirAll(dir, gitCacheDirPerm); err != nil {
-		return "", false
+		return nil, false
 	}
 
 	// Lstat, not Stat: a planted symlink to a directory must be seen
 	// as a symlink and rejected, not resolved through.
-	info, err := os.Lstat(dir)
+	if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
+		return nil, false
+	}
+
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, false
+	}
+	info, err := root.Stat(".")
 	if err != nil || !info.IsDir() || info.Mode().Perm() != gitCacheDirPerm {
-		return "", false
+		_ = root.Close()
+		return nil, false
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || int(stat.Uid) != os.Getuid() {
-		return "", false
+		_ = root.Close()
+		return nil, false
 	}
-	return dir, true
+	return root, true
 }
 
-// gitStatusCachePath returns the cache file path for cwd inside
-// cacheDir: "gitstatus-<hex sha256 prefix of cwd>.json". Hashing (vs.
-// e.g. sanitizing cwd into a filename) keeps the name filesystem-safe
+// gitStatusCacheName returns the cache file name for cwd:
+// "gitstatus-<hex sha256 prefix of cwd>.json". Hashing (vs. e.g.
+// sanitizing cwd into a filename) keeps the name filesystem-safe
 // regardless of what characters cwd contains.
-func gitStatusCachePath(cacheDir, cwd string) string {
+func gitStatusCacheName(cwd string) string {
 	sum := sha256.Sum256([]byte(cwd))
-	return filepath.Join(cacheDir, "gitstatus-"+hex.EncodeToString(sum[:gitCacheHashBytes])+".json")
+	return "gitstatus-" + hex.EncodeToString(sum[:gitCacheHashBytes]) + ".json"
 }
 
-// readFreshGitStatusCache reads path and reports (state, true) only if
-// it exists, is younger than ttl relative to now, and decodes as valid
-// JSON. Any other outcome — missing, stale, or corrupt — is a cache
-// miss: (gitState{}, false).
-func readFreshGitStatusCache(path string, ttl time.Duration, now time.Time) (gitState, bool) {
-	info, err := os.Stat(path)
+// readFreshGitStatusCache reads name from the verified cache root and
+// reports (state, true) only if it exists, is younger than ttl
+// relative to now, and decodes as valid JSON. Any other outcome —
+// missing, stale, or corrupt — is a cache miss: (gitState{}, false).
+func readFreshGitStatusCache(root *os.Root, name string, ttl time.Duration, now time.Time) (gitState, bool) {
+	info, err := root.Stat(name)
 	if err != nil {
 		return gitState{}, false
 	}
@@ -146,7 +164,12 @@ func readFreshGitStatusCache(path string, ttl time.Duration, now time.Time) (git
 		return gitState{}, false
 	}
 
-	data, err := os.ReadFile(path) //nolint:gosec // path is CacheDir + a hash of cwd, not user input
+	f, err := root.Open(name)
+	if err != nil {
+		return gitState{}, false
+	}
+	data, err := io.ReadAll(f)
+	_ = f.Close()
 	if err != nil {
 		return gitState{}, false
 	}
@@ -158,16 +181,21 @@ func readFreshGitStatusCache(path string, ttl time.Duration, now time.Time) (git
 	return state, true
 }
 
-// writeGitStatusCache best-effort writes state as JSON to path. A
-// write failure (cacheDir missing, unwritable, etc.) isn't fatal — the
-// freshly computed state is returned to gitStatus's caller regardless
-// — so the error is deliberately not propagated any further than this.
-func writeGitStatusCache(path string, state gitState) {
+// writeGitStatusCache best-effort writes state as JSON to name inside
+// the verified cache root. A write failure isn't fatal — the freshly
+// computed state is returned to gitStatus's caller regardless — so the
+// error is deliberately not propagated any further than this.
+func writeGitStatusCache(root *os.Root, name string, state gitState) {
 	data, err := json.Marshal(state)
 	if err != nil {
 		return
 	}
-	_ = os.WriteFile(path, data, gitCacheFilePerm)
+	f, err := root.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, gitCacheFilePerm)
+	if err != nil {
+		return
+	}
+	_, _ = f.Write(data)
+	_ = f.Close()
 }
 
 // runGitStatus runs `git -C cwd status --porcelain=v2 --branch` under

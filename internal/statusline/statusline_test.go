@@ -588,8 +588,8 @@ func TestStatuslineGenerate(t *testing.T) {
 				CommandRunner: NewMockCommandRunner(),
 				EnvReader:     NewMockEnvReader(),
 				TerminalWidth: &MockTerminalWidth{width: 210},
-				CacheDir:      "/tmp",
-				CacheDuration: 0, // Disable cache for tests
+				CacheDir:      "", // disable caching: tests must not write to the real filesystem
+				CacheDuration: 0,
 			}
 
 			// Apply test-specific setup
@@ -672,7 +672,7 @@ func TestContextBar(t *testing.T) {
 		CommandRunner: NewMockCommandRunner(),
 		EnvReader:     NewMockEnvReader(),
 		TerminalWidth: &MockTerminalWidth{width: 210},
-		CacheDir:      "/tmp",
+		CacheDir:      "", // disable caching: tests must not write to the real filesystem
 		CacheDuration: 0,
 	}
 
