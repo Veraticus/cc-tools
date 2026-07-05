@@ -118,6 +118,13 @@ type Dependencies struct {
 	// golden/scenario tests inject a fixed function (e.g. always 0)
 	// so rendered output is byte-for-byte reproducible.
 	IconIndex func(n int) int
+
+	// Now returns the current time, used by the rate-limit chip's pace
+	// arrow and countdown math (comparing a window's resets_at against
+	// "now"). nil (the production default) uses time.Now() at the
+	// point of use; scenarios/golden tests inject a fixed function so
+	// rendered output never depends on wall-clock time.
+	Now func() time.Time
 }
 
 // FileReader interface for reading files.

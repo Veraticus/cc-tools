@@ -26,6 +26,12 @@ const (
 	HostnameIcon = " "
 	// ContextIcon is the icon for context bar display.
 	ContextIcon = " "
+	// RateLimitIcon is the icon for the rate-limit chip.
+	RateLimitIcon = "󰜎 "
+	// CostIcon is the icon for the cost chip.
+	CostIcon = "󰈐 "
+	// AlarmIcon is the icon for the extra-usage alarm chip.
+	AlarmIcon = "󰀦 "
 	// ModelIcons contains various icons for model display.
 	ModelIcons = "󰚩󱚝󱚟󱚡󱚣󱚥"
 

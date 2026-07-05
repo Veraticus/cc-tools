@@ -737,3 +737,82 @@ func TestNarrowChipColorsRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// --- Alarm chip in the narrow chain ---
+
+func TestGatherNarrowChips_AlarmImmediatelyAfterContext(t *testing.T) {
+	deps := depsFor(t, "")
+	data := &CachedData{
+		CurrentDir:     "/tmp/x",
+		UsedPercentage: 42,
+		RateLimits: &RateLimitsInput{
+			FiveHour: &RateLimitWindow{UsedPercentage: 100, ResetsAt: 1000},
+		},
+		Cost: CostInput{TotalCostUSD: 4.12},
+	}
+	chips := gatherNarrowChips(deps, data)
+	if len(chips) < 3 {
+		t.Fatalf("expected at least 3 chips (dir, context, alarm), got %+v", chips)
+	}
+	if chips[1].Kind != kindContext {
+		t.Fatalf("expected context chip at index 1, got %+v", chips[1])
+	}
+	if chips[2].Kind != kindAlarm {
+		t.Fatalf("expected alarm chip immediately after context at index 2, got %+v", chips[2])
+	}
+	if chips[2].Color != "red" {
+		t.Errorf("alarm chip color = %q, want red", chips[2].Color)
+	}
+	if !strings.Contains(chips[2].Body, "$4.12") {
+		t.Errorf("alarm chip body should contain '$4.12', got %q", chips[2].Body)
+	}
+	if !strings.Contains(chips[2].Body, AlarmIcon) {
+		t.Errorf("alarm chip body should contain AlarmIcon, got %q", chips[2].Body)
+	}
+}
+
+func TestGatherNarrowChips_NoAlarmWhenBelowThreshold(t *testing.T) {
+	deps := depsFor(t, "")
+	data := &CachedData{
+		CurrentDir:     "/tmp/x",
+		UsedPercentage: 42,
+		RateLimits: &RateLimitsInput{
+			FiveHour: &RateLimitWindow{UsedPercentage: 23, ResetsAt: 1000},
+		},
+	}
+	chips := gatherNarrowChips(deps, data)
+	for _, c := range chips {
+		if c.Kind == kindAlarm {
+			t.Errorf("no alarm chip expected when used%% < 100, got chips %+v", chips)
+		}
+	}
+}
+
+// TestAlarmChip_SurvivesToWidth50 is the epic's headline narrow-mode
+// requirement: at the phone-narrow floor (50 cols), with dir + context
+// + alarm all wanting space, the alarm chip must still render in
+// full — it never drops, per the epic's "never muted under width
+// pressure" rule. Dir truncation absorbs the pressure instead.
+func TestAlarmChip_SurvivesToWidth50(t *testing.T) {
+	s := newTestStatusline(t, newTestResolver(t, ""))
+	data := &CachedData{
+		CurrentDir:     "/workspace/demo-project",
+		UsedPercentage: 42,
+		RateLimits: &RateLimitsInput{
+			FiveHour: &RateLimitWindow{UsedPercentage: 100, ResetsAt: 1000},
+		},
+		Cost: CostInput{TotalCostUSD: 4.12},
+	}
+	out := s.renderNarrow(data, 50)
+	stripped := stripAnsi(out)
+
+	if !strings.Contains(stripped, "$4.12") {
+		t.Errorf("alarm chip should survive to width 50; got %q", stripped)
+	}
+	if !strings.Contains(out, s.colors.RedBG()) {
+		t.Errorf("alarm chip should use red bg escape at width 50; got %q", out)
+	}
+	if w := runewidth.StringWidth(stripped); w != 50 {
+		t.Errorf("renderNarrow width = %d, want 50", w)
+	}
+}

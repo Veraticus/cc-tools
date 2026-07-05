@@ -5,6 +5,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/Veraticus/cc-tools/internal/aliases"
 	"github.com/mattn/go-runewidth"
@@ -413,18 +414,267 @@ func (s *Statusline) buildMiddleSection(data *CachedData, width int) string {
 		return ""
 	}
 
-	if data.UsedPercentage <= 0 {
-		return strings.Repeat(" ", width)
+	var contextEl string
+	if data.UsedPercentage > 0 {
+		contextEl = s.buildContextElement(data.UsedPercentage)
 	}
 
-	element := s.buildContextElement(data.UsedPercentage)
-	elementWidth := runewidth.StringWidth(stripAnsi(element))
-	if width < elementWidth {
+	chip := s.buildMiddleChip(middleChipKind(data), data)
+
+	cluster, clusterWidth := assembleMiddleCluster(contextEl, chip, width)
+	if clusterWidth == 0 || width < clusterWidth {
 		// Doesn't fit even centered — blank, same as today.
 		return strings.Repeat(" ", width)
 	}
 
-	return s.centerElement(element, elementWidth, width)
+	return s.centerElement(cluster, clusterWidth, width)
+}
+
+// assembleMiddleCluster joins the (optional) context element and the
+// (optional) middle chip with one space when both are present, so the
+// two render as a single centered cluster. If the combined cluster
+// doesn't fit `width`, the context ELEMENT is dropped first and the
+// chip alone is returned — mirroring narrow mode's drop priority,
+// where the rate-limit/cost/alarm chip is the more urgent signal and
+// the context element is comparatively decorative. Pure function of
+// pre-rendered ANSI strings; returns the joined string and its
+// stripped visible width.
+func assembleMiddleCluster(contextEl, chip string, width int) (string, int) {
+	joinWidth := func(a, b string) (string, int) {
+		var cluster string
+		switch {
+		case a != "" && b != "":
+			cluster = a + " " + b
+		case a != "":
+			cluster = a
+		default:
+			cluster = b
+		}
+		return cluster, runewidth.StringWidth(stripAnsi(cluster))
+	}
+
+	cluster, w := joinWidth(contextEl, chip)
+	if contextEl == "" || w <= width {
+		return cluster, w
+	}
+	return joinWidth("", chip)
+}
+
+// chipKind enumerates which single chip (if any) accompanies the
+// context element in the wide-mode middle cluster. Exactly one of
+// {alarm, rate-limit, cost} renders alongside the context element —
+// never more than one.
+type chipKind int
+
+const (
+	chipNone chipKind = iota
+	chipAlarm
+	chipRateLimit
+	chipCost
+)
+
+// middleChipKind decides which chip (if any) renders in the wide
+// middle cluster, given the parsed rate-limit/cost data. An active
+// 5h-window alarm (used% >= 100) always wins over the plain
+// rate-limit chip; rate-limits, when reported at all, always win over
+// the cost-only chip (RateLimits is nil precisely when the session
+// isn't a subscription session, per statusline.go's Input.RateLimits
+// doc comment).
+func middleChipKind(data *CachedData) chipKind {
+	if data.RateLimits != nil {
+		if data.RateLimits.FiveHour != nil && data.RateLimits.FiveHour.UsedPercentage >= 100 {
+			return chipAlarm
+		}
+		return chipRateLimit
+	}
+	if data.Cost.TotalCostUSD > 0 {
+		return chipCost
+	}
+	return chipNone
+}
+
+// buildMiddleChip renders the chip selected by kind, or "" for
+// chipNone.
+func (s *Statusline) buildMiddleChip(kind chipKind, data *CachedData) string {
+	switch kind {
+	case chipAlarm:
+		return s.buildAlarmChip(data.Cost)
+	case chipRateLimit:
+		return s.buildRateLimitChip(data.RateLimits, s.now())
+	case chipCost:
+		return s.buildCostChip(data.Cost)
+	case chipNone:
+		return ""
+	default:
+		return ""
+	}
+}
+
+// now returns the current time for rate-limit chip math: deps.Now
+// when injected (scenarios/tests), else the real wall clock.
+func (s *Statusline) now() time.Time {
+	if s.deps != nil && s.deps.Now != nil {
+		return s.deps.Now()
+	}
+	return time.Now()
+}
+
+// Fixed rolling-window lengths for the rate-limit chip's pace math.
+// Claude Code's rate-limit windows are exactly five hours and seven
+// days — not derived from the payload.
+const (
+	rateLimitFiveHourLen = 5 * time.Hour
+	rateLimitSevenDayLen = 7 * 24 * time.Hour
+	// paceArrowSlackPct is the +/- band (percentage points) around the
+	// expected usage at which no pace arrow renders — usage close
+	// enough to schedule isn't worth flagging.
+	paceArrowSlackPct = 5.0
+)
+
+// rlWindowSpec pairs a present rate-limit window with its label and
+// fixed window length, so buildRateLimitBody can iterate whichever of
+// five_hour/seven_day were actually reported.
+type rlWindowSpec struct {
+	label  string
+	win    *RateLimitWindow
+	length time.Duration
+}
+
+// buildRateLimitBody renders the rate-limit chip's text content:
+// `5h NN%[arrow] · 7d NN%[arrow] (countdown)` for whichever windows
+// are present. The countdown in parens is appended once, for the
+// reset of whichever present window has the higher used percentage.
+func buildRateLimitBody(rl *RateLimitsInput, now time.Time) string {
+	const maxRateLimitWindows = 2 // five_hour + seven_day, the only two windows that exist
+	windows := make([]rlWindowSpec, 0, maxRateLimitWindows)
+	if rl.FiveHour != nil {
+		windows = append(windows, rlWindowSpec{"5h", rl.FiveHour, rateLimitFiveHourLen})
+	}
+	if rl.SevenDay != nil {
+		windows = append(windows, rlWindowSpec{"7d", rl.SevenDay, rateLimitSevenDayLen})
+	}
+
+	parts := make([]string, 0, len(windows))
+	for _, w := range windows {
+		arrow := paceArrow(w.win, w.length, now)
+		parts = append(parts, fmt.Sprintf("%s %.0f%%%s", w.label, w.win.UsedPercentage, arrow))
+	}
+
+	body := RateLimitIcon + strings.Join(parts, " · ")
+
+	if len(windows) > 0 {
+		highest := windows[0]
+		for _, w := range windows[1:] {
+			if w.win.UsedPercentage > highest.win.UsedPercentage {
+				highest = w
+			}
+		}
+		body += " (" + formatCountdown(highest.win.ResetsAt, now) + ")"
+	}
+
+	return body
+}
+
+// paceArrow compares a window's actual used% against the used%
+// expected if usage were spread evenly across the window's elapsed
+// time, returning "⇡" (ahead of pace), "⇣" (behind pace), or "" when
+// within paceArrowSlackPct of expected. A resets_at at or before now
+// is a stale payload — the window has (or should have) already reset
+// — so no arrow is shown rather than risk a misleading comparison.
+func paceArrow(win *RateLimitWindow, windowLen time.Duration, now time.Time) string {
+	resetsAt := time.Unix(win.ResetsAt, 0)
+	if !resetsAt.After(now) {
+		return ""
+	}
+
+	remaining := resetsAt.Sub(now)
+	elapsed := windowLen - remaining
+	const percentDivisor = 100.0
+	expectedPct := float64(elapsed) / float64(windowLen) * percentDivisor
+
+	switch {
+	case win.UsedPercentage > expectedPct+paceArrowSlackPct:
+		return "⇡"
+	case win.UsedPercentage < expectedPct-paceArrowSlackPct:
+		return "⇣"
+	default:
+		return ""
+	}
+}
+
+// formatCountdown renders the time remaining until resetsAt at
+// glanceable precision, tiered by magnitude: "2d0h" (days + hours) at
+// 24h and above, "3h47m" (hours + minutes) from 1h up to 24h, and
+// bare "23m" below an hour. No seconds, no zero-padding. Negative
+// remaining time (resetsAt at or before now) clamps to "0m".
+func formatCountdown(resetsAt int64, now time.Time) string {
+	remaining := time.Unix(resetsAt, 0).Sub(now)
+	if remaining < 0 {
+		remaining = 0
+	}
+	const day = 24 * time.Hour
+	switch {
+	case remaining >= day:
+		days := int(remaining / day)
+		hours := int((remaining % day) / time.Hour)
+		return fmt.Sprintf("%dd%dh", days, hours)
+	case remaining >= time.Hour:
+		hours := int(remaining / time.Hour)
+		minutes := int((remaining % time.Hour) / time.Minute)
+		return fmt.Sprintf("%dh%dm", hours, minutes)
+	default:
+		return fmt.Sprintf("%dm", int(remaining/time.Minute))
+	}
+}
+
+// buildRateLimitChip renders the rate-limit powerline chip on a
+// sapphire background.
+func (s *Statusline) buildRateLimitChip(rl *RateLimitsInput, now time.Time) string {
+	return s.buildPowerlineChip(buildRateLimitBody(rl, now), colorSapphire)
+}
+
+// buildCostChip renders the cost powerline chip (`CostIcon $X.XX`, two
+// decimals always) on a sapphire background.
+func (s *Statusline) buildCostChip(cost CostInput) string {
+	body := fmt.Sprintf("%s$%.2f", CostIcon, cost.TotalCostUSD)
+	return s.buildPowerlineChip(body, colorSapphire)
+}
+
+// buildAlarmChip renders the extra-usage alarm powerline chip
+// (`AlarmIcon EXTRA $X.XX`) on a red background — the same red as the
+// context bar's >=80% state. This is an emergency signal: it must
+// never be muted, downgraded, or omitted under width pressure.
+func (s *Statusline) buildAlarmChip(cost CostInput) string {
+	body := fmt.Sprintf("%sEXTRA $%.2f", AlarmIcon, cost.TotalCostUSD)
+	return s.buildPowerlineChip(body, colorRed)
+}
+
+// buildPowerlineChip renders a LeftCurve+body+RightCurve powerline
+// group for the middle-cluster chips: curve fg = chip color with no
+// bg set, body bg = chip color with BaseFG text — the same
+// curve/body relationship buildContextElement uses.
+func (s *Statusline) buildPowerlineChip(body, colorName string) string {
+	fgColor := s.getColorFG(colorName)
+	bgColor := s.getColorBG(colorName)
+
+	var sb strings.Builder
+
+	sb.WriteString(fgColor)
+	sb.WriteString(LeftCurve)
+	sb.WriteString(s.colors.NC())
+
+	sb.WriteString(bgColor)
+	sb.WriteString(s.colors.BaseFG())
+	sb.WriteString(" ")
+	sb.WriteString(body)
+	sb.WriteString(" ")
+	sb.WriteString(s.colors.NC())
+
+	sb.WriteString(fgColor)
+	sb.WriteString(RightCurve)
+	sb.WriteString(s.colors.NC())
+
+	return sb.String()
 }
 
 // centerElement centers a pre-rendered element of elementWidth visible

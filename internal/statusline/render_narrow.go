@@ -33,6 +33,7 @@ const (
 const (
 	kindDir     = "dir"
 	kindContext = "context"
+	kindAlarm   = "alarm"
 	kindBranch  = "branch"
 	kindEnv     = "env"
 )
@@ -80,16 +81,20 @@ type narrowChip struct {
 }
 
 // narrowChipCap is the maximum chip count for the narrow chain
-// (dir + context + branch + env). Used to pre-size the chip slice.
-const narrowChipCap = 4
+// (dir + context + alarm + branch + env). Used to pre-size the chip
+// slice.
+const narrowChipCap = 5
 
 // gatherNarrowChips returns the chip list for narrow mode in display
-// order: dir, context, optional branch, optional env. The context
-// chip is always present (UsedPercentage is always available, even
-// if 0). Branch is included when CachedData.GitBranch is non-empty
-// AND passes the validBranchName check (upstream cache layer already
-// resolves .git/HEAD; this layer rejects names that would inject
-// terminal escapes).
+// order: dir, context, optional alarm, optional branch, optional env.
+// The context chip is always present (UsedPercentage is always
+// available, even if 0). The alarm chip (extra-usage emergency
+// signal) is included immediately after context when middleChipKind
+// classifies the data as chipAlarm — the same decision the wide-mode
+// middle cluster uses. Branch is included when CachedData.GitBranch
+// is non-empty AND passes the validBranchName check (upstream cache
+// layer already resolves .git/HEAD; this layer rejects names that
+// would inject terminal escapes).
 //
 // Env chip is a SINGLE chip from one of AWS / gcloud / k8s, in that
 // priority order, first non-empty wins. All chip bodies are passed
@@ -112,6 +117,14 @@ func gatherNarrowChips(deps *Dependencies, data *CachedData) []narrowChip {
 		Body:  buildNarrowContextBody(pct),
 		Kind:  kindContext,
 	})
+
+	if middleChipKind(data) == chipAlarm {
+		chips = append(chips, narrowChip{
+			Color: colorRed,
+			Body:  buildNarrowAlarmBody(data.Cost),
+			Kind:  kindAlarm,
+		})
+	}
 
 	if data.GitBranch != "" && validNarrowBranchName.MatchString(data.GitBranch) {
 		chips = append(chips, narrowChip{
@@ -143,6 +156,14 @@ func buildNarrowContextBody(pct int) string {
 	return strings.Repeat("▰", filled) +
 		strings.Repeat("▱", empty) +
 		fmt.Sprintf(" %d%%", pct)
+}
+
+// buildNarrowAlarmBody renders the narrow-mode alarm chip body:
+// AlarmIcon + "$X.XX". Unlike the wide-mode alarm chip, there's no
+// room for the "EXTRA" label at phone widths — the red background
+// plus the alarm icon carry the "extra usage" meaning on their own.
+func buildNarrowAlarmBody(cost CostInput) string {
+	return fmt.Sprintf("%s$%.2f", AlarmIcon, cost.TotalCostUSD)
 }
 
 // firstEnvChip returns the highest-priority env chip available, or
@@ -315,7 +336,11 @@ const (
 // (center-aligned content + colored padding) to absorb it. When chips
 // overflow, they're dropped in priority order:
 // env → branch → truncate-dir-to-leaf → drop-context → truncate-dir
-// with ellipsis.
+// with ellipsis. The alarm chip (kindAlarm) is deliberately absent
+// from this drop order — dropOneNarrowChip never removes it, so it
+// survives even the drop-context step and only ever loses width
+// pressure to the dir chip's own truncation. It is an emergency
+// signal (epic requirement) and must never be muted or downgraded.
 //
 // Pure function: returns a new slice; input is not mutated.
 func fitNarrowChain(chips []narrowChip, budget int) []narrowChip {

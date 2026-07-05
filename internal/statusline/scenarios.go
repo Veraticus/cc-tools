@@ -39,14 +39,16 @@ const scenarioModelDisplay = "Sonnet 4.5"
 
 // Scenarios returns the full statusline rendering matrix: every
 // combination of terminal width, context-window percentage, git
-// state, and env-chip state. Each scenario is fully self-contained and
-// renders deterministically (IconIndex pins the model icon; no real
-// filesystem, env, or subprocess access is used).
+// state, and env-chip state, PLUS a rate-limit dimension (see
+// buildRLScenario) layered on as a subset rather than a full
+// cross-product. Each scenario is fully self-contained and renders
+// deterministically (IconIndex pins the model icon, Now pins "now"
+// for rate-limit pace/countdown math; no real filesystem, env, or
+// subprocess access is used).
 //
-// NOTE: this matrix will be EXTENDED with rate-limit states {absent,
-// normal, extra-usage} by a later epic task once rate_limits parsing
-// exists. Keep additions here table-driven so that extension is a
-// straightforward new axis rather than a rewrite.
+// The rate-limit dimension was extended into this matrix now that
+// rate-limit/cost/alarm chips render in the middle cluster — this
+// replaces the earlier placeholder note that it would land "later".
 func Scenarios() []Scenario {
 	widths := []int{200, 120, 80, 50}
 	contexts := []float64{0, 42, 85, 97}
@@ -63,7 +65,104 @@ func Scenarios() []Scenario {
 			}
 		}
 	}
+
+	// Rate-limit dimension: a SUBSET of {width} x {rate-limit state},
+	// held to context=42/git-none/env-none rather than crossed with
+	// every git/env combination — those axes are already covered
+	// above and are orthogonal to the middle-cluster chip logic.
+	rlWidths := []int{200, 80, 50}
+	rlStates := []string{"rl-normal", "rl-extra", "rl-cost"}
+	for _, width := range rlWidths {
+		for _, rlState := range rlStates {
+			scenarios = append(scenarios, buildRLScenario(width, rlState))
+		}
+	}
+
 	return scenarios
+}
+
+// scenarioFixedNow is the reference "now" every rate-limit scenario's
+// window ResetsAt values are computed relative to. Injected via
+// Dependencies.Now so the pace-arrow and countdown math in the
+// rate-limit/alarm chips never depends on wall-clock time — goldens
+// stay stable forever.
+func scenarioFixedNow() time.Time {
+	const fixedUnixSeconds = 1751700000
+	return time.Unix(fixedUnixSeconds, 0)
+}
+
+// Fixture values for buildRLScenario's rate-limit/cost scenarios.
+// Named (rather than inlined) so golangci-lint's mnd check passes and
+// so the "rl-extra" cost figure only appears once.
+const (
+	rlScenarioCtx           = 42
+	rlNormalFiveHourPct     = 23
+	rlNormalSevenDayPct     = 41
+	rlExtraFiveHourPct      = 100.0
+	rlExtraCostUSD          = 4.12
+	rlNormalFiveHourResetIn = 3*time.Hour + 47*time.Minute
+	rlNormalSevenDayResetIn = 2 * 24 * time.Hour
+	rlExtraFiveHourResetIn  = 1 * time.Hour
+)
+
+// buildRLScenario constructs one Scenario for the rate-limit
+// dimension: fixed context=42, git-none, env-none, varying only width
+// and rlState. rlState selects one of:
+//   - "rl-normal": both windows present, comfortably under the alarm
+//     threshold (5h=23% resets in 3h47m, 7d=41% resets in 2d).
+//   - "rl-extra": five_hour at the alarm threshold (100%, resets in
+//     1h) with a nonzero cost, so both the alarm decision and its
+//     dollar amount are exercised.
+//   - "rl-cost": no rate_limits at all, cost-only, exercising the
+//     cost chip.
+func buildRLScenario(width int, rlState string) Scenario {
+	name := fmt.Sprintf("w%d_ctx%d_%s", width, rlScenarioCtx, rlState)
+
+	input := Input{}
+	input.Model.DisplayName = scenarioModelDisplay
+	input.ContextWindow.UsedPercentage = rlScenarioCtx
+	input.Workspace.ProjectDir = scenarioProjectDir
+
+	now := scenarioFixedNow()
+	switch rlState {
+	case "rl-normal":
+		input.RateLimits = &RateLimitsInput{
+			FiveHour: &RateLimitWindow{
+				UsedPercentage: rlNormalFiveHourPct,
+				ResetsAt:       now.Add(rlNormalFiveHourResetIn).Unix(),
+			},
+			SevenDay: &RateLimitWindow{
+				UsedPercentage: rlNormalSevenDayPct,
+				ResetsAt:       now.Add(rlNormalSevenDayResetIn).Unix(),
+			},
+		}
+	case "rl-extra":
+		input.RateLimits = &RateLimitsInput{
+			FiveHour: &RateLimitWindow{
+				UsedPercentage: rlExtraFiveHourPct,
+				ResetsAt:       now.Add(rlExtraFiveHourResetIn).Unix(),
+			},
+		}
+		input.Cost = CostInput{TotalCostUSD: rlExtraCostUSD}
+	case "rl-cost":
+		input.Cost = CostInput{TotalCostUSD: rlExtraCostUSD}
+	}
+
+	fr := newFixedFileReader()
+	env := newFixedEnvReader(map[string]string{"HOME": scenarioHome})
+
+	deps := &Dependencies{
+		FileReader:    fr,
+		CommandRunner: newFixedCommandRunner(),
+		EnvReader:     env,
+		TerminalWidth: fixedTerminalWidth(width),
+		CacheDir:      "/tmp",
+		CacheDuration: 0,
+		IconIndex:     func(int) int { return 0 },
+		Now:           scenarioFixedNow,
+	}
+
+	return Scenario{Name: name, Width: width, Input: input, Deps: deps}
 }
 
 // buildScenario constructs one Scenario for the given axis values.
