@@ -88,6 +88,41 @@ func TestScanTranscriptGoalState(t *testing.T) {
 	}
 }
 
+// assertLiveTask checks every field of a LiveTask against its expected
+// value in one call, keeping per-field branching out of the calling test
+// function (which otherwise trips cyclop's complexity ceiling once several
+// full-field assertions accumulate across subtests).
+func assertLiveTask(
+	t *testing.T,
+	task LiveTask,
+	wantID string,
+	wantKind TaskKind,
+	wantDescription string,
+	wantDetail string,
+	wantLaunchedAt time.Time,
+	wantOutputFile string,
+) {
+	t.Helper()
+	if task.ID != wantID {
+		t.Errorf("ID = %q, want %q", task.ID, wantID)
+	}
+	if task.Kind != wantKind {
+		t.Errorf("Kind = %v, want %v", task.Kind, wantKind)
+	}
+	if task.Description != wantDescription {
+		t.Errorf("Description = %q, want %q", task.Description, wantDescription)
+	}
+	if task.Detail != wantDetail {
+		t.Errorf("Detail = %q, want %q", task.Detail, wantDetail)
+	}
+	if !task.LaunchedAt.Equal(wantLaunchedAt) {
+		t.Errorf("LaunchedAt = %v, want %v", task.LaunchedAt, wantLaunchedAt)
+	}
+	if task.OutputFile != wantOutputFile {
+		t.Errorf("OutputFile = %q, want %q", task.OutputFile, wantOutputFile)
+	}
+}
+
 func TestScanTranscriptLiveTasks(t *testing.T) {
 	wantLaunchedAt := func(ts string) time.Time {
 		parsed, err := time.Parse(time.RFC3339Nano, ts)
@@ -110,42 +145,20 @@ func TestScanTranscriptLiveTasks(t *testing.T) {
 			t.Fatalf("len(tasks) = %d, want 2: %+v", len(tasks), tasks)
 		}
 
-		agentTask := tasks[0]
-		if agentTask.ID != "agenttestid01" {
-			t.Errorf("agentTask.ID = %q, want agenttestid01", agentTask.ID)
-		}
-		if agentTask.Kind != TaskAgent {
-			t.Errorf("agentTask.Kind = %v, want TaskAgent", agentTask.Kind)
-		}
-		if agentTask.Description != "Research task placeholder" {
-			t.Errorf("agentTask.Description = %q, want %q", agentTask.Description, "Research task placeholder")
-		}
 		wantPrompt := "Investigate the current notification hook setup and summarize how Stop and Notification hooks interact with subagents, citing official docs."
-		if agentTask.Detail != wantPrompt {
-			t.Errorf("agentTask.Detail = %q, want %q", agentTask.Detail, wantPrompt)
-		}
-		wantAgentLaunchedAt := wantLaunchedAt("2026-07-05T05:25:54.323Z")
-		if !agentTask.LaunchedAt.Equal(wantAgentLaunchedAt) {
-			t.Errorf("agentTask.LaunchedAt = %v, want %v", agentTask.LaunchedAt, wantAgentLaunchedAt)
-		}
+		assertLiveTask(
+			t, tasks[0],
+			"agenttestid01", TaskAgent, "Research task placeholder", wantPrompt,
+			wantLaunchedAt("2026-07-05T05:25:54.323Z"),
+			"/tmp/claude-1000/-home-user-project/anon-session-0001/tasks/agenttestid01.output",
+		)
 
-		bashTask := tasks[1]
-		if bashTask.ID != "bgtaskid001" {
-			t.Errorf("bashTask.ID = %q, want bgtaskid001", bashTask.ID)
-		}
-		if bashTask.Kind != TaskBash {
-			t.Errorf("bashTask.Kind = %v, want TaskBash", bashTask.Kind)
-		}
-		if bashTask.Description != "Run full build in background" {
-			t.Errorf("bashTask.Description = %q, want %q", bashTask.Description, "Run full build in background")
-		}
-		if bashTask.Detail != "long-running-build.sh --target all --verbose" {
-			t.Errorf("bashTask.Detail = %q, want %q", bashTask.Detail, "long-running-build.sh --target all --verbose")
-		}
-		wantBashLaunchedAt := wantLaunchedAt("2026-07-05T05:47:58.730Z")
-		if !bashTask.LaunchedAt.Equal(wantBashLaunchedAt) {
-			t.Errorf("bashTask.LaunchedAt = %v, want %v", bashTask.LaunchedAt, wantBashLaunchedAt)
-		}
+		assertLiveTask(
+			t, tasks[1],
+			"bgtaskid001", TaskBash, "Run full build in background", "long-running-build.sh --target all --verbose",
+			wantLaunchedAt("2026-07-05T05:47:58.730Z"),
+			"/tmp/claude-1000/-home-user-project/anon-session-0099/tasks/bgtaskid001.output",
+		)
 	})
 
 	t.Run("tasks_completed.jsonl", func(t *testing.T) {
@@ -173,6 +186,10 @@ func TestScanTranscriptLiveTasks(t *testing.T) {
 		}
 		if tasks[0].Kind != TaskBash {
 			t.Errorf("live task Kind = %v, want TaskBash", tasks[0].Kind)
+		}
+		wantOutputFile := "/tmp/claude-1000/-home-user-project/anon-session-0099/tasks/bgtaskid001.output"
+		if tasks[0].OutputFile != wantOutputFile {
+			t.Errorf("live task OutputFile = %q, want %q", tasks[0].OutputFile, wantOutputFile)
 		}
 	})
 

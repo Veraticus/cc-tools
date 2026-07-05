@@ -28,6 +28,21 @@ var (
 	bgIDPattern    = regexp.MustCompile(`Command running in background with ID: ([a-z0-9]+)`)
 	agentIDPattern = regexp.MustCompile(`agentId: ([a-z0-9]{6,20})`)
 	taskIDPattern  = regexp.MustCompile(`<task-id>([^<]+)</task-id>`)
+
+	// bashOutputFilePattern and agentOutputFilePattern extract the on-disk
+	// output path from a launch acknowledgment. Real transcript text (not
+	// the pattern name) is ground truth for these shapes: a bg-bash ack
+	// reads "...Output is being written to: /tmp/claude-1000/<proj>/<session>/
+	// tasks/<id>.output. You will be notified..." and an async-agent ack
+	// carries a standalone "output_file: /tmp/claude-1000/<proj>/<session>/
+	// tasks/<id>.output" line. \S+ is deliberate over a charset like
+	// [^\s.]+: real paths contain dots (session UUIDs, the .output suffix)
+	// and dashes (anonymized project segments), so excluding "." would
+	// truncate the match. The only punctuation to strip is the sentence-
+	// final period the bash form appends after ".output" — see
+	// extractOutputFile.
+	bashOutputFilePattern  = regexp.MustCompile(`Output is being written to: (\S+)`)
+	agentOutputFilePattern = regexp.MustCompile(`output_file: (\S+)`)
 )
 
 // asyncAgentAckMarker is the first sentence of every genuine background-agent
@@ -83,6 +98,12 @@ type LiveTask struct {
 	Description string
 	Detail      string
 	LaunchedAt  time.Time
+	// OutputFile is the on-disk path the launch acknowledgment said output
+	// is being written to, taken verbatim from that ack text (never derived
+	// from cwd or session ID: a real bg-bash task has been observed writing
+	// under a different session ID than the transcript's own). Empty when
+	// the ack carried no path; this never affects liveness.
+	OutputFile string
 }
 
 // transcriptRecord is the subset of a transcript JSONL line's shape that
@@ -351,12 +372,12 @@ func (s *scanState) processUserMessage(raw json.RawMessage, timestamp string) {
 		text := extractBlockText(block.Content)
 		if m := bgIDPattern.FindStringSubmatch(text); m != nil {
 			if paired && info.name == "Bash" && info.runInBackground {
-				s.addLiveTask(m[1], TaskBash, timestamp, info)
+				s.addLiveTask(m[1], TaskBash, timestamp, info, extractOutputFile(bashOutputFilePattern, text))
 			}
 		}
 		if m := agentIDPattern.FindStringSubmatch(text); m != nil {
 			if paired && info.name == "Agent" && info.runInBackground && strings.Contains(text, asyncAgentAckMarker) {
-				s.addLiveTask(m[1], TaskAgent, timestamp, info)
+				s.addLiveTask(m[1], TaskAgent, timestamp, info, extractOutputFile(agentOutputFilePattern, text))
 			}
 		}
 	}
@@ -376,7 +397,7 @@ func (s *scanState) processUserMessage(raw json.RawMessage, timestamp string) {
 // caller also requires the asyncAgentAckMarker text, since a sync report's
 // embedded "agentId: ..." alone survives the pairing and kind check
 // whenever run_in_background was left absent.
-func (s *scanState) addLiveTask(id string, kind TaskKind, timestamp string, info toolUseInfo) {
+func (s *scanState) addLiveTask(id string, kind TaskKind, timestamp string, info toolUseInfo, outputFile string) {
 	if _, exists := s.live[id]; exists {
 		return
 	}
@@ -386,8 +407,24 @@ func (s *scanState) addLiveTask(id string, kind TaskKind, timestamp string, info
 		Description: info.description,
 		Detail:      truncate(info.detail, maxDetailLen),
 		LaunchedAt:  parseTimestamp(timestamp),
+		OutputFile:  outputFile,
 	}
 	s.order = append(s.order, id)
+}
+
+// extractOutputFile pulls the on-disk output path out of a launch
+// acknowledgment using pattern (bashOutputFilePattern or
+// agentOutputFilePattern), returning "" when the ack carries no path. The
+// bash sentence form's match includes a trailing "." (the path is
+// immediately followed by ". You will be notified..." with no space before
+// the period), which TrimSuffix strips; the agent line form has no such
+// trailing punctuation, so the trim is a no-op there.
+func extractOutputFile(pattern *regexp.Regexp, text string) string {
+	m := pattern.FindStringSubmatch(text)
+	if m == nil {
+		return ""
+	}
+	return strings.TrimSuffix(m[1], ".")
 }
 
 // tasks returns the still-live tasks in launch order. An ID can appear more
