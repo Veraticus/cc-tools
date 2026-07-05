@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,33 @@ import (
 	"testing"
 	"time"
 )
+
+// fakeProcStartTicks is a scripted PID->ticks table for WatchdogDeps.
+// ProcStartTicks. An unset PID reports (0, false), matching the
+// "unavailable" fallback production sees on non-Linux or a vanished /proc
+// entry — so every existing test that never calls set() exercises that
+// fallback (Kill still called) by default.
+type fakeProcStartTicks struct {
+	mu    sync.Mutex
+	ticks map[int]int64
+}
+
+func newFakeProcStartTicks() *fakeProcStartTicks {
+	return &fakeProcStartTicks{ticks: make(map[int]int64)}
+}
+
+func (f *fakeProcStartTicks) set(pid int, ticks int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ticks[pid] = ticks
+}
+
+func (f *fakeProcStartTicks) get(pid int) (int64, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	t, ok := f.ticks[pid]
+	return t, ok
+}
 
 // --- fakes ---
 
@@ -172,34 +200,97 @@ const (
 
 // testHarness bundles the fakes behind a WatchdogDeps for one test.
 type testHarness struct {
-	clock *fakeClock
-	proc  *fakeProc
-	judge *fakeJudge
-	send  *fakeSender
-	log   *fakeLog
-	deps  WatchdogDeps
+	clock      *fakeClock
+	proc       *fakeProc
+	startTicks *fakeProcStartTicks
+	judge      *fakeJudge
+	send       *fakeSender
+	log        *fakeLog
+	deps       WatchdogDeps
 }
 
 func newTestHarness(now time.Time, maxSleeps int, script []judgeResult) *testHarness {
 	h := &testHarness{
-		clock: &fakeClock{now: now, maxSleeps: maxSleeps},
-		proc:  newFakeProc(),
-		judge: &fakeJudge{script: script},
-		send:  &fakeSender{},
-		log:   &fakeLog{},
+		clock:      &fakeClock{now: now, maxSleeps: maxSleeps},
+		proc:       newFakeProc(),
+		startTicks: newFakeProcStartTicks(),
+		judge:      &fakeJudge{script: script},
+		send:       &fakeSender{},
+		log:        &fakeLog{},
 	}
 	h.proc.alive[testParentPID] = true
 	h.deps = WatchdogDeps{
-		Now:       h.clock.Now,
-		Sleep:     h.clock.Sleep,
-		ProcAlive: h.proc.ProcAlive,
-		Kill:      h.proc.Kill,
-		SelfPID:   func() int { return testSelfPID },
-		Judge:     h.judge.Evaluate,
-		Send:      h.send.Send,
-		Log:       h.log.Log,
+		Now:            h.clock.Now,
+		Sleep:          h.clock.Sleep,
+		ProcAlive:      h.proc.ProcAlive,
+		Kill:           h.proc.Kill,
+		SelfPID:        func() int { return testSelfPID },
+		ProcStartTicks: h.startTicks.get,
+		Judge:          h.judge.Evaluate,
+		Send:           h.send.Send,
+		Log:            h.log.Log,
 	}
 	return h
+}
+
+// splitFixtureLines reads a testdata fixture and returns its lines with line
+// terminators intact (each element ends in "\n"), for tests that need to
+// arm a watchdog on a goal-active prefix and append a later transition line
+// (the realistic offset a production arming would actually produce, versus
+// one computed over the whole fixture including the transition itself).
+func splitFixtureLines(t *testing.T, name string) [][]byte {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", name))
+	if err != nil {
+		t.Fatalf("reading fixture %s: %v", name, err)
+	}
+	split := bytes.Split(data, []byte("\n"))
+	lines := make([][]byte, 0, len(split))
+	for _, line := range split {
+		if len(line) == 0 {
+			continue
+		}
+		lines = append(lines, append(append([]byte{}, line...), '\n'))
+	}
+	return lines
+}
+
+// activeOnlyTranscript writes fixture's goal-active line(s) (every line but
+// the last) to a fresh temp file and returns its path alongside the
+// transition line (the fixture's last line) still unwritten, so a test can
+// record the offset over the active-only content before appending the
+// transition — the realistic offset a production arming actually has,
+// versus one computed over the whole fixture.
+func activeOnlyTranscript(t *testing.T, fixture string) (string, []byte) {
+	t.Helper()
+	lines := splitFixtureLines(t, fixture)
+	if len(lines) < 2 {
+		t.Fatalf("fixture %s has %d line(s), want at least 2 (active + transition)", fixture, len(lines))
+	}
+	dst := filepath.Join(t.TempDir(), fixture)
+	var active []byte
+	for _, l := range lines[:len(lines)-1] {
+		active = append(active, l...)
+	}
+	if err := os.WriteFile(dst, active, 0o600); err != nil {
+		t.Fatalf("writing active-only transcript %s: %v", dst, err)
+	}
+	return dst, lines[len(lines)-1]
+}
+
+// appendLine appends line to the file at path.
+func appendLine(t *testing.T, path string, line []byte) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatalf("opening %s for append: %v", path, err)
+	}
+	if _, writeErr := f.Write(line); writeErr != nil {
+		t.Fatalf("appending to %s: %v", path, writeErr)
+	}
+	if closeErr := f.Close(); closeErr != nil {
+		t.Fatalf("closing %s: %v", path, closeErr)
+	}
 }
 
 // copyFixture copies a testdata fixture into t.TempDir and returns its path,
@@ -394,13 +485,23 @@ func TestRunWatchdog_TranscriptUnreadable(t *testing.T) {
 }
 
 // --- RunWatchdog: goal transitions ---
+//
+// Every test in this section arms with a REALISTIC offset: the byte count
+// over the goal-active line(s) only, computed BEFORE the transition line is
+// appended — exactly what a production arming has, since the watchdog only
+// ever arms while a goal is ACTIVE. Arming with an offset computed over the
+// whole fixture (transition line included) can never occur in production
+// and was masking the c1 gap: the revival check was preempting the goal
+// transition it exists to detect, because the transition record is itself
+// transcript growth past the (unrealistic) full-file offset.
 
 func TestRunWatchdog_GoalMet(t *testing.T) {
 	dir := t.TempDir()
 	st := SessionState{Dir: dir}
-	transcript := copyFixture(t, "goal_met.jsonl")
+	transcript, metLine := activeOnlyTranscript(t, "goal_met.jsonl")
 	offset := scannedBytes(t, transcript)
 	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	appendLine(t, transcript, metLine)
 
 	lk := WatchdogLock{PID: testSelfPID, ParentPID: testParentPID, Transcript: transcript, Offset: offset, ArmedAt: now}
 	writeLock(t, st, lk)
@@ -448,9 +549,10 @@ func TestRunWatchdog_GoalMet(t *testing.T) {
 func TestRunWatchdog_GoalMet_JudgeErrorFallsBack(t *testing.T) {
 	dir := t.TempDir()
 	st := SessionState{Dir: dir}
-	transcript := copyFixture(t, "goal_met.jsonl")
+	transcript, metLine := activeOnlyTranscript(t, "goal_met.jsonl")
 	offset := scannedBytes(t, transcript)
 	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	appendLine(t, transcript, metLine)
 
 	lk := WatchdogLock{PID: testSelfPID, ParentPID: testParentPID, Transcript: transcript, Offset: offset, ArmedAt: now}
 	writeLock(t, st, lk)
@@ -481,9 +583,10 @@ func TestRunWatchdog_GoalMet_JudgeErrorFallsBack(t *testing.T) {
 func TestRunWatchdog_GoalFailed(t *testing.T) {
 	dir := t.TempDir()
 	st := SessionState{Dir: dir}
-	transcript := copyFixture(t, "goal_failed.jsonl")
+	transcript, failedLine := activeOnlyTranscript(t, "goal_failed.jsonl")
 	offset := scannedBytes(t, transcript)
 	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	appendLine(t, transcript, failedLine)
 
 	lk := WatchdogLock{PID: testSelfPID, ParentPID: testParentPID, Transcript: transcript, Offset: offset, ArmedAt: now}
 	writeLock(t, st, lk)
@@ -512,9 +615,10 @@ func TestRunWatchdog_GoalFailed(t *testing.T) {
 func TestRunWatchdog_GoalCleared(t *testing.T) {
 	dir := t.TempDir()
 	st := SessionState{Dir: dir}
-	transcript := copyFixture(t, "goal_cleared.jsonl")
+	transcript, clearedLine := activeOnlyTranscript(t, "goal_cleared.jsonl")
 	offset := scannedBytes(t, transcript)
 	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	appendLine(t, transcript, clearedLine)
 
 	lk := WatchdogLock{PID: testSelfPID, ParentPID: testParentPID, Transcript: transcript, Offset: offset, ArmedAt: now}
 	writeLock(t, st, lk)
@@ -535,6 +639,47 @@ func TestRunWatchdog_GoalCleared(t *testing.T) {
 	}
 	if lockExists(st) {
 		t.Error("lockfile still exists after goal-cleared exit")
+	}
+}
+
+// TestRunWatchdog_GoalStillActive_MidLoopGrowth_RevivesNotTransitions proves
+// c1's ordering doesn't break the case it must NOT change: transcript growth
+// that is NOT a goal transition (goal stays ACTIVE) must still exit "session
+// revived" with zero sends, exactly as before — mid-loop goal iterations
+// grow the transcript too, but each iteration's own Stop hook re-arms a
+// fresh watchdog, so this (superseded) watchdog correctly treats the growth
+// as revival.
+func TestRunWatchdog_GoalStillActive_MidLoopGrowth_RevivesNotTransitions(t *testing.T) {
+	dir := t.TempDir()
+	st := SessionState{Dir: dir}
+	transcript, _ := activeOnlyTranscript(t, "goal_met.jsonl") // discard the transition line entirely
+	offset := scannedBytes(t, transcript)
+	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+
+	// Append a plain, non-goal-status line: the goal remains ACTIVE (no
+	// applyGoalStatus call), but the transcript has grown past Offset.
+	extraLines := splitFixtureLines(t, "goal_none.jsonl")
+	appendLine(t, transcript, extraLines[0])
+
+	lk := WatchdogLock{PID: testSelfPID, ParentPID: testParentPID, Transcript: transcript, Offset: offset, ArmedAt: now}
+	writeLock(t, st, lk)
+
+	h := newTestHarness(now, -1, nil)
+	meta := DigestMeta{Project: "proj"}
+
+	got := RunWatchdog(context.Background(), st, meta, h.deps, "sess-1")
+
+	if got != "session revived" {
+		t.Errorf("RunWatchdog() = %q, want %q", got, "session revived")
+	}
+	if h.judge.callCount() != 0 {
+		t.Errorf("judge calls = %d, want 0", h.judge.callCount())
+	}
+	if h.send.sendCount() != 0 {
+		t.Errorf("sendCount = %d, want 0", h.send.sendCount())
+	}
+	if lockExists(st) {
+		t.Error("lockfile still exists after revival exit")
 	}
 }
 
@@ -726,6 +871,101 @@ func TestRunWatchdog_Canceled_LeavesLockUntouched(t *testing.T) {
 	}
 }
 
+// --- RunWatchdog: stat-first / cached scan (p2) ---
+
+// TestRunWatchdog_NoGrowthWake_ReusesCachedScan proves the "size ==
+// lock.Offset" wake reuses a cached scan rather than re-parsing: after a
+// first no-growth wake caches its scan, the transcript is made unreadable
+// (chmod 0000) and the clock advanced past the ceiling. A wake that
+// mistakenly re-parses would hit the permission error and exit "transcript
+// unreadable"; a wake that correctly reuses the cache never opens the file
+// again and reaches the ceiling send instead, still reporting the 0 live
+// tasks the (untouched, cached) goal_none.jsonl scan produced.
+func TestRunWatchdog_NoGrowthWake_ReusesCachedScan(t *testing.T) {
+	dir := t.TempDir()
+	st := SessionState{Dir: dir}
+	transcript := copyFixture(t, "goal_none.jsonl")
+	offset := scannedBytes(t, transcript) // == full file size: no growth, ever
+	armedAt := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+
+	lk := WatchdogLock{
+		PID: testSelfPID, ParentPID: testParentPID, Transcript: transcript, Offset: offset, ArmedAt: armedAt,
+	}
+	writeLock(t, st, lk)
+	lockPath := filepath.Join(dir, watchdogLockFile)
+
+	h := newTestHarness(armedAt, -1, nil)
+	meta := DigestMeta{Project: "proj"}
+	state := &wakeState{budget: initialStaleBudget}
+
+	// Wake 1: well before the ceiling, transcript still fully readable —
+	// the "first such wake" that must perform (and cache) a real scan.
+	got := runWatchdogWake(context.Background(), st, meta, h.deps, "sess-1", lockPath, state)
+	if got != "" {
+		t.Fatalf("wake 1 = %q, want \"\" (no exit yet)", got)
+	}
+	if h.send.sendCount() != 0 {
+		t.Fatalf("sendCount after wake 1 = %d, want 0", h.send.sendCount())
+	}
+
+	// Advance past the ceiling and strip all read permission from the
+	// transcript. The file's size is unchanged, so this wake still lands in
+	// the size == lock.Offset case.
+	h.clock.mu.Lock()
+	h.clock.now = h.clock.now.Add(watchdogCeiling + time.Minute)
+	h.clock.mu.Unlock()
+	if err := os.Chmod(transcript, 0o000); err != nil {
+		t.Fatalf("chmod transcript unreadable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(transcript, 0o600) })
+
+	got = runWatchdogWake(context.Background(), st, meta, h.deps, "sess-1", lockPath, state)
+	if got != "ceiling" {
+		t.Errorf("wake 2 = %q, want %q (cached scan must be reused, not a fresh parse)", got, "ceiling")
+	}
+	if h.send.sendCount() != 1 {
+		t.Fatalf("sendCount after wake 2 = %d, want 1", h.send.sendCount())
+	}
+	if n := h.send.notifications()[0]; !contains(n.Body, "0 task(s)") {
+		t.Errorf("ceiling body = %q, want it to report 0 tasks (from the cached, no-live-task scan)", n.Body)
+	}
+}
+
+// TestRunWatchdog_TranscriptTruncated_ExitsUnreadable covers the size <
+// lock.Offset case: truncation or rotation is pathological (no coherent
+// growth to reason about), so it is treated like an unreadable transcript
+// rather than attempting to parse whatever remains.
+func TestRunWatchdog_TranscriptTruncated_ExitsUnreadable(t *testing.T) {
+	dir := t.TempDir()
+	st := SessionState{Dir: dir}
+	transcript := copyFixture(t, "goal_none.jsonl")
+	offset := scannedBytes(t, transcript)
+	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+
+	const truncateBy = 20
+	if err := os.Truncate(transcript, offset-truncateBy); err != nil {
+		t.Fatalf("truncating transcript: %v", err)
+	}
+
+	lk := WatchdogLock{PID: testSelfPID, ParentPID: testParentPID, Transcript: transcript, Offset: offset, ArmedAt: now}
+	writeLock(t, st, lk)
+
+	h := newTestHarness(now, -1, nil)
+	meta := DigestMeta{Project: "proj"}
+
+	got := RunWatchdog(context.Background(), st, meta, h.deps, "sess-1")
+
+	if got != "transcript unreadable" {
+		t.Errorf("RunWatchdog() = %q, want %q", got, "transcript unreadable")
+	}
+	if h.send.sendCount() != 0 {
+		t.Errorf("sendCount = %d, want 0", h.send.sendCount())
+	}
+	if lockExists(st) {
+		t.Error("lockfile still exists after truncated-transcript exit")
+	}
+}
+
 // contains reports whether s contains substr (avoids importing strings just
 // for this one check spread across a couple of tests).
 func contains(s, substr string) bool {
@@ -772,6 +1012,11 @@ func TestWriteWatchdogLock_NoPriorOwner_WritesLockNoKill(t *testing.T) {
 	}
 }
 
+// TestWriteWatchdogLock_KillsLivePriorOwner also exercises s3's
+// dep-unavailable fallback: h.startTicks never gets a set() call for PID
+// 555, so deps.ProcStartTicks reports (0, false) — the same "unavailable"
+// answer production sees on a vanished /proc entry — and killIfOwnerMatches
+// falls back to the plain probe-only behavior (Kill called).
 func TestWriteWatchdogLock_KillsLivePriorOwner(t *testing.T) {
 	dir := t.TempDir()
 	st := SessionState{Dir: dir}
@@ -804,6 +1049,130 @@ func TestWriteWatchdogLock_KillsLivePriorOwner(t *testing.T) {
 	}
 }
 
+// TestWriteWatchdogLock_MatchingStartTicks_KillsPriorOwner covers s3's
+// "matching ticks" case: the prior lock's StartTicks equals what
+// ProcStartTicks reports for that PID right now, so the live process really
+// is the one that wrote the lock, and Kill proceeds.
+func TestWriteWatchdogLock_MatchingStartTicks_KillsPriorOwner(t *testing.T) {
+	dir := t.TempDir()
+	st := SessionState{Dir: dir}
+	h := newTestHarness(time.Now(), -1, nil)
+
+	prior := WatchdogLock{
+		PID: 555, ParentPID: 222, Transcript: "/tmp/old.jsonl", Offset: 1, ArmedAt: time.Now(), StartTicks: 111,
+	}
+	writeLock(t, st, prior)
+	h.proc.alive[555] = true
+	h.startTicks.set(555, 111) // matches the recorded fingerprint
+
+	next := WatchdogLock{PID: 666, ParentPID: 222, Transcript: "/tmp/new.jsonl", Offset: 2, ArmedAt: time.Now()}
+	if err := WriteWatchdogLock(st, next, h.deps); err != nil {
+		t.Fatalf("WriteWatchdogLock() error = %v", err)
+	}
+
+	killed := h.proc.killedPIDs()
+	if len(killed) != 1 || killed[0] != 555 {
+		t.Errorf("killed = %v, want [555]", killed)
+	}
+}
+
+// TestWriteWatchdogLock_RecycledPriorOwnerPID_SkipsKill covers s3's
+// "recycled PID" case: a process is alive at the prior lock's PID, but its
+// current start ticks differ from what was recorded — it is not the
+// process that wrote the lock, so Kill must not be sent to it. The lock is
+// still overwritten with the new owner.
+func TestWriteWatchdogLock_RecycledPriorOwnerPID_SkipsKill(t *testing.T) {
+	dir := t.TempDir()
+	st := SessionState{Dir: dir}
+	h := newTestHarness(time.Now(), -1, nil)
+
+	prior := WatchdogLock{
+		PID: 555, ParentPID: 222, Transcript: "/tmp/old.jsonl", Offset: 1, ArmedAt: time.Now(), StartTicks: 111,
+	}
+	writeLock(t, st, prior)
+	h.proc.alive[555] = true
+	h.startTicks.set(555, 222) // a different process now holds PID 555
+
+	next := WatchdogLock{PID: 666, ParentPID: 222, Transcript: "/tmp/new.jsonl", Offset: 2, ArmedAt: time.Now()}
+	if err := WriteWatchdogLock(st, next, h.deps); err != nil {
+		t.Fatalf("WriteWatchdogLock() error = %v", err)
+	}
+
+	if killed := h.proc.killedPIDs(); len(killed) != 0 {
+		t.Errorf("killed = %v, want none (recycled PID must not be killed)", killed)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "watchdog.lock"))
+	if err != nil {
+		t.Fatalf("reading written lock: %v", err)
+	}
+	var got WatchdogLock
+	if unmarshalErr := json.Unmarshal(data, &got); unmarshalErr != nil {
+		t.Fatalf("unmarshaling written lock: %v", unmarshalErr)
+	}
+	if got.PID != 666 {
+		t.Errorf("written lock PID = %d, want 666 (new owner, lock still overwritten)", got.PID)
+	}
+}
+
+// TestWriteWatchdogLock_PopulatesStartTicksFromDeps proves the arming side
+// of s3: a written lock whose StartTicks was zero gets it filled in from
+// deps.ProcStartTicks, so a later Kill of that PID has a fingerprint to
+// check against.
+func TestWriteWatchdogLock_PopulatesStartTicksFromDeps(t *testing.T) {
+	dir := t.TempDir()
+	st := SessionState{Dir: dir}
+	h := newTestHarness(time.Now(), -1, nil)
+	h.startTicks.set(666, 123456)
+
+	next := WatchdogLock{PID: 666, ParentPID: 222, Transcript: "/tmp/new.jsonl", Offset: 2, ArmedAt: time.Now()}
+	if err := WriteWatchdogLock(st, next, h.deps); err != nil {
+		t.Fatalf("WriteWatchdogLock() error = %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "watchdog.lock"))
+	if err != nil {
+		t.Fatalf("reading written lock: %v", err)
+	}
+	var got WatchdogLock
+	if unmarshalErr := json.Unmarshal(data, &got); unmarshalErr != nil {
+		t.Fatalf("unmarshaling written lock: %v", unmarshalErr)
+	}
+	if got.StartTicks != 123456 {
+		t.Errorf("written lock StartTicks = %d, want 123456", got.StartTicks)
+	}
+}
+
+// TestWriteWatchdogLock_PreservesExplicitStartTicks proves WriteWatchdogLock
+// only populates StartTicks "when the field is zero": a caller-supplied
+// nonzero value is left alone even if deps.ProcStartTicks would report
+// something else.
+func TestWriteWatchdogLock_PreservesExplicitStartTicks(t *testing.T) {
+	dir := t.TempDir()
+	st := SessionState{Dir: dir}
+	h := newTestHarness(time.Now(), -1, nil)
+	h.startTicks.set(666, 999999)
+
+	next := WatchdogLock{
+		PID: 666, ParentPID: 222, Transcript: "/tmp/new.jsonl", Offset: 2, ArmedAt: time.Now(), StartTicks: 42,
+	}
+	if err := WriteWatchdogLock(st, next, h.deps); err != nil {
+		t.Fatalf("WriteWatchdogLock() error = %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "watchdog.lock"))
+	if err != nil {
+		t.Fatalf("reading written lock: %v", err)
+	}
+	var got WatchdogLock
+	if unmarshalErr := json.Unmarshal(data, &got); unmarshalErr != nil {
+		t.Fatalf("unmarshaling written lock: %v", unmarshalErr)
+	}
+	if got.StartTicks != 42 {
+		t.Errorf("written lock StartTicks = %d, want 42 (explicit value preserved)", got.StartTicks)
+	}
+}
+
 func TestWriteWatchdogLock_NeverKillsDeadPriorOwner(t *testing.T) {
 	dir := t.TempDir()
 	st := SessionState{Dir: dir}
@@ -833,6 +1202,10 @@ func TestReapWatchdog_NoLock_Succeeds(t *testing.T) {
 	}
 }
 
+// TestReapWatchdog_KillsAliveOwnerAndRemovesLock_IdempotentTwice also
+// exercises s3's dep-unavailable fallback (see the analogous comment on
+// TestWriteWatchdogLock_KillsLivePriorOwner): h.startTicks never gets a
+// set() call for PID 777, so Kill falls back to the plain probe.
 func TestReapWatchdog_KillsAliveOwnerAndRemovesLock_IdempotentTwice(t *testing.T) {
 	dir := t.TempDir()
 	st := SessionState{Dir: dir}
@@ -859,6 +1232,60 @@ func TestReapWatchdog_KillsAliveOwnerAndRemovesLock_IdempotentTwice(t *testing.T
 	}
 	if killed := h.proc.killedPIDs(); len(killed) != 1 {
 		t.Errorf("killed after second Reap = %v, want still just [777]", killed)
+	}
+}
+
+// TestReapWatchdog_MatchingStartTicks_KillsOwner covers s3's "matching
+// ticks" case for ReapWatchdog: the lock's StartTicks matches what
+// ProcStartTicks reports for that PID right now, so Kill proceeds.
+func TestReapWatchdog_MatchingStartTicks_KillsOwner(t *testing.T) {
+	dir := t.TempDir()
+	st := SessionState{Dir: dir}
+	h := newTestHarness(time.Now(), -1, nil)
+
+	lk := WatchdogLock{
+		PID: 777, ParentPID: 222, Transcript: "/tmp/t.jsonl", Offset: 1, ArmedAt: time.Now(), StartTicks: 111,
+	}
+	writeLock(t, st, lk)
+	h.proc.alive[777] = true
+	h.startTicks.set(777, 111)
+
+	if err := ReapWatchdog(st, h.deps); err != nil {
+		t.Fatalf("ReapWatchdog() error = %v", err)
+	}
+	if killed := h.proc.killedPIDs(); len(killed) != 1 || killed[0] != 777 {
+		t.Errorf("killed = %v, want [777]", killed)
+	}
+	if lockExists(st) {
+		t.Error("lockfile still exists after ReapWatchdog")
+	}
+}
+
+// TestReapWatchdog_RecycledOwnerPID_SkipsKillButRemovesLock covers s3's
+// "recycled PID" case for ReapWatchdog: a live process sits at the lock's
+// PID, but its start ticks don't match what was recorded, so it is not the
+// process that wrote the lock and must not be killed. The lockfile is still
+// removed (ReapWatchdog's unconditional cleanup).
+func TestReapWatchdog_RecycledOwnerPID_SkipsKillButRemovesLock(t *testing.T) {
+	dir := t.TempDir()
+	st := SessionState{Dir: dir}
+	h := newTestHarness(time.Now(), -1, nil)
+
+	lk := WatchdogLock{
+		PID: 777, ParentPID: 222, Transcript: "/tmp/t.jsonl", Offset: 1, ArmedAt: time.Now(), StartTicks: 111,
+	}
+	writeLock(t, st, lk)
+	h.proc.alive[777] = true
+	h.startTicks.set(777, 999) // a different process now holds PID 777
+
+	if err := ReapWatchdog(st, h.deps); err != nil {
+		t.Fatalf("ReapWatchdog() error = %v", err)
+	}
+	if killed := h.proc.killedPIDs(); len(killed) != 0 {
+		t.Errorf("killed = %v, want none (recycled PID must not be killed)", killed)
+	}
+	if lockExists(st) {
+		t.Error("lockfile still exists after ReapWatchdog on a recycled-PID owner")
 	}
 }
 

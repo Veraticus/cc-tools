@@ -285,6 +285,19 @@ func (p Pipeline) handleDecideVerdict(
 
 	if verdict.Urgency != UrgencyBlocked && env.UserPresent {
 		reason := "suppressed: user present (post-judge)" + reasonSuffix
+		// This is still a silent outcome with live/pending background work
+		// (that's how JudgeModeDecide was reached at all) — the user being
+		// present right now doesn't mean they'll stay at this pane, so the
+		// watchdog must still arm to keep coverage on that work, exactly as
+		// the !verdict.Notify branch above does.
+		if d.ArmWatchdog {
+			if p.DryRun {
+				reason += " (would arm watchdog)"
+			} else {
+				//nolint:contextcheck // arming spawns a detached child that must outlive this hook's ctx; see SpawnRecheck
+				p.arm(state, in, res, now, project, host)
+			}
+		}
 		p.logJudged(in, now, OutcomeSilent.String(), reason, Notification{}, JudgeModeDecide, nil, digest, judgeMs)
 		return
 	}

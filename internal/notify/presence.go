@@ -21,7 +21,8 @@ const presenceActivityWindow = 30 * time.Second
 // eating a real ping is the worse failure mode than sending a spurious one.
 //
 // All of the following must hold:
-//   - environ (os.Environ() form) carries a non-empty TMUX entry — outside
+//   - environ (os.Environ() form) carries a TMUX entry, any value including
+//     empty (see hasTMUXEnv: the key's presence is what counts) — outside
 //     tmux entirely, there is no pane to check presence against.
 //   - run("tmux", "display-message", "-p",
 //     "#{window_active},#{session_attached}") returns exactly "1,1" once

@@ -69,6 +69,34 @@ func TestParseHookInput(t *testing.T) {
 		}
 	})
 
+	// SessionID composes a state directory (StateBase/SessionID) that gets
+	// os.RemoveAll'd on SessionEnd. An empty, separator-carrying, or
+	// traversal-carrying session_id must never reach that point: an empty
+	// id collapses the directory to the state base itself (wiping every
+	// session's state on the next SessionEnd), and a separator or ".."
+	// could point the RemoveAll outside the intended per-session directory
+	// entirely. These three forms must all error rather than decode.
+	t.Run("empty session_id errors", func(t *testing.T) {
+		_, err := ParseHookInput(strings.NewReader(`{"session_id": "", "hook_event_name": "Stop"}`))
+		if err == nil {
+			t.Fatal("ParseHookInput: expected error for empty session_id, got nil")
+		}
+	})
+
+	t.Run("session_id with path separator errors", func(t *testing.T) {
+		_, err := ParseHookInput(strings.NewReader(`{"session_id": "sess/../evil", "hook_event_name": "Stop"}`))
+		if err == nil {
+			t.Fatal("ParseHookInput: expected error for session_id with path separator, got nil")
+		}
+	})
+
+	t.Run("session_id with .. errors", func(t *testing.T) {
+		_, err := ParseHookInput(strings.NewReader(`{"session_id": "sess..evil", "hook_event_name": "Stop"}`))
+		if err == nil {
+			t.Fatal("ParseHookInput: expected error for session_id containing .., got nil")
+		}
+	})
+
 	// Two top-level objects in the stream: json.Decoder.Decode reads exactly
 	// one object and leaves the rest in the buffer unread, so the first
 	// object wins and the second is simply ignored — that is the chosen,

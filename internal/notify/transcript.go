@@ -199,6 +199,12 @@ type queuedCommandAttachment struct {
 // pairing instead of trusting pattern text alone: name must match the
 // pattern being registered (Bash for a background-bash ID, Agent for an
 // agent ID), and runInBackground must resolve true, before a launch fires.
+// detail is truncated to maxDetailLen at store time (in
+// processAssistantMessage) rather than deferred to addLiveTask: a session
+// can accumulate far more tool_use records awaiting a result than ever
+// become live tasks, so truncating here bounds this map's per-entry memory
+// immediately instead of holding a full untruncated command/prompt for the
+// entry's whole lifetime.
 type toolUseInfo struct {
 	description     string
 	detail          string
@@ -497,7 +503,7 @@ func (s *scanState) processAssistantMessage(raw json.RawMessage) {
 			if err := json.Unmarshal(block.Input, &in); err == nil {
 				s.toolUses[block.ID] = toolUseInfo{
 					description:     in.Description,
-					detail:          in.Command,
+					detail:          truncate(in.Command, maxDetailLen),
 					name:            "Bash",
 					runInBackground: in.RunInBackground,
 				}
@@ -511,7 +517,7 @@ func (s *scanState) processAssistantMessage(raw json.RawMessage) {
 				}
 				s.toolUses[block.ID] = toolUseInfo{
 					description:     in.Description,
-					detail:          in.Prompt,
+					detail:          truncate(in.Prompt, maxDetailLen),
 					name:            "Agent",
 					runInBackground: runInBackground,
 				}
@@ -550,6 +556,12 @@ func (s *scanState) captureAssistantText(blocks []contentBlock) {
 // already-finished report as a live launch. The Bash pairing needs no such
 // extra gate — a background Bash launch's tool_result text is exactly the
 // "Command running in background with ID: ..." announcement.
+//
+// A tool_use_id is deleted from s.toolUses immediately once it successfully
+// pairs to a launch: a given tool_use_id is produced once by the assistant
+// and consumed at most once by its own matching tool_result (IDs never
+// repeat), so the entry has no further use and holding onto it would just
+// grow this map for the rest of the scan.
 func (s *scanState) processUserMessage(raw json.RawMessage, timestamp string) {
 	var blocks []contentBlock
 	if err := json.Unmarshal(raw, &blocks); err != nil {
@@ -564,11 +576,13 @@ func (s *scanState) processUserMessage(raw json.RawMessage, timestamp string) {
 		if m := bgIDPattern.FindStringSubmatch(text); m != nil {
 			if paired && info.name == "Bash" && info.runInBackground {
 				s.addLiveTask(m[1], TaskBash, timestamp, info, extractOutputFile(bashOutputFilePattern, text))
+				delete(s.toolUses, block.ToolUseID)
 			}
 		}
 		if m := agentIDPattern.FindStringSubmatch(text); m != nil {
 			if paired && info.name == "Agent" && info.runInBackground && strings.Contains(text, asyncAgentAckMarker) {
 				s.addLiveTask(m[1], TaskAgent, timestamp, info, extractOutputFile(agentOutputFilePattern, text))
+				delete(s.toolUses, block.ToolUseID)
 			}
 		}
 	}
@@ -596,7 +610,7 @@ func (s *scanState) addLiveTask(id string, kind TaskKind, timestamp string, info
 		ID:          id,
 		Kind:        kind,
 		Description: info.description,
-		Detail:      truncate(info.detail, maxDetailLen),
+		Detail:      info.detail, // already truncated at store time; see toolUseInfo.detail
 		LaunchedAt:  parseTimestamp(timestamp),
 		OutputFile:  outputFile,
 	}

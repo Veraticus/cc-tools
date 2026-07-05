@@ -450,6 +450,37 @@ func TestScanTranscriptConversationCapture(t *testing.T) {
 	}
 }
 
+// TestScanTranscriptLiveTaskDetailTruncated exercises a Bash background
+// launch whose command exceeds maxDetailLen (200 bytes): LiveTask.Detail
+// must come back truncated to exactly maxDetailLen bytes, matching the
+// command's prefix. This is coverage for the truncation contract itself
+// (previously untested by any fixture, all of which use short commands),
+// independent of exactly where in the scan pipeline the truncation is
+// applied.
+func TestScanTranscriptLiveTaskDetailTruncated(t *testing.T) {
+	longCommand := strings.Repeat("a", maxDetailLen+50)
+	transcript := `{"type":"assistant","timestamp":"2026-07-05T00:00:00.000Z","message":{"role":"assistant","content":[` +
+		`{"type":"tool_use","id":"toolu_longcmd001","name":"Bash","input":{"command":"` + longCommand +
+		`","description":"Long detail truncation test","run_in_background":true}}]}}` + "\n" +
+		`{"type":"user","timestamp":"2026-07-05T00:00:01.000Z","message":{"role":"user","content":[` +
+		`{"tool_use_id":"toolu_longcmd001","type":"tool_result","content":"Command running in background with ID: ` +
+		`longcmdtask01. Output is being written to: /tmp/claude-1000/proj/sess/tasks/longcmdtask01.output. ` +
+		`You will be notified when it completes."}]}}` + "\n"
+
+	res, err := ScanTranscript(strings.NewReader(transcript))
+	if err != nil {
+		t.Fatalf("ScanTranscript returned error: %v", err)
+	}
+	if len(res.LiveTasks) != 1 {
+		t.Fatalf("len(LiveTasks) = %d, want 1: %+v", len(res.LiveTasks), res.LiveTasks)
+	}
+	wantDetail := longCommand[:maxDetailLen]
+	if res.LiveTasks[0].Detail != wantDetail {
+		t.Errorf("Detail = %q (len %d), want %q (len %d)",
+			res.LiveTasks[0].Detail, len(res.LiveTasks[0].Detail), wantDetail, len(wantDetail))
+	}
+}
+
 func lastN(s string, n int) string {
 	if len(s) <= n {
 		return s

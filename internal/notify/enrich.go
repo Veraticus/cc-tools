@@ -3,6 +3,7 @@ package notify
 import (
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -52,9 +53,17 @@ func EnrichTasks(tasks []LiveTask, now time.Time) []TaskActivity {
 // error, but gating on the empty string up front keeps "no path recorded"
 // and "path recorded but file gone" as distinct, documented branches rather
 // than collapsing them into one error path.
+//
+// task.OutputFile is also bounded to the claude task-output shape before
+// os.Stat ever touches it (see validOutputPath): the path text is taken
+// verbatim from transcript content (LiveTask.OutputFile's doc comment), and
+// while a launch acknowledgment is conventionally system-generated, nothing
+// upstream enforces that — transcript content can carry attacker-influenced
+// text. A path failing the shape check degrades exactly like a missing
+// file rather than ever reaching os.Stat.
 func enrichTask(task LiveTask) TaskActivity {
 	activity := TaskActivity{LiveTask: task}
-	if task.OutputFile == "" {
+	if task.OutputFile == "" || !validOutputPath(task.OutputFile) {
 		return activity
 	}
 
@@ -75,6 +84,35 @@ func enrichTask(task LiveTask) TaskActivity {
 
 	activity.TailLines = tailLines(task.OutputFile, fi.Size())
 	return activity
+}
+
+// validOutputPath reports whether p has the shape of a genuine claude
+// task-output path: /tmp/claude-<id>/.../tasks/<name>. It is a structural
+// check only — it never touches the filesystem — applied to a path string
+// enrichTask otherwise has no reason to trust (see enrichTask's doc
+// comment). All of the following must hold:
+//   - p is absolute.
+//   - filepath.Clean(p) == p, i.e. p carries no ".." (or other
+//     non-canonical) component — a literal ".." in the raw string fails
+//     this even if the path it resolves to would otherwise be valid.
+//   - one path element starts with "claude-".
+//   - the penultimate path element is exactly "tasks".
+func validOutputPath(p string) bool {
+	if !filepath.IsAbs(p) || filepath.Clean(p) != p {
+		return false
+	}
+
+	parts := strings.Split(p, string(filepath.Separator))
+	if len(parts) < 2 || parts[len(parts)-2] != "tasks" {
+		return false
+	}
+
+	for _, part := range parts {
+		if strings.HasPrefix(part, "claude-") {
+			return true
+		}
+	}
+	return false
 }
 
 // tailLines reads at most the last tailWindowBytes of path and returns its

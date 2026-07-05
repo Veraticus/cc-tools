@@ -2,6 +2,7 @@ package notify
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -29,8 +30,7 @@ func TestSend_UrgencyHeaders(t *testing.T) {
 				gotPriority = r.Header.Get("Priority")
 				gotTags = r.Header.Get("Tags")
 				gotTitle = r.Header.Get("Title")
-				body := make([]byte, r.ContentLength)
-				_, _ = r.Body.Read(body)
+				body, _ := io.ReadAll(r.Body)
 				gotBody = string(body)
 				w.WriteHeader(http.StatusOK)
 			}))

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
+	"strings"
 )
 
 // HookInput is the JSON payload Claude Code writes to a hook's stdin. Field
@@ -44,5 +46,19 @@ func ParseHookInput(r io.Reader) (HookInput, error) {
 		}
 		return HookInput{}, fmt.Errorf("parsing hook input: %w", err)
 	}
+
+	// SessionID is used by the caller (Pipeline.Run) to compose a per-session
+	// state directory, StateBase/SessionID, that gets os.RemoveAll'd whole on
+	// SessionEnd. An empty SessionID would collapse that path to StateBase
+	// itself, wiping every session's state on the next SessionEnd; a
+	// SessionID carrying a path separator or ".." could likewise steer the
+	// directory (and its RemoveAll) outside the intended per-session
+	// location. Reject all three here rather than let a malformed or
+	// hostile session_id ever reach that composition.
+	if in.SessionID == "" || strings.ContainsRune(in.SessionID, filepath.Separator) ||
+		strings.Contains(in.SessionID, "..") {
+		return HookInput{}, fmt.Errorf("parsing hook input: invalid session_id %q", in.SessionID)
+	}
+
 	return in, nil
 }

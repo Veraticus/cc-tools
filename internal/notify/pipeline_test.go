@@ -235,6 +235,76 @@ func TestPipeline_Stop_LiveTasks_DecideNotifyTrue_UserPresent_Suppressed(t *test
 	if !strings.Contains(recs[0].Reason, "suppressed: user present") {
 		t.Errorf("Reason = %q, want suppressed reason", recs[0].Reason)
 	}
+	// The live-tasks Stop gate sets ArmWatchdog: true (background work is
+	// still running even though the user is present and got suppressed) —
+	// a silent outcome here must not mean zero coverage of that live work.
+	// This pipeline is DryRun, so the arm attempt is logged, not executed.
+	if !strings.Contains(recs[0].Reason, "would arm watchdog") {
+		t.Errorf("Reason = %q, want it to mention would arm watchdog", recs[0].Reason)
+	}
+}
+
+// TestPipeline_Stop_LiveTasks_DecideNotifyTrue_NotPresent_Delivers exercises
+// the decide-mode delivery branch that TestPipeline_Stop_LiveTasks_
+// DecideNotifyTrue_UserPresent_Suppressed does not reach: verdict.Notify
+// true, urgency not blocked, but the user is NOT present, so the focus gate
+// never fires and the pipeline actually delivers (here: the DryRun line for
+// what the skill brief calls the parked-dev-server ping).
+func TestPipeline_Stop_LiveTasks_DecideNotifyTrue_NotPresent_Delivers(t *testing.T) {
+	stubBin := writeStubClaude(t)
+	t.Setenv(
+		"STUB_STDOUT",
+		`{"notify":true,"urgency":"done","task":"dev server ready","body":"parked and listening on :3000","reason":"r"}`,
+	)
+
+	var stdout bytes.Buffer
+	p, _ := newTestPipeline(t, &stdout, stubBin, neverPresent)
+	transcript := copyFixture(t, "tasks_live.jsonl")
+
+	in := HookInput{
+		SessionID: "sess-8", CWD: "/home/user/project", TranscriptPath: transcript, HookEventName: "Stop",
+	}
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if !strings.HasPrefix(stdout.String(), "DRY RUN: [done]") {
+		t.Errorf("stdout = %q, want DRY RUN done line", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "dev server ready") {
+		t.Errorf("stdout = %q, want it to contain the verdict task", stdout.String())
+	}
+}
+
+// TestPipeline_Stop_LiveTasks_DecideNotifyTrue_Blocked_PresentStillDelivers
+// exercises the other half of the focus gate: verdict.Urgency == blocked
+// bypasses the "user present" suppression entirely, even with the user
+// sitting right at the pane, since a blocked session needs the user
+// regardless of which pane currently has focus.
+func TestPipeline_Stop_LiveTasks_DecideNotifyTrue_Blocked_PresentStillDelivers(t *testing.T) {
+	stubBin := writeStubClaude(t)
+	t.Setenv(
+		"STUB_STDOUT",
+		`{"notify":true,"urgency":"blocked","task":"needs a decision","body":"which approach?","reason":"r"}`,
+	)
+
+	var stdout bytes.Buffer
+	p, _ := newTestPipeline(t, &stdout, stubBin, func(_ []string, _ time.Time) bool { return true })
+	transcript := copyFixture(t, "tasks_live.jsonl")
+
+	in := HookInput{
+		SessionID: "sess-9", CWD: "/home/user/project", TranscriptPath: transcript, HookEventName: "Stop",
+	}
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if !strings.HasPrefix(stdout.String(), "DRY RUN: [blocked]") {
+		t.Errorf("stdout = %q, want DRY RUN blocked line despite user present", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "needs a decision") {
+		t.Errorf("stdout = %q, want it to contain the verdict task", stdout.String())
+	}
 }
 
 func TestPipeline_Stop_GoalActive_ArmFails_LogsDecisionRecord(t *testing.T) {
