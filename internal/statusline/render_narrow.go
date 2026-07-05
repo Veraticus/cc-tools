@@ -331,9 +331,34 @@ const (
 	narrowChainBaseCells       = 1 // 2 (curves) − 1 (chevron count is N-1)
 )
 
+// narrowChainOverhead returns the fixed (non-body) width of a chain of
+// n chips: 3 cells per chip (2 padding + 1 chevron) plus 1 base cell
+// for the leading/trailing curves. This is the "3N + 1" formula
+// documented above — the single source of truth fitNarrowChain uses
+// both in its main fit loop and in the last-resort truncation branch,
+// so the two never drift apart.
+func narrowChainOverhead(n int) int {
+	return narrowFixedOverheadPerChip*n + narrowChainBaseCells
+}
+
+// narrowChainWidth returns the total rendered width composeNarrowChain
+// would produce for chips: narrowChainOverhead(len(chips)) plus the
+// sum of each chip's body width.
+func narrowChainWidth(chips []narrowChip) int {
+	total := narrowChainOverhead(len(chips))
+	for _, c := range chips {
+		total += runewidth.StringWidth(c.Body)
+	}
+	return total
+}
+
 // fitNarrowChain returns the chip slice trimmed and modified so that
 // composeNarrowChain(result) produces a string of exactly `budget`
-// visible cells. The directory chip always survives.
+// visible cells. The directory chip survives every case except one
+// pathological last resort: when dir cannot fit at even 1 cell
+// alongside the never-dropped alarm chip, dir is dropped and the
+// alarm chip is kept — padded or truncated so the chain still lands
+// on exactly `budget`.
 //
 // When chips fit with slack, the context chip's Body is expanded
 // (center-aligned content + colored padding) to absorb it. When chips
@@ -352,13 +377,7 @@ func fitNarrowChain(chips []narrowChip, budget int) []narrowChip {
 		if len(work) == 0 {
 			return work
 		}
-		n := len(work)
-		fixedOverhead := narrowFixedOverheadPerChip*n + narrowChainBaseCells
-		bodiesSum := 0
-		for _, c := range work {
-			bodiesSum += runewidth.StringWidth(c.Body)
-		}
-		total := fixedOverhead + bodiesSum
+		total := narrowChainWidth(work)
 
 		switch {
 		case total == budget:
@@ -390,17 +409,70 @@ func fitNarrowChain(chips []narrowChip, budget int) []narrowChip {
 			work = dropped
 			continue
 		}
-		// Last resort: truncate dir to fit. Body should occupy
-		// `budget - (3*1 + 1) = budget - 4` cells.
-		const dirAloneOverhead = 4
-		target := max(1, budget-dirAloneOverhead)
-		work[0] = narrowChip{
-			Color: work[0].Color,
-			Body:  truncateText(work[0].Body, target),
-			Kind:  kindDir,
+		// Last resort: dropOneNarrowChip can no longer shed a chip.
+		return fitNarrowLastResort(work, budget)
+	}
+}
+
+// fitNarrowLastResort computes the final chain once dropOneNarrowChip can no
+// longer shed a chip — the terminal step of fitNarrowChain's fit loop. The
+// survivors are dir plus, possibly, the never-dropped alarm chip
+// (dropOneNarrowChip never removes kindAlarm). It computes the dir body's
+// budget from the ACTUAL surviving chain — not from an "dir is alone"
+// assumption — by subtracting the other survivors' body widths and the real
+// chain overhead for this chip count. Always returns; there is no further
+// step after this one.
+func fitNarrowLastResort(work []narrowChip, budget int) []narrowChip {
+	others := work[1:]
+	othersWidth := 0
+	for _, c := range others {
+		othersWidth += runewidth.StringWidth(c.Body)
+	}
+	overhead := narrowChainOverhead(len(work))
+	target := budget - overhead - othersWidth
+
+	if len(others) > 0 && target < 1 {
+		// Dir can't fit even at 1 cell alongside the surviving
+		// alarm chip. Drop dir and keep the survivors — the
+		// alarm is the emergency signal and must never drop.
+		work = others
+		overhead = narrowChainOverhead(len(work))
+		remaining := budget - overhead
+		for i, c := range work {
+			if c.Kind != kindAlarm {
+				continue
+			}
+			width := runewidth.StringWidth(c.Body)
+			body := c.Body
+			switch {
+			case width > remaining:
+				// Still over budget with just the survivors —
+				// truncate the alarm body rather than return an
+				// overflowing chain.
+				body = truncateText(body, max(1, remaining))
+			case width < remaining:
+				// Under budget — pad with trailing spaces so the
+				// chain still lands on exactly `budget`, mirroring
+				// the main fit loop's slack-padding branch.
+				body += strings.Repeat(" ", remaining-width)
+			}
+			work[i] = narrowChip{
+				Color: c.Color,
+				Body:  body,
+				Kind:  c.Kind,
+			}
+			break
 		}
 		return work
 	}
+
+	target = max(1, target)
+	work[0] = narrowChip{
+		Color: work[0].Color,
+		Body:  truncateText(work[0].Body, target),
+		Kind:  kindDir,
+	}
+	return work
 }
 
 // dropOneNarrowChip drops a single chip per priority: env → branch →

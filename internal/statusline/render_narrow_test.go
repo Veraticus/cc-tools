@@ -569,6 +569,102 @@ func TestFitNarrowChain_DirAlwaysSurvives(t *testing.T) {
 	}
 }
 
+// TestFitNarrowChain_LastResortWithAlarmRespectsBudget pins the bug
+// where the last-resort truncation branch assumed dir was the ONLY
+// surviving chip. The alarm chip (kindAlarm) is deliberately exempt
+// from dropOneNarrowChip, so a chain with no branch/env/context left
+// to drop can still end up as [dir, alarm] when the last resort
+// fires. The dir body's target width must be computed from the
+// ACTUAL surviving chain (subtracting the alarm's body width and the
+// real 2-chip overhead), not from an overhead constant that assumes
+// dir is alone — otherwise the fitted chain overflows the budget.
+func TestFitNarrowChain_LastResortWithAlarmRespectsBudget(t *testing.T) {
+	s := newTestStatusline(t, newTestResolver(t, ""))
+	chips := []narrowChip{
+		{Color: "lavender", Body: "reallylongdirectorynamewithoutslash", Kind: kindDir},
+		{Color: "red", Body: buildNarrowAlarmBody(CostInput{TotalCostUSD: 4.12}), Kind: kindAlarm},
+	}
+	const budget = 30
+	got := fitNarrowChain(chips, budget)
+
+	if w := narrowChainWidth(got); w > budget {
+		t.Errorf("fitNarrowChain last-resort branch overflowed: narrowChainWidth(got)=%d, budget=%d, chips=%+v",
+			w, budget, got)
+	}
+
+	// Cross-check against the actual composed/rendered width, not
+	// just the formula, so a drift between narrowChainWidth and
+	// composeNarrowChain would also be caught.
+	rendered := runewidth.StringWidth(stripAnsi(s.composeNarrowChain(got)))
+	if rendered > budget {
+		t.Errorf("fitNarrowChain last-resort branch overflowed rendered output: rendered=%d, budget=%d, chips=%+v",
+			rendered, budget, got)
+	}
+
+	hasAlarm := false
+	for _, c := range got {
+		if c.Kind == kindAlarm {
+			hasAlarm = true
+		}
+	}
+	if !hasAlarm {
+		t.Errorf("alarm chip must survive the last-resort branch; got %+v", got)
+	}
+}
+
+// TestFitNarrowChain_LastResortDroppedDirPadsToExactBudget pins the
+// regression where, after the last-resort branch drops dir to keep the
+// never-dropped alarm chip, an alarm body narrower than
+// budget-narrowChainOverhead(1) was returned unpadded — undershooting
+// budget by a few cells instead of hitting it exactly like every
+// other return path in fitNarrowChain. The window that forces the
+// defect is alarm body width strictly between
+// (budget-narrowChainOverhead(2)-1) and (budget-narrowChainOverhead(1));
+// budget = alarmWidth+6 sits squarely in that window for any alarm
+// body width.
+func TestFitNarrowChain_LastResortDroppedDirPadsToExactBudget(t *testing.T) {
+	s := newTestStatusline(t, newTestResolver(t, ""))
+	alarmBody := buildNarrowAlarmBody(CostInput{TotalCostUSD: 4.12})
+	alarmWidth := runewidth.StringWidth(alarmBody)
+	chips := []narrowChip{
+		{Color: "lavender", Body: "reallylongdirectorynamewithoutslash", Kind: kindDir},
+		{Color: "red", Body: alarmBody, Kind: kindAlarm},
+	}
+	budget := alarmWidth + 6
+	got := fitNarrowChain(chips, budget)
+
+	if w := narrowChainWidth(got); w != budget {
+		t.Errorf("fitNarrowChain dropped-dir path should hit budget EXACTLY: got width=%d, want=%d, chips=%+v",
+			w, budget, got)
+	}
+
+	// Cross-check against the actual composed/rendered width, not
+	// just the formula, so a drift between narrowChainWidth and
+	// composeNarrowChain would also be caught.
+	rendered := runewidth.StringWidth(stripAnsi(s.composeNarrowChain(got)))
+	if rendered != budget {
+		t.Errorf("rendered output should hit budget EXACTLY: rendered=%d, budget=%d, chips=%+v",
+			rendered, budget, got)
+	}
+
+	hasDir := false
+	hasAlarm := false
+	for _, c := range got {
+		if c.Kind == kindDir {
+			hasDir = true
+		}
+		if c.Kind == kindAlarm {
+			hasAlarm = true
+		}
+	}
+	if hasDir {
+		t.Errorf("dir chip should be dropped in this pathological window; got %+v", got)
+	}
+	if !hasAlarm {
+		t.Errorf("alarm chip must survive; got %+v", got)
+	}
+}
+
 func TestPadContextBody_EvenSlack(t *testing.T) {
 	got := padContextBody("42%", 11)
 	want := "    42%    " // slack=8, left=4, right=4
