@@ -391,15 +391,15 @@ func getDefaultValue(defaults *ConfigValues, key string) string {
 func getConfigFilePath() string {
 	// Check XDG_CONFIG_HOME first
 	if xdgConfig := os.Getenv("XDG_CONFIG_HOME"); xdgConfig != "" {
-		return filepath.Join(xdgConfig, "cc-tools", "config.json")
+		return filepath.Join(xdgConfig, "cc-tools", configFileName)
 	}
 
 	// Default to ~/.config/cc-tools/config.json
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		// Fallback to current directory if we can't get home
-		return "config.json"
+		return configFileName
 	}
 
-	return filepath.Join(homeDir, ".config", "cc-tools", "config.json")
+	return filepath.Join(homeDir, ".config", "cc-tools", configFileName)
 }

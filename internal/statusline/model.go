@@ -50,7 +50,7 @@ func abbreviateModel(display string) string {
 
 func toUpper(b byte) byte {
 	if b >= 'a' && b <= 'z' {
-		return b - 32
+		return b - ('a' - 'A')
 	}
 	return b
 }

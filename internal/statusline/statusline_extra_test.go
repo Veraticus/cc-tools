@@ -204,18 +204,16 @@ func TestStatusline_GetK8sContext(t *testing.T) {
 // Test devspace retrieval.
 func TestStatusline_GetDevspace(t *testing.T) {
 	tests := []struct {
-		name           string
-		setup          func(*MockEnvReader)
-		expectedText   string
-		expectedSymbol string
+		name         string
+		setup        func(*MockEnvReader)
+		expectedText string
 	}{
 		{
 			name: "with override",
 			setup: func(er *MockEnvReader) {
 				er.vars["CLAUDE_STATUSLINE_DEVSPACE"] = "saturn"
 			},
-			expectedText:   "● saturn",
-			expectedSymbol: "●",
+			expectedText: "● saturn",
 		},
 		// Names are truncated to 3 chars in the chip so the symbol does
 		// the heavy lifting and the word just confirms the planet.
@@ -224,72 +222,63 @@ func TestStatusline_GetDevspace(t *testing.T) {
 			setup: func(er *MockEnvReader) {
 				er.vars["TMUX_DEVSPACE"] = "mercury"
 			},
-			expectedText:   "☿ mer",
-			expectedSymbol: "☿",
+			expectedText: "☿ mer",
 		},
 		{
 			name: "venus from TMUX_DEVSPACE",
 			setup: func(er *MockEnvReader) {
 				er.vars["TMUX_DEVSPACE"] = "venus"
 			},
-			expectedText:   "♀ ven",
-			expectedSymbol: "♀",
+			expectedText: "♀ ven",
 		},
 		{
 			name: "earth from TMUX_DEVSPACE",
 			setup: func(er *MockEnvReader) {
 				er.vars["TMUX_DEVSPACE"] = "earth"
 			},
-			expectedText:   "♁ ear",
-			expectedSymbol: "♁",
+			expectedText: "♁ ear",
 		},
 		{
 			name: "mars from TMUX_DEVSPACE",
 			setup: func(er *MockEnvReader) {
 				er.vars["TMUX_DEVSPACE"] = "mars"
 			},
-			expectedText:   "♂ mar",
-			expectedSymbol: "♂",
+			expectedText: "♂ mar",
 		},
 		{
 			name: "jupiter from TMUX_DEVSPACE",
 			setup: func(er *MockEnvReader) {
 				er.vars["TMUX_DEVSPACE"] = "jupiter"
 			},
-			expectedText:   "♃ jup",
-			expectedSymbol: "♃",
+			expectedText: "♃ jup",
 		},
 		{
 			name: "arbitrary devspace under 3 chars stays full",
 			setup: func(er *MockEnvReader) {
 				er.vars["TMUX_DEVSPACE"] = "qa"
 			},
-			expectedText:   "● qa",
-			expectedSymbol: "●",
+			expectedText: "● qa",
 		},
 		{
 			name: "arbitrary devspace keeps full name (not truncated)",
 			setup: func(er *MockEnvReader) {
 				er.vars["TMUX_DEVSPACE"] = "project-dev"
 			},
-			expectedText:   "● project-dev",
-			expectedSymbol: "●",
+			expectedText: "● project-dev",
 		},
 		{
 			name: "empty when -TMUX_DEVSPACE",
 			setup: func(er *MockEnvReader) {
 				er.vars["TMUX_DEVSPACE"] = "-TMUX_DEVSPACE"
 			},
-			expectedText:   "",
-			expectedSymbol: "",
+			expectedText: "",
 		},
 		{
 			name: "empty when not set",
 			setup: func(_ *MockEnvReader) {
 				// No TMUX_DEVSPACE set
 			},
-			expectedText:   "",
-			expectedSymbol: "",
+			expectedText: "",
 		},
 	}
 
@@ -306,13 +295,10 @@ func TestStatusline_GetDevspace(t *testing.T) {
 			}
 
 			s := CreateStatusline(deps)
-			text, symbol := s.getDevspace()
+			text := s.getDevspace()
 
 			if text != tt.expectedText {
 				t.Errorf("Expected devspace text %q, got %q", tt.expectedText, text)
-			}
-			if symbol != tt.expectedSymbol {
-				t.Errorf("Expected devspace symbol %q, got %q", tt.expectedSymbol, symbol)
 			}
 		})
 	}

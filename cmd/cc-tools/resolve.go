@@ -8,7 +8,12 @@ import (
 	"os"
 
 	"github.com/Veraticus/cc-tools/internal/aliases"
+	"github.com/Veraticus/cc-tools/internal/output"
 )
+
+// exitUsageError is the process exit code for invalid flags or arguments,
+// distinct from exitFailure (general/runtime failure).
+const exitUsageError = 2
 
 func runResolveCommand() {
 	flags := flag.NewFlagSet("resolve", flag.ContinueOnError)
@@ -16,13 +21,13 @@ func runResolveCommand() {
 	kindStr := flags.String("type", "", "alias kind: host|aws|k8s|gcloud")
 	raw := flags.String("raw", "", "raw value to resolve")
 	if err := flags.Parse(os.Args[2:]); err != nil {
-		os.Exit(2)
+		os.Exit(exitUsageError)
 	}
 
 	kind, err := parseResolveKind(*kindStr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cc-tools resolve: %v\n", err)
-		os.Exit(2)
+		os.Exit(exitUsageError)
 	}
 
 	path := aliases.DefaultPath()
@@ -37,7 +42,7 @@ func runResolveCommand() {
 	}
 
 	label, env := r.Resolve(kind, *raw)
-	fmt.Printf("%s\t%s\n", label, env)
+	output.NewTerminal(os.Stdout, os.Stderr).Raw(fmt.Sprintf("%s\t%s\n", label, env))
 }
 
 func parseResolveKind(s string) (aliases.Kind, error) {

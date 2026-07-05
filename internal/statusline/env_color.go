@@ -2,6 +2,22 @@ package statusline
 
 import "github.com/Veraticus/cc-tools/internal/aliases"
 
+// Catppuccin Mocha color names, used as Component.Color / narrowChip.Color
+// values and as the lookup keys for getColorBG / getColorFG.
+const (
+	colorRed       = "red"
+	colorGreen     = "green"
+	colorPeach     = "peach"
+	colorPink      = "pink"
+	colorMauve     = "mauve"
+	colorSapphire  = "sapphire"
+	colorLavender  = "lavender"
+	colorMaroon    = "maroon"
+	colorYellow    = "yellow"
+	colorTeal      = "teal"
+	colorRosewater = "rosewater"
+)
+
 // awsBgColor returns the chip background color name for an AWS profile's env.
 // Matches epic R4: peach (unknown), red (prod), peach (staging), green (dev).
 // Staging shares peach with unknown — the chip text still distinguishes them
@@ -9,13 +25,13 @@ import "github.com/Veraticus/cc-tools/internal/aliases"
 func awsBgColor(env aliases.Env) string {
 	switch env {
 	case aliases.EnvProd:
-		return "red"
+		return colorRed
 	case aliases.EnvDev:
-		return "green"
+		return colorGreen
 	case aliases.EnvStaging, aliases.EnvUnknown:
-		return "peach"
+		return colorPeach
 	default:
-		return "peach"
+		return colorPeach
 	}
 }
 
@@ -27,15 +43,15 @@ func awsBgColor(env aliases.Env) string {
 func gcloudBgColor(env aliases.Env) string {
 	switch env {
 	case aliases.EnvProd:
-		return "pink"
+		return colorPink
 	case aliases.EnvStaging:
-		return "mauve"
+		return colorMauve
 	case aliases.EnvDev:
-		return "sapphire"
+		return colorSapphire
 	case aliases.EnvUnknown:
-		return "lavender"
+		return colorLavender
 	default:
-		return "lavender"
+		return colorLavender
 	}
 }
 
@@ -45,12 +61,12 @@ func gcloudBgColor(env aliases.Env) string {
 func k8sBgColor(env aliases.Env) string {
 	switch env {
 	case aliases.EnvProd:
-		return "maroon"
+		return colorMaroon
 	case aliases.EnvStaging:
-		return "yellow"
+		return colorYellow
 	case aliases.EnvDev, aliases.EnvUnknown:
-		return "teal"
+		return colorTeal
 	default:
-		return "teal"
+		return colorTeal
 	}
 }

@@ -46,8 +46,8 @@ func NewLogger(ctx context.Context, workingDir string) (*Logger, error) {
 	}, nil
 }
 
-// Log writes a debug message if logging is enabled.
-func (l *Logger) Log(format string, args ...any) {
+// Logf writes a debug message if logging is enabled.
+func (l *Logger) Logf(format string, args ...any) {
 	if !l.enabled || l.file == nil {
 		return
 	}
@@ -68,7 +68,7 @@ func (l *Logger) LogSection(title string) {
 		return
 	}
 
-	l.Log("========== %s ==========", title)
+	l.Logf("========== %s ==========", title)
 }
 
 // LogError writes an error to the log.
@@ -81,7 +81,7 @@ func (l *Logger) LogError(err error, context string) {
 		return
 	}
 
-	l.Log("ERROR in %s: %v", context, err)
+	l.Logf("ERROR in %s: %v", context, err)
 }
 
 // LogCommand logs a command execution.
@@ -90,11 +90,11 @@ func (l *Logger) LogCommand(cmd string, args []string, workDir string) {
 		return
 	}
 
-	l.Log("Executing command: %s", cmd)
+	l.Logf("Executing command: %s", cmd)
 	if len(args) > 0 {
-		l.Log("  Args: %v", args)
+		l.Logf("  Args: %v", args)
 	}
-	l.Log("  Working dir: %s", workDir)
+	l.Logf("  Working dir: %s", workDir)
 }
 
 // LogDiscovery logs command discovery results.
@@ -103,11 +103,11 @@ func (l *Logger) LogDiscovery(commandType string, result string, workDir string)
 		return
 	}
 
-	l.Log("Discovery for %s in %s", commandType, workDir)
+	l.Logf("Discovery for %s in %s", commandType, workDir)
 	if result != "" {
-		l.Log("  Found: %s", result)
+		l.Logf("  Found: %s", result)
 	} else {
-		l.Log("  Not found")
+		l.Logf("  Not found")
 	}
 }
 

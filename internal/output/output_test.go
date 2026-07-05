@@ -214,7 +214,7 @@ func TestTerminalPrint(t *testing.T) {
 			term := NewTerminal(stdout, stderr)
 
 			// Print should not panic
-			term.Print(tt.level, tt.format, tt.args...)
+			term.Printf(tt.level, tt.format, tt.args...)
 
 			// Check something was written to stdout
 			if stdout.Len() == 0 {
@@ -264,7 +264,7 @@ func TestTerminalPrintError(t *testing.T) {
 			term := NewTerminal(stdout, stderr)
 
 			// PrintError should not panic
-			term.PrintError(tt.level, tt.format, tt.args...)
+			term.PrintErrorf(tt.level, tt.format, tt.args...)
 
 			// Check something was written to stderr
 			if stderr.Len() == 0 {
@@ -296,7 +296,7 @@ func TestTerminalConvenienceMethods(t *testing.T) {
 	}{
 		{
 			name:         "Info writes to stdout",
-			method:       (*Terminal).Info,
+			method:       (*Terminal).Infof,
 			format:       "Info: %s",
 			args:         []any{"message"},
 			expectStdout: true,
@@ -304,7 +304,7 @@ func TestTerminalConvenienceMethods(t *testing.T) {
 		},
 		{
 			name:         "Success writes to stdout",
-			method:       (*Terminal).Success,
+			method:       (*Terminal).Successf,
 			format:       "Success: %d",
 			args:         []any{100},
 			expectStdout: true,
@@ -312,7 +312,7 @@ func TestTerminalConvenienceMethods(t *testing.T) {
 		},
 		{
 			name:         "Warning writes to stdout",
-			method:       (*Terminal).Warning,
+			method:       (*Terminal).Warningf,
 			format:       "Warning: %v",
 			args:         []any{true},
 			expectStdout: true,
@@ -320,7 +320,7 @@ func TestTerminalConvenienceMethods(t *testing.T) {
 		},
 		{
 			name:         "Error writes to stderr",
-			method:       (*Terminal).Error,
+			method:       (*Terminal).Errorf,
 			format:       "Error: %s",
 			args:         []any{"failed"},
 			expectStdout: false,
@@ -328,7 +328,7 @@ func TestTerminalConvenienceMethods(t *testing.T) {
 		},
 		{
 			name:         "Debug writes to stderr",
-			method:       (*Terminal).Debug,
+			method:       (*Terminal).Debugf,
 			format:       "Debug: %d",
 			args:         []any{42},
 			expectStdout: false,
@@ -634,42 +634,42 @@ func TestConcurrentWrites(t *testing.T) {
 
 	// Run multiple goroutines writing concurrently
 	go func() {
-		for i := 0; i < 10; i++ {
-			term.Info("Info %d", i)
+		for i := range 10 {
+			term.Infof("Info %d", i)
 		}
 		done <- true
 	}()
 
 	go func() {
-		for i := 0; i < 10; i++ {
-			term.Success("Success %d", i)
+		for i := range 10 {
+			term.Successf("Success %d", i)
 		}
 		done <- true
 	}()
 
 	go func() {
-		for i := 0; i < 10; i++ {
-			term.Warning("Warning %d", i)
+		for i := range 10 {
+			term.Warningf("Warning %d", i)
 		}
 		done <- true
 	}()
 
 	go func() {
-		for i := 0; i < 10; i++ {
-			term.Error("Error %d", i)
+		for i := range 10 {
+			term.Errorf("Error %d", i)
 		}
 		done <- true
 	}()
 
 	go func() {
-		for i := 0; i < 10; i++ {
-			term.Debug("Debug %d", i)
+		for i := range 10 {
+			term.Debugf("Debug %d", i)
 		}
 		done <- true
 	}()
 
 	// Wait for all goroutines
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		<-done
 	}
 
@@ -716,7 +716,7 @@ type failingWriter struct {
 	shouldFail bool
 }
 
-func (f *failingWriter) Write(p []byte) (n int, err error) {
+func (f *failingWriter) Write(p []byte) (int, error) {
 	if f.shouldFail {
 		return 0, errors.New("write failed")
 	}

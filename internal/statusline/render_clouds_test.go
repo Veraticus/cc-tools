@@ -7,7 +7,9 @@ import (
 	"github.com/Veraticus/cc-tools/internal/aliases"
 )
 
-func newCloudsDeps(t *testing.T, env map[string]string, files map[string][]byte, resolver *aliases.Resolver) *Dependencies {
+func newCloudsDeps(
+	t *testing.T, env map[string]string, files map[string][]byte, resolver *aliases.Resolver,
+) *Dependencies {
 	t.Helper()
 	envReader := NewMockEnvReader()
 	for k, v := range env {
@@ -66,8 +68,15 @@ func TestRenderClouds_AllThreeChipsOrdered(t *testing.T) {
 	)
 	// Gcloud is read from filesystem. Provide files via mock.
 	home := "/fake/home"
-	deps.EnvReader.(*MockEnvReader).vars["HOME"] = home
-	mfr := deps.FileReader.(*MockFileReader)
+	mer, ok := deps.EnvReader.(*MockEnvReader)
+	if !ok {
+		t.Fatalf("EnvReader is %T, want *MockEnvReader", deps.EnvReader)
+	}
+	mer.vars["HOME"] = home
+	mfr, ok := deps.FileReader.(*MockFileReader)
+	if !ok {
+		t.Fatalf("FileReader is %T, want *MockFileReader", deps.FileReader)
+	}
 	mfr.files[home+"/.config/gcloud/active_config"] = []byte("default")
 	mfr.files[home+"/.config/gcloud/configurations/config_default"] = []byte("[core]\nproject = stage-project\n")
 
@@ -87,7 +96,7 @@ func TestRenderClouds_AllThreeChipsOrdered(t *testing.T) {
 	if k8sIdx < 0 {
 		t.Fatalf("output missing k8s label: %q", out)
 	}
-	if !(awsIdx < gcloudIdx && gcloudIdx < k8sIdx) {
+	if awsIdx >= gcloudIdx || gcloudIdx >= k8sIdx {
 		t.Errorf("expected order aws < gcloud < k8s in output: aws=%d gcloud=%d k8s=%d",
 			awsIdx, gcloudIdx, k8sIdx)
 	}

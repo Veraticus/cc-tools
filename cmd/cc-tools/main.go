@@ -61,7 +61,7 @@ func main() {
 	case helpCommand, "-h", helpFlag:
 		printUsage(out)
 	default:
-		out.Error("Unknown command: %s", os.Args[1])
+		out.Errorf("Unknown command: %s", os.Args[1])
 		printUsage(out)
 		os.Exit(1)
 	}

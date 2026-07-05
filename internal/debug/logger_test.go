@@ -35,6 +35,7 @@ func TestNewLogger(t *testing.T) {
 		{
 			name: "creates enabled logger when debug is on",
 			setupFunc: func(t *testing.T, workDir string) {
+				t.Helper()
 				absDir, _ := filepath.Abs(workDir)
 				writeConfig(t, map[string]bool{absDir: true})
 			},
@@ -44,6 +45,7 @@ func TestNewLogger(t *testing.T) {
 		{
 			name: "creates disabled logger when debug is off",
 			setupFunc: func(t *testing.T, _ string) {
+				t.Helper()
 				writeConfig(t, map[string]bool{})
 			},
 			workDir:     ".",
@@ -52,6 +54,7 @@ func TestNewLogger(t *testing.T) {
 		{
 			name: "creates enabled logger when parent directory is enabled",
 			setupFunc: func(t *testing.T, workDir string) {
+				t.Helper()
 				parentDir, _ := filepath.Abs(filepath.Dir(workDir))
 				writeConfig(t, map[string]bool{parentDir: true})
 			},
@@ -110,6 +113,7 @@ func TestLoggerLog(t *testing.T) {
 			format:  "Test message: %s",
 			args:    []any{"value"},
 			checkFunc: func(t *testing.T, content string) {
+				t.Helper()
 				if !strings.Contains(content, "Test message: value") {
 					t.Error("Log content should contain the message")
 				}
@@ -130,6 +134,7 @@ func TestLoggerLog(t *testing.T) {
 			format:  "Should not appear",
 			args:    []any{},
 			checkFunc: func(t *testing.T, content string) {
+				t.Helper()
 				if content != "" {
 					t.Error("Disabled logger should not write anything")
 				}
@@ -141,6 +146,7 @@ func TestLoggerLog(t *testing.T) {
 			format:  "Values: %d, %s, %v",
 			args:    []any{42, "test", true},
 			checkFunc: func(t *testing.T, content string) {
+				t.Helper()
 				if !strings.Contains(content, "Values: 42, test, true") {
 					t.Error("Should format multiple arguments correctly")
 				}
@@ -169,7 +175,7 @@ func TestLoggerLog(t *testing.T) {
 				}
 			}
 
-			logger.Log(tt.format, tt.args...)
+			logger.Logf(tt.format, tt.args...)
 
 			// Close to flush
 			if logger.file != nil {
@@ -299,6 +305,7 @@ func TestLoggerLogDiscovery(t *testing.T) {
 			result:      "make lint",
 			workDir:     "/project",
 			checkFunc: func(t *testing.T, content string) {
+				t.Helper()
 				if !strings.Contains(content, "Discovery for lint in /project") {
 					t.Error("Should log discovery context")
 				}
@@ -313,6 +320,7 @@ func TestLoggerLogDiscovery(t *testing.T) {
 			result:      "",
 			workDir:     "/project",
 			checkFunc: func(t *testing.T, content string) {
+				t.Helper()
 				if !strings.Contains(content, "Discovery for test in /project") {
 					t.Error("Should log discovery context")
 				}
@@ -442,35 +450,35 @@ func TestLoggerConcurrency(t *testing.T) {
 	done := make(chan bool, 4)
 
 	go func() {
-		for i := 0; i < 100; i++ {
-			logger.Log("Message %d", i)
+		for i := range 100 {
+			logger.Logf("Message %d", i)
 		}
 		done <- true
 	}()
 
 	go func() {
-		for i := 0; i < 50; i++ {
+		for range 50 {
 			logger.LogSection("Section")
 		}
 		done <- true
 	}()
 
 	go func() {
-		for i := 0; i < 50; i++ {
+		for range 50 {
 			logger.LogError(os.ErrExist, "test")
 		}
 		done <- true
 	}()
 
 	go func() {
-		for i := 0; i < 50; i++ {
+		for range 50 {
 			logger.LogCommand("cmd", []string{"arg"}, "/dir")
 		}
 		done <- true
 	}()
 
 	// Wait for all goroutines
-	for i := 0; i < 4; i++ {
+	for range 4 {
 		<-done
 	}
 
@@ -498,7 +506,7 @@ func TestLoggerTimestampFormat(t *testing.T) {
 
 	// Log a message
 	beforeLog := time.Now()
-	logger.Log("Test message")
+	logger.Logf("Test message")
 	file.Close()
 
 	content, _ := os.ReadFile(tmpFile)
@@ -583,7 +591,7 @@ func TestLoggerDisabledOperations(t *testing.T) {
 	}
 
 	// None of these should panic
-	logger.Log("test")
+	logger.Logf("test")
 	logger.LogSection("section")
 	logger.LogError(os.ErrNotExist, "context")
 	logger.LogCommand("cmd", []string{"arg"}, "/dir")

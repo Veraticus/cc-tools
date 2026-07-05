@@ -277,13 +277,13 @@ func (s *Statusline) collectRightComponents(
 
 	if data.Devspace != "" {
 		devspace := truncateText(data.Devspace, maxLengths.devspace)
-		components = append(components, Component{"mauve", devspace})
+		components = append(components, Component{colorMauve, devspace})
 	}
 
 	if data.Hostname != "" {
 		hostLabel, _ := s.deps.Resolver.Resolve(aliases.KindHost, data.Hostname)
 		hostname := truncateText(hostLabel, maxLengths.hostname)
-		components = append(components, Component{"rosewater", HostnameIcon + hostname})
+		components = append(components, Component{colorRosewater, HostnameIcon + hostname})
 	}
 
 	if data.GitBranch != "" {

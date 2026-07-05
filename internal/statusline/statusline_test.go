@@ -425,30 +425,26 @@ func TestDevspace(t *testing.T) {
 	sl := CreateStatusline(deps)
 
 	tests := []struct {
-		devspace       string
-		expectedText   string
-		expectedSymbol string
+		devspace     string
+		expectedText string
 	}{
 		// Planet labels truncate to 3 chars (glyph carries identity).
 		// Arbitrary names keep full text since the name IS the identifier.
-		{"mercury", "☿ mer", "☿"},
-		{"venus", "♀ ven", "♀"},
-		{"earth", "♁ ear", "♁"},
-		{"mars", "♂ mar", "♂"},
-		{"jupiter", "♃ jup", "♃"},
-		{"custom", "● custom", "●"},
-		{"", "", ""},
+		{"mercury", "☿ mer"},
+		{"venus", "♀ ven"},
+		{"earth", "♁ ear"},
+		{"mars", "♂ mar"},
+		{"jupiter", "♃ jup"},
+		{"custom", "● custom"},
+		{"", ""},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.devspace, func(t *testing.T) {
 			env.vars["TMUX_DEVSPACE"] = tt.devspace
-			text, symbol := sl.getDevspace()
+			text := sl.getDevspace()
 			if text != tt.expectedText {
 				t.Errorf("Expected text %q, got %q", tt.expectedText, text)
-			}
-			if symbol != tt.expectedSymbol {
-				t.Errorf("Expected symbol %q, got %q", tt.expectedSymbol, symbol)
 			}
 		})
 	}

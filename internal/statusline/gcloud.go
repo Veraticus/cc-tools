@@ -14,7 +14,7 @@ import (
 // CLAUDE_STATUSLINE_GCLOUD=/dev/null suppresses the chip entirely;
 // useful for tests and for users who don't want gcloud state shown.
 func (s *Statusline) getGcloudProject() string {
-	if override := s.deps.EnvReader.Get("CLAUDE_STATUSLINE_GCLOUD"); override == "/dev/null" {
+	if override := s.deps.EnvReader.Get("CLAUDE_STATUSLINE_GCLOUD"); override == devNullOverride {
 		return ""
 	}
 

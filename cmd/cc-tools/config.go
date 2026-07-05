@@ -31,27 +31,27 @@ func runConfigCommand() {
 	switch os.Args[2] {
 	case "get":
 		if len(os.Args) < minGetArgs {
-			out.Error("Error: 'get' requires a key")
+			out.Errorf("Error: 'get' requires a key")
 			printConfigUsage(out)
 			os.Exit(1)
 		}
 		if err := handleConfigGet(ctx, out, manager, os.Args[3]); err != nil {
-			out.Error("Error: %v", err)
+			out.Errorf("Error: %v", err)
 			os.Exit(1)
 		}
 	case "set":
 		if len(os.Args) < minSetArgs {
-			out.Error("Error: 'set' requires a key and value")
+			out.Errorf("Error: 'set' requires a key and value")
 			printConfigUsage(out)
 			os.Exit(1)
 		}
 		if err := handleConfigSet(ctx, out, manager, os.Args[3], os.Args[4]); err != nil {
-			out.Error("Error: %v", err)
+			out.Errorf("Error: %v", err)
 			os.Exit(1)
 		}
 	case "list", "show":
 		if err := handleConfigList(ctx, out, manager); err != nil {
-			out.Error("Error: %v", err)
+			out.Errorf("Error: %v", err)
 			os.Exit(1)
 		}
 	case "reset":
@@ -60,11 +60,11 @@ func runConfigCommand() {
 			key = os.Args[3]
 		}
 		if err := handleConfigReset(ctx, out, manager, key); err != nil {
-			out.Error("Error: %v", err)
+			out.Errorf("Error: %v", err)
 			os.Exit(1)
 		}
 	default:
-		out.Error("Unknown config subcommand: %s", os.Args[2])
+		out.Errorf("Unknown config subcommand: %s", os.Args[2])
 		printConfigUsage(out)
 		os.Exit(1)
 	}
@@ -108,11 +108,11 @@ func handleConfigGet(ctx context.Context, out *output.Terminal, manager *config.
 	}
 
 	if !exists {
-		out.Error("Key '%s' not found", key)
-		out.Info("Available keys:")
+		out.Errorf("Key '%s' not found", key)
+		out.Infof("Available keys:")
 		keys, _ := manager.GetAllKeys(ctx)
 		for _, k := range keys {
-			out.Info("  %s", k)
+			out.Infof("  %s", k)
 		}
 		return fmt.Errorf("key not found")
 	}
@@ -131,7 +131,7 @@ func handleConfigSet(ctx context.Context, out *output.Terminal, manager *config.
 		return fmt.Errorf("set config value: %w", err)
 	}
 
-	out.Success("✓ Set %s = %s", key, value)
+	out.Successf("✓ Set %s = %s", key, value)
 	return nil
 }
 
@@ -181,12 +181,12 @@ func handleConfigList(ctx context.Context, out *output.Terminal, manager *config
 		table.AddRow([]string{key, value, status})
 	}
 
-	out.Info("Configuration Settings")
+	out.Infof("Configuration Settings")
 	_ = out.Write(table.Render())
 
 	// Show config file location
 	configPath := manager.GetConfigPath()
-	out.Info("\nConfig file: %s", configPath)
+	out.Infof("\nConfig file: %s", configPath)
 
 	return nil
 }
@@ -197,13 +197,13 @@ func handleConfigReset(ctx context.Context, out *output.Terminal, manager *confi
 		if err := manager.ResetAll(ctx); err != nil {
 			return fmt.Errorf("reset all config: %w", err)
 		}
-		out.Success("✓ Reset all configuration to defaults")
+		out.Successf("✓ Reset all configuration to defaults")
 	} else {
 		// Reset specific key
 		if err := manager.Reset(ctx, key); err != nil {
 			return fmt.Errorf("reset config key: %w", err)
 		}
-		out.Success("✓ Reset %s to default value", key)
+		out.Successf("✓ Reset %s to default value", key)
 	}
 
 	return nil

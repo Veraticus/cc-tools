@@ -109,7 +109,7 @@ const narrowChipCap = 4
 func gatherNarrowChips(deps *Dependencies, data *CachedData) []narrowChip {
 	chips := make([]narrowChip, 0, narrowChipCap)
 	chips = append(chips, narrowChip{
-		Color: "lavender",
+		Color: colorLavender,
 		Body:  stripNarrowControl(formatPath(data.CurrentDir)),
 		Kind:  kindDir,
 	})
@@ -123,7 +123,7 @@ func gatherNarrowChips(deps *Dependencies, data *CachedData) []narrowChip {
 
 	if data.GitBranch != "" && validNarrowBranchName.MatchString(data.GitBranch) {
 		chips = append(chips, narrowChip{
-			Color: "pink",
+			Color: colorPink,
 			Body:  GitIcon + stripNarrowControl(data.GitBranch),
 			Kind:  kindBranch,
 		})
@@ -160,13 +160,13 @@ func buildNarrowContextBody(pct int) string {
 func contextColor(pct int) string {
 	switch {
 	case pct < contextThresholdYellow:
-		return "green"
+		return colorGreen
 	case pct < contextThresholdPeach:
-		return "yellow"
+		return colorYellow
 	case pct < contextThresholdRed:
-		return "peach"
+		return colorPeach
 	default:
-		return "red"
+		return colorRed
 	}
 }
 
@@ -182,7 +182,7 @@ func contextColor(pct int) string {
 func firstEnvChip(deps *Dependencies, data *CachedData) (narrowChip, bool) {
 	if deps.EnvReader != nil {
 		if profile := awsProfileFromEnv(deps.EnvReader); profile != "" {
-			color := "peach" // default when no resolver
+			color := colorPeach // default when no resolver
 			if deps.Resolver != nil {
 				_, env := deps.Resolver.Resolve(aliases.KindAWS, profile)
 				color = awsBgColor(env)
@@ -195,7 +195,7 @@ func firstEnvChip(deps *Dependencies, data *CachedData) (narrowChip, bool) {
 		}
 	}
 	if data.GcloudProject != "" {
-		color := "lavender"
+		color := colorLavender
 		if deps.Resolver != nil {
 			_, env := deps.Resolver.Resolve(aliases.KindGcloud, data.GcloudProject)
 			color = gcloudBgColor(env)
@@ -207,7 +207,7 @@ func firstEnvChip(deps *Dependencies, data *CachedData) (narrowChip, bool) {
 		}, true
 	}
 	if data.K8sContext != "" {
-		color := "teal"
+		color := colorTeal
 		if deps.Resolver != nil {
 			_, env := deps.Resolver.Resolve(aliases.KindK8s, data.K8sContext)
 			color = k8sBgColor(env)

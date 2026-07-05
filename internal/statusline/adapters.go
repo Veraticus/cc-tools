@@ -99,7 +99,7 @@ func readStateFileAwsProfile() (string, bool) {
 	var state struct {
 		AwsProfile *string `json:"aws_profile"`
 	}
-	if err := json.Unmarshal(data, &state); err != nil {
+	if err = json.Unmarshal(data, &state); err != nil {
 		return "", false
 	}
 	if state.AwsProfile == nil {

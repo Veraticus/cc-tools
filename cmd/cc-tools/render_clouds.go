@@ -1,10 +1,10 @@
 package main
 
 import (
-	"fmt"
 	"os"
 
 	"github.com/Veraticus/cc-tools/internal/aliases"
+	"github.com/Veraticus/cc-tools/internal/output"
 	"github.com/Veraticus/cc-tools/internal/statusline"
 )
 
@@ -29,5 +29,5 @@ func runRenderCloudsCommand() {
 		Resolver:      aliases.NewResolverFromDefaultPath(os.Stderr, "cc-tools render-clouds"),
 	}
 
-	fmt.Print(statusline.RenderClouds(deps))
+	output.NewTerminal(os.Stdout, os.Stderr).Raw(statusline.RenderClouds(deps))
 }

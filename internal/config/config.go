@@ -9,6 +9,10 @@ import (
 	"path/filepath"
 )
 
+// configFileName is the filename of the config file within its directory,
+// and the fallback return value when the home directory can't be resolved.
+const configFileName = "config.json"
+
 // Config represents the application configuration.
 type Config struct {
 	Notifications NotificationsConfig `json:"notifications"`
@@ -70,15 +74,15 @@ func LoadFromManager(ctx context.Context) (*Config, error) {
 func getConfigPath() string {
 	// Check XDG_CONFIG_HOME first
 	if xdgConfig := os.Getenv("XDG_CONFIG_HOME"); xdgConfig != "" {
-		return filepath.Join(xdgConfig, "cc-tools", "config.json")
+		return filepath.Join(xdgConfig, "cc-tools", configFileName)
 	}
 
 	// Default to ~/.config/cc-tools/config.json
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		// Fallback to current directory if we can't get home
-		return "config.json"
+		return configFileName
 	}
 
-	return filepath.Join(homeDir, ".config", "cc-tools", "config.json")
+	return filepath.Join(homeDir, ".config", "cc-tools", configFileName)
 }

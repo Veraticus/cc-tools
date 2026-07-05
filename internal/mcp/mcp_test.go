@@ -24,7 +24,7 @@ type MockCommandExecutor struct {
 }
 
 // CommandContext captures the command and returns a mock exec.Cmd.
-func (m *MockCommandExecutor) CommandContext(ctx context.Context, name string, args ...string) *exec.Cmd {
+func (m *MockCommandExecutor) CommandContext(_ context.Context, name string, args ...string) *exec.Cmd {
 	m.capturedCmd = name
 	m.capturedArgs = args
 
@@ -86,7 +86,7 @@ func TestLoadSettings(t *testing.T) {
 	}{
 		{
 			name: "loads valid settings",
-			setupFunc: func(t *testing.T, settingsPath string) {
+			setupFunc: func(_ *testing.T, settingsPath string) {
 				settings := &Settings{
 					MCPServers: map[string]MCPServer{
 						"targetprocess": {
@@ -109,6 +109,7 @@ func TestLoadSettings(t *testing.T) {
 				os.WriteFile(settingsPath, data, 0600)
 			},
 			checkFunc: func(t *testing.T, settings *Settings) {
+				t.Helper()
 				if len(settings.MCPServers) != 2 {
 					t.Errorf("expected 2 MCP servers, got %d", len(settings.MCPServers))
 				}
@@ -134,7 +135,7 @@ func TestLoadSettings(t *testing.T) {
 		},
 		{
 			name: "handles corrupt JSON",
-			setupFunc: func(t *testing.T, settingsPath string) {
+			setupFunc: func(_ *testing.T, settingsPath string) {
 				os.MkdirAll(filepath.Dir(settingsPath), 0755)
 				os.WriteFile(settingsPath, []byte("{invalid json}"), 0600)
 			},
@@ -142,7 +143,7 @@ func TestLoadSettings(t *testing.T) {
 		},
 		{
 			name: "handles empty MCP servers",
-			setupFunc: func(t *testing.T, settingsPath string) {
+			setupFunc: func(_ *testing.T, settingsPath string) {
 				settings := &Settings{
 					MCPServers: map[string]MCPServer{},
 				}
@@ -151,6 +152,7 @@ func TestLoadSettings(t *testing.T) {
 				os.WriteFile(settingsPath, data, 0600)
 			},
 			checkFunc: func(t *testing.T, settings *Settings) {
+				t.Helper()
 				if settings.MCPServers == nil {
 					t.Error("MCPServers should be initialized")
 				}
@@ -259,23 +261,25 @@ func TestFindMCPByName(t *testing.T) {
 
 			key, server, err := m.findMCPByName(settings, tt.searchName)
 
-			if tt.wantFound {
-				if err != nil {
-					t.Errorf("findMCPByName() error = %v, want found", err)
-				}
-				if key != tt.wantKey {
-					t.Errorf("findMCPByName() key = %s, want %s", key, tt.wantKey)
-				}
-				if server == nil {
-					t.Error("findMCPByName() server should not be nil")
-				}
-			} else {
+			if !tt.wantFound {
 				if err == nil {
 					t.Error("findMCPByName() should return error for not found")
+					return
 				}
 				if !strings.Contains(err.Error(), "not found") {
 					t.Errorf("error should mention 'not found', got %v", err)
 				}
+				return
+			}
+
+			if err != nil {
+				t.Errorf("findMCPByName() error = %v, want found", err)
+			}
+			if key != tt.wantKey {
+				t.Errorf("findMCPByName() key = %s, want %s", key, tt.wantKey)
+			}
+			if server == nil {
+				t.Error("findMCPByName() server should not be nil")
 			}
 		})
 	}
@@ -305,6 +309,7 @@ func TestEnable(t *testing.T) {
 			},
 			mockOutput: "",
 			checkCommand: func(t *testing.T, cmd string, args []string) {
+				t.Helper()
 				if cmd != "claude" {
 					t.Errorf("command = %s, want claude", cmd)
 				}
@@ -326,6 +331,7 @@ func TestEnable(t *testing.T) {
 				},
 			},
 			checkCommand: func(t *testing.T, _ string, args []string) {
+				t.Helper()
 				// args is [mcp, add, name, command, ...serverArgs]; the
 				// expanded command is at index 3.
 				if len(args) < 4 {
@@ -415,6 +421,7 @@ func TestDisable(t *testing.T) {
 				},
 			},
 			checkCommand: func(t *testing.T, cmd string, args []string) {
+				t.Helper()
 				if cmd != "claude" {
 					t.Errorf("command = %s, want claude", cmd)
 				}
@@ -438,7 +445,8 @@ func TestDisable(t *testing.T) {
 			settings: &Settings{
 				MCPServers: map[string]MCPServer{},
 			},
-			checkCommand: func(t *testing.T, cmd string, args []string) {
+			checkCommand: func(t *testing.T, _ string, args []string) {
+				t.Helper()
 				// Should still try to remove with the provided name
 				expectedArgs := []string{"mcp", "remove", "custom-mcp"}
 				if !slicesEqual(args, expectedArgs) {
@@ -536,7 +544,7 @@ func TestEnableAll(t *testing.T) {
 
 			// Create mock executor with custom handler
 			mockExecutor := &MockCommandExecutor{
-				commandHandler: func(name string, args []string) *exec.Cmd {
+				commandHandler: func(_ string, args []string) *exec.Cmd {
 					if len(args) >= 3 && args[0] == "mcp" && args[1] == "add" {
 						serverName := args[2]
 						enabledServers[serverName] = true
@@ -612,7 +620,7 @@ server3: More status`,
 
 			// Create mock executor with custom handler
 			mockExecutor := &MockCommandExecutor{
-				commandHandler: func(name string, args []string) *exec.Cmd {
+				commandHandler: func(_ string, args []string) *exec.Cmd {
 					if len(args) >= 2 && args[0] == "mcp" {
 						if args[1] == "list" {
 							// Return mock list output
@@ -801,7 +809,7 @@ func TestHomeDirectoryExpansion(t *testing.T) {
 	}
 }
 
-// Helper function to compare slices
+// Helper function to compare slices.
 func slicesEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

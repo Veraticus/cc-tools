@@ -152,7 +152,7 @@ func TestAwsProfileFromEnv_StripsExportPrefix(t *testing.T) {
 
 	// Plain values pass through unchanged.
 	er.vars["AWS_PROFILE"] = "personal"
-	if got := awsProfileFromEnv(er); got != "personal" {
+	if got = awsProfileFromEnv(er); got != "personal" {
 		t.Errorf("plain value should pass through; got %q", got)
 	}
 }
@@ -264,7 +264,7 @@ func TestGcloudChip_OrderBetweenAwsAndK8s(t *testing.T) {
 	if idxAws < 0 || idxGcloud < 0 || idxK8s < 0 {
 		t.Fatalf("expected aws, gcloud, and k8s chips; got order: %s", colorChain(comps))
 	}
-	if !(idxAws < idxGcloud && idxGcloud < idxK8s) {
+	if idxAws >= idxGcloud || idxGcloud >= idxK8s {
 		t.Errorf("expected order aws(%d) < gcloud(%d) < k8s(%d); chain=%s",
 			idxAws, idxGcloud, idxK8s, colorChain(comps))
 	}

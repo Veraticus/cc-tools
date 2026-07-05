@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -32,7 +33,10 @@ type Writer interface {
 }
 
 // Terminal provides beautiful terminal output using lipgloss.
+// Terminal is safe for concurrent use by multiple goroutines: writes to
+// stdout and stderr are each serialized by an internal mutex.
 type Terminal struct {
+	mu     sync.Mutex
 	stdout io.Writer
 	stderr io.Writer
 	styles map[Level]lipgloss.Style
@@ -60,6 +64,8 @@ func defaultStyles() map[Level]lipgloss.Style {
 
 // Write writes a plain message to stdout.
 func (t *Terminal) Write(message string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	_, err := fmt.Fprintln(t.stdout, message)
 	if err != nil {
 		return fmt.Errorf("write to stdout: %w", err)
@@ -69,6 +75,8 @@ func (t *Terminal) Write(message string) error {
 
 // WriteError writes a plain message to stderr.
 func (t *Terminal) WriteError(message string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	_, err := fmt.Fprintln(t.stderr, message)
 	if err != nil {
 		return fmt.Errorf("write to stderr: %w", err)
@@ -76,9 +84,9 @@ func (t *Terminal) WriteError(message string) error {
 	return nil
 }
 
-// Print writes a formatted message at the given level to stdout.
+// Printf writes a formatted message at the given level to stdout.
 // Following Go's fmt.Print pattern, this exits on write failure.
-func (t *Terminal) Print(level Level, format string, args ...any) {
+func (t *Terminal) Printf(level Level, format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
 	styled := t.styles[level].Render(msg)
 	if err := t.Write(styled); err != nil {
@@ -87,9 +95,9 @@ func (t *Terminal) Print(level Level, format string, args ...any) {
 	}
 }
 
-// PrintError writes a formatted message at the given level to stderr.
+// PrintErrorf writes a formatted message at the given level to stderr.
 // Following Go's fmt.Print pattern, this exits on write failure.
-func (t *Terminal) PrintError(level Level, format string, args ...any) {
+func (t *Terminal) PrintErrorf(level Level, format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
 	styled := t.styles[level].Render(msg)
 	if err := t.WriteError(styled); err != nil {
@@ -98,35 +106,38 @@ func (t *Terminal) PrintError(level Level, format string, args ...any) {
 	}
 }
 
-// Info writes an info message to stdout.
-func (t *Terminal) Info(format string, args ...any) {
-	t.Print(Info, format, args...)
+// Infof writes an info message to stdout.
+func (t *Terminal) Infof(format string, args ...any) {
+	t.Printf(Info, format, args...)
 }
 
-// Success writes a success message to stdout.
-func (t *Terminal) Success(format string, args ...any) {
-	t.Print(Success, format, args...)
+// Successf writes a success message to stdout.
+func (t *Terminal) Successf(format string, args ...any) {
+	t.Printf(Success, format, args...)
 }
 
-// Warning writes a warning message to stdout.
-func (t *Terminal) Warning(format string, args ...any) {
-	t.Print(Warning, format, args...)
+// Warningf writes a warning message to stdout.
+func (t *Terminal) Warningf(format string, args ...any) {
+	t.Printf(Warning, format, args...)
 }
 
-// Error writes an error message to stderr.
-func (t *Terminal) Error(format string, args ...any) {
-	t.PrintError(Error, format, args...)
+// Errorf writes an error message to stderr.
+func (t *Terminal) Errorf(format string, args ...any) {
+	t.PrintErrorf(Error, format, args...)
 }
 
-// Debug writes a debug message to stderr.
-func (t *Terminal) Debug(format string, args ...any) {
-	t.PrintError(Debug, format, args...)
+// Debugf writes a debug message to stderr.
+func (t *Terminal) Debugf(format string, args ...any) {
+	t.PrintErrorf(Debug, format, args...)
 }
 
 // Raw writes a raw string without any formatting to stdout.
 // Following Go's fmt.Print pattern, this exits on write failure.
 func (t *Terminal) Raw(s string) {
-	if _, err := fmt.Fprint(t.stdout, s); err != nil {
+	t.mu.Lock()
+	_, err := fmt.Fprint(t.stdout, s)
+	t.mu.Unlock()
+	if err != nil {
 		os.Exit(1)
 	}
 }
@@ -134,7 +145,10 @@ func (t *Terminal) Raw(s string) {
 // RawError writes a raw string without any formatting to stderr.
 // Following Go's fmt.Print pattern, this exits on write failure.
 func (t *Terminal) RawError(s string) {
-	if _, err := fmt.Fprint(t.stderr, s); err != nil {
+	t.mu.Lock()
+	_, err := fmt.Fprint(t.stderr, s)
+	t.mu.Unlock()
+	if err != nil {
 		os.Exit(1)
 	}
 }

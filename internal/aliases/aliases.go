@@ -101,11 +101,11 @@ func DefaultPath() string {
 func NewResolverFromDefaultPath(stderr io.Writer, prefix string) *Resolver {
 	path := DefaultPath()
 	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
-		fmt.Fprintf(stderr, "%s: %s missing, using built-in patterns\n", prefix, path)
+		_, _ = fmt.Fprintf(stderr, "%s: %s missing, using built-in patterns\n", prefix, path)
 	}
 	r, err := NewResolver(path)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: alias file parse error: %v\n", prefix, err)
+		_, _ = fmt.Fprintf(stderr, "%s: alias file parse error: %v\n", prefix, err)
 		r, _ = NewResolver("")
 	}
 	return r
@@ -138,17 +138,8 @@ func (r *Resolver) Resolve(kind Kind, raw string) (string, Env) {
 		return "", EnvUnknown
 	}
 
-	if r.table != nil {
-		if e, ok := r.entriesFor(kind)[raw]; ok {
-			label := e.Label
-			if label == "" {
-				label = raw
-			}
-			if e.Env != "" {
-				return label, parseEnv(e.Env)
-			}
-			return label, r.classify(raw)
-		}
+	if label, env, ok := r.resolveExplicit(kind, raw); ok {
+		return label, env
 	}
 
 	label := raw
@@ -156,6 +147,27 @@ func (r *Resolver) Resolve(kind Kind, raw string) (string, Env) {
 		label = stripK8sPrefix(raw)
 	}
 	return label, r.classify(raw)
+}
+
+// resolveExplicit looks up an explicit [kind."raw"] entry. It returns the
+// entry's label (or raw if Label is empty) and env (entry.Env if set, else
+// classify(raw)), plus whether an entry was found at all.
+func (r *Resolver) resolveExplicit(kind Kind, raw string) (string, Env, bool) {
+	if r.table == nil {
+		return "", EnvUnknown, false
+	}
+	e, ok := r.entriesFor(kind)[raw]
+	if !ok {
+		return "", EnvUnknown, false
+	}
+	label := e.Label
+	if label == "" {
+		label = raw
+	}
+	if e.Env != "" {
+		return label, parseEnv(e.Env), true
+	}
+	return label, r.classify(raw), true
 }
 
 func (r *Resolver) entriesFor(kind Kind) map[string]entry {
@@ -175,17 +187,19 @@ func (r *Resolver) entriesFor(kind Kind) map[string]entry {
 	return nil
 }
 
-var defaultPatterns = map[string][]string{
-	"prod":    {"prod", "production"},
-	"staging": {"stag", "staging"},
-	"dev":     {"dev", "sandbox", "sbx", "test"},
+func defaultPatterns() map[string][]string {
+	return map[string][]string{
+		"prod":    {"prod", "production"},
+		"staging": {"stag", "staging"},
+		"dev":     {"dev", "sandbox", "sbx", "test"},
+	}
 }
 
 func (r *Resolver) envPatterns() map[string][]string {
 	if r.table != nil && len(r.table.EnvPatterns) > 0 {
 		return r.table.EnvPatterns
 	}
-	return defaultPatterns
+	return defaultPatterns()
 }
 
 // classify checks raw against env_patterns. Prod beats staging beats dev

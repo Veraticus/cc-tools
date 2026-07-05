@@ -212,7 +212,7 @@ func (s *Statusline) computeData(currentDir string) *CachedData {
 	data.Hostname = s.getHostname()
 
 	// Devspace
-	data.Devspace, _ = s.getDevspace()
+	data.Devspace = s.getDevspace()
 
 	return data
 }
@@ -282,7 +282,7 @@ func (s *Statusline) readGitInfo(gitDir string) GitInfo {
 func (s *Statusline) getK8sContext() string {
 	// Check for test override
 	if override := s.deps.EnvReader.Get("CLAUDE_STATUSLINE_KUBECONFIG"); override != "" {
-		if override == "/dev/null" {
+		if override == devNullOverride {
 			return ""
 		}
 	}
@@ -346,7 +346,14 @@ func (s *Statusline) getHostname() string {
 	return "unknown"
 }
 
-func (s *Statusline) getDevspace() (string, string) {
+const devspacePlanetMercury = "mercury"
+
+// devNullOverride is the sentinel override value (CLAUDE_STATUSLINE_KUBECONFIG,
+// CLAUDE_STATUSLINE_GCLOUD) that suppresses a chip entirely — useful for
+// tests and for users who don't want that chip shown.
+const devNullOverride = "/dev/null"
+
+func (s *Statusline) getDevspace() string {
 	// Check for test override
 	var tmuxDevspace string
 	if override := s.deps.EnvReader.Get("CLAUDE_STATUSLINE_DEVSPACE"); override != "" {
@@ -356,7 +363,7 @@ func (s *Statusline) getDevspace() (string, string) {
 	}
 
 	if tmuxDevspace == "" || tmuxDevspace == "-TMUX_DEVSPACE" {
-		return "", ""
+		return ""
 	}
 
 	// Known planets render with their astronomical glyph and a 3-char
@@ -367,7 +374,7 @@ func (s *Statusline) getDevspace() (string, string) {
 	var symbol string
 	knownPlanet := true
 	switch tmuxDevspace {
-	case "mercury":
+	case devspacePlanetMercury:
 		symbol = "☿"
 	case "venus":
 		symbol = "♀"
@@ -389,34 +396,34 @@ func (s *Statusline) getDevspace() (string, string) {
 			label = label[:devspaceLabelMax]
 		}
 	}
-	return symbol + " " + label, symbol
+	return symbol + " " + label
 }
 
 func (s *Statusline) getColorBG(color string) string {
 	switch color {
-	case "mauve":
+	case colorMauve:
 		return s.colors.MauveBG()
-	case "rosewater":
+	case colorRosewater:
 		return s.colors.RosewaterBG()
 	case "sky":
 		return s.colors.SkyBG()
-	case "peach":
+	case colorPeach:
 		return s.colors.PeachBG()
-	case "teal":
+	case colorTeal:
 		return s.colors.TealBG()
-	case "red":
+	case colorRed:
 		return s.colors.RedBG()
-	case "maroon":
+	case colorMaroon:
 		return s.colors.MaroonBG()
-	case "yellow":
+	case colorYellow:
 		return s.colors.YellowBG()
-	case "green":
+	case colorGreen:
 		return s.colors.GreenBG()
-	case "lavender":
+	case colorLavender:
 		return s.colors.LavenderBG()
-	case "pink":
+	case colorPink:
 		return s.colors.PinkBG()
-	case "sapphire":
+	case colorSapphire:
 		return s.colors.SapphireBG()
 	default:
 		return ""
@@ -425,29 +432,29 @@ func (s *Statusline) getColorBG(color string) string {
 
 func (s *Statusline) getColorFG(color string) string {
 	switch color {
-	case "mauve":
+	case colorMauve:
 		return s.colors.MauveFG()
-	case "rosewater":
+	case colorRosewater:
 		return s.colors.RosewaterFG()
 	case "sky":
 		return s.colors.SkyFG()
-	case "peach":
+	case colorPeach:
 		return s.colors.PeachFG()
-	case "teal":
+	case colorTeal:
 		return s.colors.TealFG()
-	case "red":
+	case colorRed:
 		return s.colors.RedFG()
-	case "maroon":
+	case colorMaroon:
 		return s.colors.MaroonFG()
-	case "yellow":
+	case colorYellow:
 		return s.colors.YellowFG()
-	case "green":
+	case colorGreen:
 		return s.colors.GreenFG()
-	case "lavender":
+	case colorLavender:
 		return s.colors.LavenderFG()
-	case "pink":
+	case colorPink:
 		return s.colors.PinkFG()
-	case "sapphire":
+	case colorSapphire:
 		return s.colors.SapphireFG()
 	default:
 		return ""

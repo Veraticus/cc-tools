@@ -40,7 +40,7 @@ func TestManagerLoad(t *testing.T) {
 	}{
 		{
 			name: "loads valid config",
-			setupFunc: func(t *testing.T, configPath string) {
+			setupFunc: func(_ *testing.T, configPath string) {
 				config := &Config{
 					EnabledDirs: map[string]bool{
 						"/path/one": true,
@@ -52,6 +52,7 @@ func TestManagerLoad(t *testing.T) {
 				os.WriteFile(configPath, data, 0600)
 			},
 			checkFunc: func(t *testing.T, m *Manager) {
+				t.Helper()
 				if len(m.config.EnabledDirs) != 2 {
 					t.Errorf("expected 2 enabled dirs, got %d", len(m.config.EnabledDirs))
 				}
@@ -66,6 +67,7 @@ func TestManagerLoad(t *testing.T) {
 		{
 			name: "handles missing file",
 			checkFunc: func(t *testing.T, m *Manager) {
+				t.Helper()
 				if m.config == nil {
 					t.Error("config should be initialized even when file missing")
 				}
@@ -76,11 +78,12 @@ func TestManagerLoad(t *testing.T) {
 		},
 		{
 			name: "handles empty file",
-			setupFunc: func(t *testing.T, configPath string) {
+			setupFunc: func(_ *testing.T, configPath string) {
 				os.MkdirAll(filepath.Dir(configPath), 0755)
 				os.WriteFile(configPath, []byte(""), 0600)
 			},
 			checkFunc: func(t *testing.T, m *Manager) {
+				t.Helper()
 				if len(m.config.EnabledDirs) != 0 {
 					t.Error("EnabledDirs should be empty for empty file")
 				}
@@ -88,12 +91,13 @@ func TestManagerLoad(t *testing.T) {
 		},
 		{
 			name: "handles nil EnabledDirs in JSON",
-			setupFunc: func(t *testing.T, configPath string) {
+			setupFunc: func(_ *testing.T, configPath string) {
 				data := []byte(`{"enabled_dirs": null}`)
 				os.MkdirAll(filepath.Dir(configPath), 0755)
 				os.WriteFile(configPath, data, 0600)
 			},
 			checkFunc: func(t *testing.T, m *Manager) {
+				t.Helper()
 				if m.config.EnabledDirs == nil {
 					t.Error("EnabledDirs should be initialized even when null in JSON")
 				}
@@ -101,7 +105,7 @@ func TestManagerLoad(t *testing.T) {
 		},
 		{
 			name: "handles corrupt JSON",
-			setupFunc: func(t *testing.T, configPath string) {
+			setupFunc: func(_ *testing.T, configPath string) {
 				os.MkdirAll(filepath.Dir(configPath), 0755)
 				os.WriteFile(configPath, []byte("{invalid json}"), 0600)
 			},
@@ -154,13 +158,14 @@ func TestManagerSave(t *testing.T) {
 				},
 			},
 			checkFunc: func(t *testing.T, configFile string) {
+				t.Helper()
 				data, err := os.ReadFile(configFile)
 				if err != nil {
 					t.Fatalf("Failed to read saved file: %v", err)
 				}
 
 				var saved Config
-				if err := json.Unmarshal(data, &saved); err != nil {
+				if err = json.Unmarshal(data, &saved); err != nil {
 					t.Fatalf("Failed to unmarshal saved config: %v", err)
 				}
 
@@ -191,11 +196,12 @@ func TestManagerSave(t *testing.T) {
 			config: &Config{
 				EnabledDirs: map[string]bool{"/path": true},
 			},
-			setupFunc: func(t *testing.T, configPath string) {
+			setupFunc: func(_ *testing.T, configPath string) {
 				// Ensure parent directory doesn't exist
 				os.RemoveAll(filepath.Dir(configPath))
 			},
 			checkFunc: func(t *testing.T, configFile string) {
+				t.Helper()
 				if _, err := os.Stat(configFile); os.IsNotExist(err) {
 					t.Error("Config file should have been created")
 				}
@@ -215,6 +221,7 @@ func TestManagerSave(t *testing.T) {
 				EnabledDirs: map[string]bool{"/atomic": true},
 			},
 			checkFunc: func(t *testing.T, configFile string) {
+				t.Helper()
 				// Check that temp file doesn't exist
 				tempFile := configFile + ".tmp"
 				if _, err := os.Stat(tempFile); !os.IsNotExist(err) {
@@ -351,6 +358,7 @@ func TestManagerDisable(t *testing.T) {
 				"/other/path": true,
 			},
 			checkFunc: func(t *testing.T, m *Manager) {
+				t.Helper()
 				absDir, _ := filepath.Abs("/test/path")
 				if m.config.EnabledDirs[absDir] {
 					t.Error("/test/path should be disabled")
@@ -367,6 +375,7 @@ func TestManagerDisable(t *testing.T) {
 			inputDir:    "/not/enabled",
 			initialDirs: map[string]bool{"/other": true},
 			checkFunc: func(t *testing.T, m *Manager) {
+				t.Helper()
 				if len(m.config.EnabledDirs) != 1 {
 					t.Error("Should not affect other directories")
 				}
@@ -377,6 +386,7 @@ func TestManagerDisable(t *testing.T) {
 			inputDir:    "./relative",
 			initialDirs: map[string]bool{},
 			checkFunc: func(t *testing.T, m *Manager) {
+				t.Helper()
 				if len(m.config.EnabledDirs) != 0 {
 					t.Error("Should remain empty")
 				}
@@ -674,7 +684,7 @@ func TestManagerConcurrency(t *testing.T) {
 
 	// Concurrent enables
 	go func() {
-		for i := 0; i < 10; i++ {
+		for i := range 10 {
 			dir := filepath.Join("/test", string(rune('a'+i)))
 			m.Enable(ctx, dir)
 		}
@@ -683,7 +693,7 @@ func TestManagerConcurrency(t *testing.T) {
 
 	// Concurrent disables
 	go func() {
-		for i := 0; i < 10; i++ {
+		for i := range 10 {
 			dir := filepath.Join("/test", string(rune('a'+i)))
 			m.Disable(ctx, dir)
 		}
@@ -692,7 +702,7 @@ func TestManagerConcurrency(t *testing.T) {
 
 	// Concurrent reads
 	go func() {
-		for i := 0; i < 10; i++ {
+		for range 10 {
 			m.IsEnabled(ctx, "/test/a")
 			m.GetEnabledDirs(ctx)
 		}
@@ -700,7 +710,7 @@ func TestManagerConcurrency(t *testing.T) {
 	}()
 
 	// Wait for all goroutines
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		<-done
 	}
 
@@ -708,10 +718,6 @@ func TestManagerConcurrency(t *testing.T) {
 }
 
 func TestGetConfigDir(t *testing.T) {
-	// Save original HOME
-	origHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", origHome)
-
 	tests := []struct {
 		name     string
 		homeDir  string
@@ -731,11 +737,10 @@ func TestGetConfigDir(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.homeDir != "" {
-				os.Setenv("HOME", tt.homeDir)
-			} else {
-				os.Unsetenv("HOME")
-			}
+			// os.UserHomeDir() treats HOME="" the same as HOME unset (both
+			// read as the empty string), so t.Setenv covers both cases and
+			// restores the previous value automatically after the subtest.
+			t.Setenv("HOME", tt.homeDir)
 
 			configDir := getConfigDir()
 

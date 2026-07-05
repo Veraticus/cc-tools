@@ -9,10 +9,6 @@ import (
 )
 
 func TestNewManager(t *testing.T) {
-	// Save original env
-	origHome := os.Getenv("XDG_CONFIG_HOME")
-	defer func() { os.Setenv("XDG_CONFIG_HOME", origHome) }()
-
 	tests := []struct {
 		name        string
 		xdgHome     string
@@ -32,7 +28,7 @@ func TestNewManager(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			os.Setenv("XDG_CONFIG_HOME", tt.xdgHome)
+			t.Setenv("XDG_CONFIG_HOME", tt.xdgHome)
 			m := NewManager()
 
 			if !filepath.IsAbs(m.configPath) {
@@ -57,12 +53,13 @@ func TestEnsureConfig(t *testing.T) {
 	}{
 		{
 			name: "creates config file when missing",
-			setupFunc: func(t *testing.T, configPath string) {
+			setupFunc: func(_ *testing.T, configPath string) {
 				// Ensure parent dir exists but config file doesn't
 				os.MkdirAll(filepath.Dir(configPath), 0755)
 			},
 			wantErr: false,
 			checkFunc: func(t *testing.T, m *Manager) {
+				t.Helper()
 				if _, err := os.Stat(m.configPath); os.IsNotExist(err) {
 					t.Error("config file should have been created")
 				}
@@ -72,13 +69,17 @@ func TestEnsureConfig(t *testing.T) {
 					t.Fatal("config should be loaded")
 				}
 				if m.config.Statusline.CacheSeconds != defaultStatuslineCacheSeconds {
-					t.Errorf("cache_seconds = %d, want %d", m.config.Statusline.CacheSeconds, defaultStatuslineCacheSeconds)
+					t.Errorf(
+						"cache_seconds = %d, want %d",
+						m.config.Statusline.CacheSeconds,
+						defaultStatuslineCacheSeconds,
+					)
 				}
 			},
 		},
 		{
 			name: "loads existing config file",
-			setupFunc: func(t *testing.T, configPath string) {
+			setupFunc: func(_ *testing.T, configPath string) {
 				os.MkdirAll(filepath.Dir(configPath), 0755)
 				config := &ConfigValues{
 					Statusline: StatuslineConfigValues{
@@ -92,6 +93,7 @@ func TestEnsureConfig(t *testing.T) {
 			},
 			wantErr: false,
 			checkFunc: func(t *testing.T, m *Manager) {
+				t.Helper()
 				if m.config == nil {
 					t.Fatal("config should be loaded")
 				}
@@ -102,7 +104,7 @@ func TestEnsureConfig(t *testing.T) {
 		},
 		{
 			name: "handles corrupt config file",
-			setupFunc: func(t *testing.T, configPath string) {
+			setupFunc: func(_ *testing.T, configPath string) {
 				os.MkdirAll(filepath.Dir(configPath), 0755)
 				os.WriteFile(configPath, []byte("invalid json"), 0600)
 			},
@@ -319,6 +321,7 @@ func TestSet(t *testing.T) {
 			key:   keyStatuslineCacheSeconds,
 			value: "180",
 			checkFunc: func(t *testing.T, m *Manager) {
+				t.Helper()
 				if m.config.Statusline.CacheSeconds != 180 {
 					t.Errorf("cache_seconds = %d, want 180", m.config.Statusline.CacheSeconds)
 				}
@@ -329,6 +332,7 @@ func TestSet(t *testing.T) {
 			key:   keyStatuslineWorkspace,
 			value: "new-workspace",
 			checkFunc: func(t *testing.T, m *Manager) {
+				t.Helper()
 				if m.config.Statusline.Workspace != "new-workspace" {
 					t.Errorf("workspace = %s, want new-workspace", m.config.Statusline.Workspace)
 				}
@@ -466,8 +470,13 @@ func TestReset(t *testing.T) {
 			key:       keyStatuslineCacheSeconds,
 			initValue: "999",
 			checkFunc: func(t *testing.T, m *Manager) {
+				t.Helper()
 				if m.config.Statusline.CacheSeconds != defaultStatuslineCacheSeconds {
-					t.Errorf("cache_seconds = %d, want %d", m.config.Statusline.CacheSeconds, defaultStatuslineCacheSeconds)
+					t.Errorf(
+						"cache_seconds = %d, want %d",
+						m.config.Statusline.CacheSeconds,
+						defaultStatuslineCacheSeconds,
+					)
 				}
 			},
 		},
@@ -476,6 +485,7 @@ func TestReset(t *testing.T) {
 			key:       keyStatuslineWorkspace,
 			initValue: "custom-workspace",
 			checkFunc: func(t *testing.T, m *Manager) {
+				t.Helper()
 				if m.config.Statusline.Workspace != "" {
 					t.Errorf("workspace = %s, want empty string", m.config.Statusline.Workspace)
 				}
@@ -568,7 +578,7 @@ func TestLoadConfig(t *testing.T) {
 	}{
 		{
 			name: "loads structured config",
-			setupFunc: func(t *testing.T, configPath string) {
+			setupFunc: func(_ *testing.T, configPath string) {
 				config := &ConfigValues{
 					Statusline: StatuslineConfigValues{
 						Workspace:    "test",
@@ -581,6 +591,7 @@ func TestLoadConfig(t *testing.T) {
 				os.WriteFile(configPath, data, 0600)
 			},
 			checkFunc: func(t *testing.T, m *Manager) {
+				t.Helper()
 				if m.config.Statusline.Workspace != "test" {
 					t.Errorf("workspace = %s, want test", m.config.Statusline.Workspace)
 				}
@@ -588,7 +599,7 @@ func TestLoadConfig(t *testing.T) {
 		},
 		{
 			name: "loads map-based config for backward compatibility",
-			setupFunc: func(t *testing.T, configPath string) {
+			setupFunc: func(_ *testing.T, configPath string) {
 				mapConfig := map[string]any{
 					"statusline": map[string]any{
 						"workspace":     "legacy",
@@ -601,6 +612,7 @@ func TestLoadConfig(t *testing.T) {
 				os.WriteFile(configPath, data, 0600)
 			},
 			checkFunc: func(t *testing.T, m *Manager) {
+				t.Helper()
 				if m.config.Statusline.Workspace != "legacy" {
 					t.Errorf("workspace = %s, want legacy", m.config.Statusline.Workspace)
 				}
@@ -609,15 +621,20 @@ func TestLoadConfig(t *testing.T) {
 		{
 			name: "uses defaults when file doesn't exist",
 			checkFunc: func(t *testing.T, m *Manager) {
+				t.Helper()
 				defaults := getDefaultConfig()
 				if m.config.Statusline.CacheSeconds != defaults.Statusline.CacheSeconds {
-					t.Errorf("cache_seconds = %d, want %d", m.config.Statusline.CacheSeconds, defaults.Statusline.CacheSeconds)
+					t.Errorf(
+						"cache_seconds = %d, want %d",
+						m.config.Statusline.CacheSeconds,
+						defaults.Statusline.CacheSeconds,
+					)
 				}
 			},
 		},
 		{
 			name: "fills in missing fields with defaults",
-			setupFunc: func(t *testing.T, configPath string) {
+			setupFunc: func(_ *testing.T, configPath string) {
 				// Partial config with some fields missing
 				config := &ConfigValues{
 					Statusline: StatuslineConfigValues{
@@ -630,6 +647,7 @@ func TestLoadConfig(t *testing.T) {
 				os.WriteFile(configPath, data, 0600)
 			},
 			checkFunc: func(t *testing.T, m *Manager) {
+				t.Helper()
 				if m.config.Statusline.CacheDir != "/dev/shm" {
 					t.Errorf("cache_dir = %s, want /dev/shm", m.config.Statusline.CacheDir)
 				}
@@ -637,7 +655,7 @@ func TestLoadConfig(t *testing.T) {
 		},
 		{
 			name: "handles corrupt JSON",
-			setupFunc: func(t *testing.T, configPath string) {
+			setupFunc: func(_ *testing.T, configPath string) {
 				os.MkdirAll(filepath.Dir(configPath), 0755)
 				os.WriteFile(configPath, []byte("{invalid json}"), 0600)
 			},
@@ -699,6 +717,7 @@ func TestSaveConfig(t *testing.T) {
 			name:   "handles permission error",
 			config: &ConfigValues{},
 			setupFunc: func(t *testing.T, configPath string) {
+				t.Helper()
 				// Create a read-only directory
 				dir := filepath.Dir(configPath)
 				os.MkdirAll(dir, 0755)
@@ -805,7 +824,11 @@ func TestGetConfig(t *testing.T) {
 	}
 
 	if config2.Statusline.CacheSeconds != expectedConfig.Statusline.CacheSeconds {
-		t.Errorf("Lazy loaded cache_seconds = %d, want %d", config2.Statusline.CacheSeconds, expectedConfig.Statusline.CacheSeconds)
+		t.Errorf(
+			"Lazy loaded cache_seconds = %d, want %d",
+			config2.Statusline.CacheSeconds,
+			expectedConfig.Statusline.CacheSeconds,
+		)
 	}
 }
 
@@ -833,11 +856,16 @@ func TestEnsureDefaults(t *testing.T) {
 				Statusline: StatuslineConfigValues{},
 			},
 			check: func(t *testing.T, config *ConfigValues) {
+				t.Helper()
 				if config.Statusline.CacheDir != "/dev/shm" {
 					t.Errorf("cache_dir = %s, want /dev/shm", config.Statusline.CacheDir)
 				}
 				if config.Statusline.CacheSeconds != defaultStatuslineCacheSeconds {
-					t.Errorf("cache_seconds = %d, want %d", config.Statusline.CacheSeconds, defaultStatuslineCacheSeconds)
+					t.Errorf(
+						"cache_seconds = %d, want %d",
+						config.Statusline.CacheSeconds,
+						defaultStatuslineCacheSeconds,
+					)
 				}
 			},
 		},
@@ -851,6 +879,7 @@ func TestEnsureDefaults(t *testing.T) {
 				},
 			},
 			check: func(t *testing.T, config *ConfigValues) {
+				t.Helper()
 				if config.Statusline.Workspace != "custom" {
 					t.Errorf("workspace = %s, want custom", config.Statusline.Workspace)
 				}
@@ -885,6 +914,7 @@ func TestConvertFromMap(t *testing.T) {
 				},
 			},
 			check: func(t *testing.T, config *ConfigValues) {
+				t.Helper()
 				if config.Statusline.Workspace != "test-ws" {
 					t.Errorf("workspace = %s, want test-ws", config.Statusline.Workspace)
 				}
@@ -900,6 +930,7 @@ func TestConvertFromMap(t *testing.T) {
 			name:     "handles empty map",
 			mapInput: map[string]any{},
 			check: func(t *testing.T, config *ConfigValues) {
+				t.Helper()
 				defaults := getDefaultConfig()
 				if config.Statusline.CacheDir != defaults.Statusline.CacheDir {
 					t.Errorf("should have default cache_dir")
@@ -915,6 +946,7 @@ func TestConvertFromMap(t *testing.T) {
 				},
 			},
 			check: func(t *testing.T, config *ConfigValues) {
+				t.Helper()
 				if config.Statusline.Workspace != "" {
 					t.Errorf("workspace should be empty when wrong type")
 				}
@@ -955,14 +987,6 @@ func TestGetDefaultValue(t *testing.T) {
 }
 
 func TestConfigFilePath(t *testing.T) {
-	// Save original env
-	origHome := os.Getenv("XDG_CONFIG_HOME")
-	origUserHome := os.Getenv("HOME")
-	defer func() {
-		os.Setenv("XDG_CONFIG_HOME", origHome)
-		os.Setenv("HOME", origUserHome)
-	}()
-
 	tests := []struct {
 		name         string
 		xdgHome      string
@@ -984,9 +1008,9 @@ func TestConfigFilePath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			os.Setenv("XDG_CONFIG_HOME", tt.xdgHome)
+			t.Setenv("XDG_CONFIG_HOME", tt.xdgHome)
 			if tt.homeDir != "" {
-				os.Setenv("HOME", tt.homeDir)
+				t.Setenv("HOME", tt.homeDir)
 			}
 
 			path := getConfigFilePath()
@@ -997,10 +1021,10 @@ func TestConfigFilePath(t *testing.T) {
 	}
 }
 
-// Helper function
+// Helper function.
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && s[len(s)-len(substr):] == substr ||
-		(len(substr) > 0 && len(s) > 0 && s == substr) ||
+		(substr != "" && s != "" && s == substr) ||
 		(len(s) > len(substr) && findSubstring(s, substr))
 }
 
