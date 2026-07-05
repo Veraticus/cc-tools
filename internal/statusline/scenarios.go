@@ -80,6 +80,12 @@ func Scenarios() []Scenario {
 		}
 	}
 
+	// Squeeze scenario: just above the narrow threshold, the wide
+	// middle region is too small for the context-element + alarm-chip
+	// cluster, exercising the drop-context/keep-alarm path — the alarm
+	// must survive width pressure that would blank a lesser chip.
+	scenarios = append(scenarios, buildRLScenario(rlSqueezeScenarioWidth, "rl-extra"))
+
 	return scenarios
 }
 
@@ -97,6 +103,12 @@ func scenarioFixedNow() time.Time {
 // Named (rather than inlined) so golangci-lint's mnd check passes and
 // so the "rl-extra" cost figure only appears once.
 const (
+	// rlSqueezeScenarioWidth is the terminal width for the alarm
+	// squeeze scenario: wide-mode rendering (just above
+	// narrowWidthThreshold) with a middle region too small for the
+	// full context + alarm cluster.
+	rlSqueezeScenarioWidth = 85
+
 	rlScenarioCtx           = 42
 	rlNormalFiveHourPct     = 23
 	rlNormalSevenDayPct     = 41
@@ -158,7 +170,7 @@ func buildRLScenario(width int, rlState string) Scenario {
 		CommandRunner: newFixedCommandRunner(),
 		EnvReader:     env,
 		TerminalWidth: fixedTerminalWidth(width),
-		CacheDir:      "/tmp",
+		CacheDir:      "", // caching disabled: fixtures must never touch the real filesystem
 		CacheDuration: 0,
 		IconIndex:     func(int) int { return 0 },
 		Now:           scenarioFixedNow,
@@ -216,7 +228,7 @@ func buildScenario(width int, ctxPercent float64, gitState, envState string) Sce
 		CommandRunner: cr,
 		EnvReader:     env,
 		TerminalWidth: fixedTerminalWidth(width),
-		CacheDir:      "/tmp",
+		CacheDir:      "", // caching disabled: fixtures must never touch the real filesystem
 		CacheDuration: 0,
 		// Pin the model icon so golden output doesn't flake across runs.
 		IconIndex: func(int) int { return 0 },

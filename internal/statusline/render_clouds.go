@@ -30,7 +30,7 @@ func RenderClouds(deps *Dependencies) string {
 		chips = append(chips, s.createK8sComponent(k8sContext, cloudMaxLen))
 	}
 
-	return s.renderChainAfter("sky", chips)
+	return s.renderChainAfter(colorSky, chips)
 }
 
 // renderChainAfter renders a chip chain where the leading chevron

@@ -340,3 +340,71 @@ func TestBuildMiddleSection_DropsContextBeforeChipWhenTight(t *testing.T) {
 		t.Errorf("context element should be dropped in favor of the chip under width pressure; got %q", stripped)
 	}
 }
+
+// --- alarm chip: degrades under width pressure, never blanks ---
+
+func alarmSqueezeData() *CachedData {
+	return &CachedData{
+		RateLimits: &RateLimitsInput{
+			FiveHour: &RateLimitWindow{UsedPercentage: 100, ResetsAt: 1000},
+		},
+		Cost: CostInput{TotalCostUSD: 4.12},
+	}
+}
+
+func TestBuildMiddleSection_AlarmSqueezedTruncatesInsteadOfBlanking(t *testing.T) {
+	s := CreateStatusline(&Dependencies{})
+	s.colors = CatppuccinMocha{}
+	data := alarmSqueezeData()
+
+	// A middle region narrower than the full alarm chip must render a
+	// body-truncated alarm chip, never a run of blank spaces.
+	fullWidth := runewidth.StringWidth(stripAnsi(s.buildAlarmChip(data.Cost)))
+	width := fullWidth - 5
+
+	middle := s.buildMiddleSection(data, width)
+	stripped := stripAnsi(middle)
+
+	if got := runewidth.StringWidth(stripped); got != width {
+		t.Errorf("squeezed middle section width = %d, want %d", got, width)
+	}
+	if strings.TrimSpace(stripped) == "" {
+		t.Fatalf("alarm chip must never blank under width pressure; got %q", middle)
+	}
+	if !strings.Contains(middle, s.getColorBG(colorRed)) {
+		t.Errorf("squeezed alarm must keep its red background; got %q", middle)
+	}
+}
+
+func TestBuildMiddleSection_AlarmTinyWidthFloodsRed(t *testing.T) {
+	s := CreateStatusline(&Dependencies{})
+	s.colors = CatppuccinMocha{}
+	data := alarmSqueezeData()
+
+	// Below even a curve-wrapped icon, the whole region floods red —
+	// still an unmistakable emergency, still exactly `width` cells.
+	const width = 4
+	middle := s.buildMiddleSection(data, width)
+
+	if got := runewidth.StringWidth(stripAnsi(middle)); got != width {
+		t.Errorf("flooded middle section width = %d, want %d", got, width)
+	}
+	if !strings.Contains(middle, s.getColorBG(colorRed)) {
+		t.Errorf("tiny-width alarm region must be red-flooded; got %q", middle)
+	}
+}
+
+func TestBuildMiddleSection_NonAlarmChipStillBlanksWhenTooNarrow(t *testing.T) {
+	s := CreateStatusline(&Dependencies{})
+	s.colors = CatppuccinMocha{}
+	data := &CachedData{Cost: CostInput{TotalCostUSD: 4.12}}
+
+	// The cost chip is not an emergency: when it can't fit, the middle
+	// region blanks exactly as before.
+	const width = 6
+	middle := s.buildMiddleSection(data, width)
+
+	if stripped := stripAnsi(middle); strings.TrimSpace(stripped) != "" {
+		t.Errorf("non-alarm chip should blank when too narrow; got %q", stripped)
+	}
+}

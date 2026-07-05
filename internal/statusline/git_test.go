@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -171,8 +172,13 @@ func TestGitStatus_CorruptCacheReRuns(t *testing.T) {
 	cwd := "/some/project"
 	now := time.Now()
 
-	// Pre-seed a corrupt cache file at the exact path gitStatus computes.
-	path := gitStatusCachePath(cacheDir, cwd)
+	// Pre-seed a corrupt cache file at the exact path gitStatus computes
+	// (inside the per-uid subdirectory).
+	dir, ok := ensureGitCacheDir(cacheDir)
+	if !ok {
+		t.Fatal("ensureGitCacheDir failed in a fresh temp dir")
+	}
+	path := gitStatusCachePath(dir, cwd)
 	if err := os.WriteFile(path, []byte("not json {"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -226,6 +232,83 @@ func TestGitStatus_EmptyCacheDirSkipsDiskEntirely(t *testing.T) {
 
 	if runner.calls != 2 {
 		t.Errorf("empty cacheDir should always re-run rather than cache, calls=%d", runner.calls)
+	}
+}
+
+// --- per-uid cache-dir hardening ------------------------------------------
+
+func TestEnsureGitCacheDir_CreatesOwnedPrivateSubdir(t *testing.T) {
+	cacheDir := t.TempDir()
+
+	dir, ok := ensureGitCacheDir(cacheDir)
+	if !ok {
+		t.Fatal("expected ok=true in a fresh temp dir")
+	}
+	if filepath.Dir(dir) != cacheDir {
+		t.Errorf("subdir %q should live directly inside %q", dir, cacheDir)
+	}
+
+	info, err := os.Lstat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("expected a real directory, got mode %v", info.Mode())
+	}
+	if info.Mode().Perm() != 0o700 {
+		t.Errorf("expected mode 0700, got %v", info.Mode().Perm())
+	}
+}
+
+func TestEnsureGitCacheDir_RejectsPlantedSymlink(t *testing.T) {
+	cacheDir := t.TempDir()
+	target := t.TempDir()
+
+	// An attacker pre-plants a symlink at the exact per-uid path,
+	// pointing at a directory they control.
+	planted := filepath.Join(cacheDir, "cc-tools-"+strconv.Itoa(os.Getuid()))
+	if err := os.Symlink(target, planted); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := ensureGitCacheDir(cacheDir); ok {
+		t.Error("a symlink at the per-uid path must disable caching, got ok=true")
+	}
+}
+
+func TestEnsureGitCacheDir_RejectsWrongMode(t *testing.T) {
+	cacheDir := t.TempDir()
+
+	// A pre-existing per-uid dir with loose permissions (e.g. created
+	// by something else, or tampered) must not be trusted; MkdirAll
+	// won't tighten an existing directory's mode.
+	pre := filepath.Join(cacheDir, "cc-tools-"+strconv.Itoa(os.Getuid()))
+	if err := os.Mkdir(pre, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := ensureGitCacheDir(cacheDir); ok {
+		t.Error("a per-uid dir that isn't mode 0700 must disable caching, got ok=true")
+	}
+}
+
+func TestGitStatus_UntrustedCacheDirStillReturnsFreshState(t *testing.T) {
+	cacheDir := t.TempDir()
+	planted := filepath.Join(cacheDir, "cc-tools-"+strconv.Itoa(os.Getuid()))
+	if err := os.Symlink(t.TempDir(), planted); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &countingRunner{output: []byte("# branch.head main\n# branch.ab +0 -0\n")}
+
+	first := gitStatus(runner, cacheDir, time.Minute, "/some/project", time.Now())
+	second := gitStatus(runner, cacheDir, time.Minute, "/some/project", time.Now())
+
+	if !first.OK || !second.OK {
+		t.Errorf("an untrusted cache dir must not break the git chip: got %+v / %+v", first, second)
+	}
+	if runner.calls != 2 {
+		t.Errorf("untrusted cache dir should re-run every call rather than cache, calls=%d", runner.calls)
 	}
 }
 

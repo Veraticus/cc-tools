@@ -11,6 +11,7 @@ const (
 	colorPink      = "pink"
 	colorMauve     = "mauve"
 	colorSapphire  = "sapphire"
+	colorSky       = "sky"
 	colorLavender  = "lavender"
 	colorMaroon    = "maroon"
 	colorYellow    = "yellow"

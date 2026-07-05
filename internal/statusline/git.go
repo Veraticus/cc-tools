@@ -5,10 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -28,6 +30,11 @@ const abFieldCount = 2
 // file; owner-only since CacheDir may be a shared location like
 // /dev/shm.
 const gitCacheFilePerm = 0o600
+
+// gitCacheDirPerm is the permission mode for the per-uid cache
+// subdirectory — owner-only, so no other user of a shared CacheDir can
+// plant or read entries inside it.
+const gitCacheDirPerm = 0o700
 
 // gitCacheHashBytes is how many bytes of the cwd's sha256 sum are kept
 // for the cache filename — enough to make collisions practically
@@ -71,7 +78,12 @@ func gitStatus(runner CommandRunner, cacheDir string, ttl time.Duration, cwd str
 		return runGitStatus(runner, cwd)
 	}
 
-	cachePath := gitStatusCachePath(cacheDir, cwd)
+	dir, dirTrusted := ensureGitCacheDir(cacheDir)
+	if !dirTrusted {
+		return runGitStatus(runner, cwd)
+	}
+
+	cachePath := gitStatusCachePath(dir, cwd)
 	if state, ok := readFreshGitStatusCache(cachePath, ttl, now); ok {
 		return state
 	}
@@ -81,6 +93,35 @@ func gitStatus(runner CommandRunner, cacheDir string, ttl time.Duration, cwd str
 		writeGitStatusCache(cachePath, state)
 	}
 	return state
+}
+
+// ensureGitCacheDir creates (or verifies) the per-uid subdirectory of
+// cacheDir that all git-status cache files live in. CacheDir is
+// typically a shared, world-writable location (/dev/shm, /tmp) where
+// the cache filename is predictable, so another local user could
+// pre-plant a symlink at that path and redirect our 0600 write onto a
+// file they choose. Confining every write to a directory that is (a)
+// a real directory, not a symlink, (b) owned by this uid, and (c)
+// mode 0700 closes that off. Any failure to establish those three
+// properties returns ok=false, which disables caching for the call —
+// the statusline just runs git fresh, exactly as with CacheDir "".
+func ensureGitCacheDir(cacheDir string) (string, bool) {
+	dir := filepath.Join(cacheDir, fmt.Sprintf("cc-tools-%d", os.Getuid()))
+	if err := os.MkdirAll(dir, gitCacheDirPerm); err != nil {
+		return "", false
+	}
+
+	// Lstat, not Stat: a planted symlink to a directory must be seen
+	// as a symlink and rejected, not resolved through.
+	info, err := os.Lstat(dir)
+	if err != nil || !info.IsDir() || info.Mode().Perm() != gitCacheDirPerm {
+		return "", false
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || int(stat.Uid) != os.Getuid() {
+		return "", false
+	}
+	return dir, true
 }
 
 // gitStatusCachePath returns the cache file path for cwd inside

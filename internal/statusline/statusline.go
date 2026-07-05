@@ -481,7 +481,7 @@ func (s *Statusline) getColorBG(color string) string {
 		return s.colors.MauveBG()
 	case colorRosewater:
 		return s.colors.RosewaterBG()
-	case "sky":
+	case colorSky:
 		return s.colors.SkyBG()
 	case colorPeach:
 		return s.colors.PeachBG()
@@ -512,7 +512,7 @@ func (s *Statusline) getColorFG(color string) string {
 		return s.colors.MauveFG()
 	case colorRosewater:
 		return s.colors.RosewaterFG()
-	case "sky":
+	case colorSky:
 		return s.colors.SkyFG()
 	case colorPeach:
 		return s.colors.PeachFG()

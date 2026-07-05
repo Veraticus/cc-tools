@@ -46,9 +46,21 @@ func (s *Statusline) Render(data *CachedData) string {
 		)
 	}
 
-	// Build components with proper sizing that accounts for spacers
-	leftSection := s.buildLeftSection(dirPath, data.ModelDisplay, modelIcon, data.Effort, contentWidth)
-	rightSection := s.buildRightSection(data, contentWidth)
+	// Build components with proper sizing that accounts for spacers.
+	// When the extra-usage alarm is active, its chip width is carved
+	// out of the budget offered to the left/right sections so their
+	// proportional truncation absorbs the squeeze — the alarm is an
+	// emergency signal and must never be the piece that loses its
+	// space to a long directory or a pile of env chips.
+	sectionBudget := contentWidth
+	if middleChipKind(data) == chipAlarm {
+		alarmWidth := runewidth.StringWidth(stripAnsi(s.buildMiddleChip(chipAlarm, data)))
+		if sectionBudget > alarmWidth {
+			sectionBudget -= alarmWidth
+		}
+	}
+	leftSection := s.buildLeftSection(dirPath, data.ModelDisplay, modelIcon, data.Effort, sectionBudget)
+	rightSection := s.buildRightSection(data, sectionBudget)
 
 	// Spacers are width constraints, not visible spaces
 	// Calculate actual widths (stripping ANSI) without adding spacer widths
@@ -369,7 +381,7 @@ func (s *Statusline) createGitComponent(data *CachedData, maxLen int) Component 
 		sb.WriteString(s.colors.BaseFG())
 	}
 
-	return Component{"sky", sb.String()}
+	return Component{colorSky, sb.String()}
 }
 
 // prGlyphColor maps a PR's review_state to the git chip's PR glyph
@@ -467,8 +479,16 @@ func (s *Statusline) buildMiddleSection(data *CachedData, width int) string {
 	chip := s.buildMiddleChip(middleChipKind(data), data)
 
 	cluster, clusterWidth := assembleMiddleCluster(contextEl, chip, width)
-	if clusterWidth == 0 || width < clusterWidth {
-		// Doesn't fit even centered — blank, same as today.
+	if clusterWidth == 0 {
+		return strings.Repeat(" ", width)
+	}
+	if width < clusterWidth {
+		// assembleMiddleCluster already dropped the context element, so
+		// the chip alone doesn't fit. The rate-limit/cost chips blank
+		// under this pressure; the alarm never does — it degrades.
+		if middleChipKind(data) == chipAlarm {
+			return s.buildSqueezedAlarmChip(data.Cost, width)
+		}
 		return strings.Repeat(" ", width)
 	}
 
@@ -685,13 +705,34 @@ func (s *Statusline) buildCostChip(cost CostInput) string {
 	return s.buildPowerlineChip(body, colorSapphire)
 }
 
+// alarmChipBody is the alarm chip's text content, shared by the
+// normal and squeezed renderings so the two can never drift.
+func alarmChipBody(cost CostInput) string {
+	return fmt.Sprintf("%sEXTRA $%.2f", AlarmIcon, cost.TotalCostUSD)
+}
+
 // buildAlarmChip renders the extra-usage alarm powerline chip
 // (`AlarmIcon EXTRA $X.XX`) on a red background — the same red as the
 // context bar's >=80% state. This is an emergency signal: it must
 // never be muted, downgraded, or omitted under width pressure.
 func (s *Statusline) buildAlarmChip(cost CostInput) string {
-	body := fmt.Sprintf("%sEXTRA $%.2f", AlarmIcon, cost.TotalCostUSD)
-	return s.buildPowerlineChip(body, colorRed)
+	return s.buildPowerlineChip(alarmChipBody(cost), colorRed)
+}
+
+// buildSqueezedAlarmChip is the pathological fallback for a middle
+// region narrower than the full alarm chip (possible when the
+// left/right sections exhaust the row despite Render's alarm-width
+// reservation): the chip body is truncated to whatever fits, and when
+// not even a curve-wrapped icon fits, the whole region floods red.
+// The alarm degrades under width pressure but never blanks.
+func (s *Statusline) buildSqueezedAlarmChip(cost CostInput, width int) string {
+	const chipChromeWidth = 4 // LeftCurve + two body-padding spaces + RightCurve
+	bodyBudget := width - chipChromeWidth
+	if bodyBudget < runewidth.StringWidth(AlarmIcon) {
+		return s.getColorBG(colorRed) + strings.Repeat(" ", width) + s.colors.NC()
+	}
+	chip := s.buildPowerlineChip(truncateText(alarmChipBody(cost), bodyBudget), colorRed)
+	return s.centerElement(chip, runewidth.StringWidth(stripAnsi(chip)), width)
 }
 
 // buildPowerlineChip renders a LeftCurve+body+RightCurve powerline
