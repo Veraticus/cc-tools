@@ -135,6 +135,293 @@ func TestInput_ContextWindow(t *testing.T) {
 	}
 }
 
+// assertFullPayload checks every new stdin field parsed from the
+// full-payload case of TestInputParse_NewStdinFields.
+func assertFullPayload(t *testing.T, in Input) {
+	t.Helper()
+	if in.RateLimits == nil {
+		t.Fatal("RateLimits = nil, want non-nil")
+	}
+	assertRateLimitWindow(t, "FiveHour", in.RateLimits.FiveHour, 34.5, 1751700000)
+	assertRateLimitWindow(t, "SevenDay", in.RateLimits.SevenDay, 61.2, 1752100000)
+	if in.Cost.TotalCostUSD != 1.25 {
+		t.Errorf("Cost.TotalCostUSD = %f, want 1.25", in.Cost.TotalCostUSD)
+	}
+	if in.Cost.TotalLinesAdded != 120 {
+		t.Errorf("Cost.TotalLinesAdded = %d, want 120", in.Cost.TotalLinesAdded)
+	}
+	if in.Cost.TotalLinesRemoved != 30 {
+		t.Errorf("Cost.TotalLinesRemoved = %d, want 30", in.Cost.TotalLinesRemoved)
+	}
+	if in.Effort == nil {
+		t.Fatal("Effort = nil, want non-nil")
+	}
+	if in.Effort.Level != "high" {
+		t.Errorf("Effort.Level = %q, want %q", in.Effort.Level, "high")
+	}
+	if in.PR == nil {
+		t.Fatal("PR = nil, want non-nil")
+	}
+	if in.PR.Number != 42 {
+		t.Errorf("PR.Number = %d, want 42", in.PR.Number)
+	}
+	if in.PR.URL != "https://github.com/o/r/pull/42" {
+		t.Errorf("PR.URL = %q, want %q", in.PR.URL, "https://github.com/o/r/pull/42")
+	}
+	if in.PR.ReviewState != "approved" {
+		t.Errorf("PR.ReviewState = %q, want %q", in.PR.ReviewState, "approved")
+	}
+}
+
+// assertRateLimitWindow checks one parsed rate-limit window against the
+// expected usage percentage and reset timestamp.
+func assertRateLimitWindow(t *testing.T, name string, w *RateLimitWindow, wantPct float64, wantResets int64) {
+	t.Helper()
+	if w == nil {
+		t.Fatalf("RateLimits.%s = nil, want non-nil", name)
+	}
+	if w.UsedPercentage != wantPct {
+		t.Errorf("%s.UsedPercentage = %f, want %f", name, w.UsedPercentage, wantPct)
+	}
+	if w.ResetsAt != wantResets {
+		t.Errorf("%s.ResetsAt = %d, want %d", name, w.ResetsAt, wantResets)
+	}
+}
+
+func TestInputParse_NewStdinFields(t *testing.T) {
+	tests := []struct {
+		name  string
+		json  string
+		check func(*testing.T, Input)
+	}{
+		{
+			name: "full payload",
+			json: `{
+				"rate_limits": {
+					"five_hour": {"used_percentage": 34.5, "resets_at": 1751700000},
+					"seven_day": {"used_percentage": 61.2, "resets_at": 1752100000}
+				},
+				"cost": {"total_cost_usd": 1.25, "total_lines_added": 120, "total_lines_removed": 30},
+				"effort": {"level": "high"},
+				"pr": {"number": 42, "url": "https://github.com/o/r/pull/42", "review_state": "approved"}
+			}`,
+			check: assertFullPayload,
+		},
+		{
+			name: "empty payload",
+			json: `{}`,
+			check: func(t *testing.T, in Input) {
+				t.Helper()
+				if in.RateLimits != nil {
+					t.Errorf("RateLimits = %+v, want nil", in.RateLimits)
+				}
+				if in.Effort != nil {
+					t.Errorf("Effort = %+v, want nil", in.Effort)
+				}
+				if in.PR != nil {
+					t.Errorf("PR = %+v, want nil", in.PR)
+				}
+				if in.Cost != (CostInput{}) {
+					t.Errorf("Cost = %+v, want zero value", in.Cost)
+				}
+			},
+		},
+		{
+			name: "rate_limits with only five_hour",
+			json: `{"rate_limits": {"five_hour": {"used_percentage": 12, "resets_at": 1751700000}}}`,
+			check: func(t *testing.T, in Input) {
+				t.Helper()
+				if in.RateLimits == nil {
+					t.Fatal("RateLimits = nil, want non-nil")
+				}
+				if in.RateLimits.FiveHour == nil {
+					t.Fatal("RateLimits.FiveHour = nil, want non-nil")
+				}
+				if in.RateLimits.FiveHour.UsedPercentage != 12 {
+					t.Errorf("FiveHour.UsedPercentage = %f, want 12", in.RateLimits.FiveHour.UsedPercentage)
+				}
+				if in.RateLimits.SevenDay != nil {
+					t.Errorf("RateLimits.SevenDay = %+v, want nil", in.RateLimits.SevenDay)
+				}
+			},
+		},
+		{
+			name: "pr without review_state",
+			json: `{"pr": {"number": 7, "url": "https://github.com/o/r/pull/7"}}`,
+			check: func(t *testing.T, in Input) {
+				t.Helper()
+				if in.PR == nil {
+					t.Fatal("PR = nil, want non-nil")
+				}
+				if in.PR.Number != 7 {
+					t.Errorf("PR.Number = %d, want 7", in.PR.Number)
+				}
+				if in.PR.ReviewState != "" {
+					t.Errorf("PR.ReviewState = %q, want empty", in.PR.ReviewState)
+				}
+			},
+		},
+		{
+			name: "cost alone",
+			json: `{"cost": {"total_cost_usd": 0.42, "total_lines_added": 5, "total_lines_removed": 1}}`,
+			check: func(t *testing.T, in Input) {
+				t.Helper()
+				if in.Cost.TotalCostUSD != 0.42 {
+					t.Errorf("Cost.TotalCostUSD = %f, want 0.42", in.Cost.TotalCostUSD)
+				}
+				if in.Cost.TotalLinesAdded != 5 {
+					t.Errorf("Cost.TotalLinesAdded = %d, want 5", in.Cost.TotalLinesAdded)
+				}
+				if in.Cost.TotalLinesRemoved != 1 {
+					t.Errorf("Cost.TotalLinesRemoved = %d, want 1", in.Cost.TotalLinesRemoved)
+				}
+				if in.RateLimits != nil || in.Effort != nil || in.PR != nil {
+					t.Errorf("RateLimits/Effort/PR = %+v/%+v/%+v, want all nil", in.RateLimits, in.Effort, in.PR)
+				}
+			},
+		},
+		{
+			name: "effort alone",
+			json: `{"effort": {"level": "max"}}`,
+			check: func(t *testing.T, in Input) {
+				t.Helper()
+				if in.Effort == nil {
+					t.Fatal("Effort = nil, want non-nil")
+				}
+				if in.Effort.Level != "max" {
+					t.Errorf("Effort.Level = %q, want %q", in.Effort.Level, "max")
+				}
+				if in.RateLimits != nil || in.PR != nil {
+					t.Errorf("RateLimits/PR = %+v/%+v, want both nil", in.RateLimits, in.PR)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var input Input
+			if err := json.Unmarshal([]byte(tt.json), &input); err != nil {
+				t.Fatalf("Failed to unmarshal: %v", err)
+			}
+			tt.check(t, input)
+		})
+	}
+}
+
+func TestComputeData_CarriesNewStdinFields(t *testing.T) {
+	deps := &Dependencies{
+		FileReader:    NewMockFileReader(),
+		CommandRunner: NewMockCommandRunner(),
+		EnvReader:     NewMockEnvReader(),
+		TerminalWidth: &MockTerminalWidth{width: 210},
+	}
+	sl := CreateStatusline(deps)
+
+	jsonInput := `{
+		"model": {"display_name": "Fable"},
+		"workspace": {"project_dir": "/tmp/project"},
+		"rate_limits": {"five_hour": {"used_percentage": 50, "resets_at": 1751700000}},
+		"cost": {"total_cost_usd": 2.5, "total_lines_added": 10, "total_lines_removed": 3},
+		"effort": {"level": "xhigh"},
+		"pr": {"number": 9, "url": "https://github.com/o/r/pull/9", "review_state": "pending"}
+	}`
+	if err := sl.parseInput(bytes.NewReader([]byte(jsonInput))); err != nil {
+		t.Fatalf("parseInput: %v", err)
+	}
+	data := sl.computeData("/tmp/project")
+
+	if data.RateLimits == nil || data.RateLimits.FiveHour == nil {
+		t.Fatalf("RateLimits not carried into CachedData: %+v", data.RateLimits)
+	}
+	if data.RateLimits.FiveHour.UsedPercentage != 50 {
+		t.Errorf("RateLimits.FiveHour.UsedPercentage = %f, want 50", data.RateLimits.FiveHour.UsedPercentage)
+	}
+	if data.Cost.TotalCostUSD != 2.5 {
+		t.Errorf("Cost.TotalCostUSD = %f, want 2.5", data.Cost.TotalCostUSD)
+	}
+	if data.Effort == nil || data.Effort.Level != "xhigh" {
+		t.Errorf("Effort = %+v, want level xhigh", data.Effort)
+	}
+	if data.PR == nil || data.PR.ReviewState != "pending" {
+		t.Errorf("PR = %+v, want review_state pending", data.PR)
+	}
+}
+
+func TestEffortSuffixInModelChip(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		contains    []string
+		notContains []string
+	}{
+		{
+			name: "effort high renders ×H suffix",
+			input: `{
+				"model": {"display_name": "Fable"},
+				"workspace": {"project_dir": "/tmp/project"},
+				"effort": {"level": "high"}
+			}`,
+			contains: []string{"Fable ×H"},
+		},
+		{
+			name: "effort absent renders no suffix",
+			input: `{
+				"model": {"display_name": "Fable"},
+				"workspace": {"project_dir": "/tmp/project"}
+			}`,
+			contains:    []string{"Fable"},
+			notContains: []string{"×"},
+		},
+		{
+			name: "effort max renders ×MAX suffix",
+			input: `{
+				"model": {"display_name": "Fable"},
+				"workspace": {"project_dir": "/tmp/project"},
+				"effort": {"level": "max"}
+			}`,
+			contains: []string{"Fable ×MAX"},
+		},
+		{
+			name: "unknown effort level renders no suffix",
+			input: `{
+				"model": {"display_name": "Fable"},
+				"workspace": {"project_dir": "/tmp/project"},
+				"effort": {"level": "turbo"}
+			}`,
+			contains:    []string{"Fable"},
+			notContains: []string{"×"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			deps := &Dependencies{
+				FileReader:    NewMockFileReader(),
+				CommandRunner: NewMockCommandRunner(),
+				EnvReader:     NewMockEnvReader(),
+				TerminalWidth: &MockTerminalWidth{width: 210},
+			}
+			sl := CreateStatusline(deps)
+
+			output, err := sl.Generate(bytes.NewReader([]byte(tt.input)))
+			if err != nil {
+				t.Fatalf("Generate() error = %v", err)
+			}
+			for _, want := range tt.contains {
+				if !strings.Contains(output, want) {
+					t.Errorf("Output doesn't contain %q\nGot: %q", want, output)
+				}
+			}
+			for _, unwanted := range tt.notContains {
+				if strings.Contains(output, unwanted) {
+					t.Errorf("Output contains %q but shouldn't\nGot: %q", unwanted, output)
+				}
+			}
+		})
+	}
+}
+
 func TestStatuslineGenerate(t *testing.T) {
 	tests := []struct {
 		name     string

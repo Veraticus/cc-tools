@@ -45,16 +45,6 @@ func TestStatuslineStress(t *testing.T) {
 		}{
 			DisplayName: "Claude 3 Opus",
 		},
-		Cost: struct {
-			TotalCostUSD     float64 `json:"total_cost_usd"`
-			InputTokens      int     `json:"input_tokens"`
-			OutputTokens     int     `json:"output_tokens"`
-			CacheReadTokens  int     `json:"cache_read_input_tokens"`
-			CacheWriteTokens int     `json:"cache_creation_input_tokens"`
-		}{
-			InputTokens:  50000,
-			OutputTokens: 2000,
-		},
 		GitInfo: struct {
 			Branch       string `json:"branch"`
 			IsGitRepo    bool   `json:"is_git_repo"`

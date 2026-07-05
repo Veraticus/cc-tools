@@ -20,13 +20,7 @@ type Input struct {
 		Provider    string `json:"provider"`
 		DisplayName string `json:"display_name"`
 	} `json:"model"`
-	Cost struct {
-		TotalCostUSD     float64 `json:"total_cost_usd"`
-		InputTokens      int     `json:"input_tokens"`
-		OutputTokens     int     `json:"output_tokens"`
-		CacheReadTokens  int     `json:"cache_read_input_tokens"`
-		CacheWriteTokens int     `json:"cache_creation_input_tokens"`
-	} `json:"cost"`
+	Cost          CostInput `json:"cost"`
 	ContextWindow struct {
 		UsedPercentage    float64 `json:"used_percentage"`
 		ContextWindowSize int     `json:"context_window_size"`
@@ -43,6 +37,49 @@ type Input struct {
 		CWD        string `json:"cwd"`
 	} `json:"workspace"`
 	TranscriptPath string `json:"transcript_path"`
+	// RateLimits is nil when Claude Code sends no rate_limits object,
+	// meaning the session is not a subscription session — that nil/non-nil
+	// distinction drives whether rate-limit chips or a cost chip render.
+	RateLimits *RateLimitsInput `json:"rate_limits"`
+	Effort     *EffortInput     `json:"effort"`
+	PR         *PRInput         `json:"pr"`
+}
+
+// CostInput is the session cost summary from stdin's "cost" object.
+// Absence leaves the zero value (no pointer needed — chip visibility
+// keys off RateLimits, not Cost).
+type CostInput struct {
+	TotalCostUSD      float64 `json:"total_cost_usd"`
+	TotalLinesAdded   int     `json:"total_lines_added"`
+	TotalLinesRemoved int     `json:"total_lines_removed"`
+}
+
+// RateLimitsInput is stdin's "rate_limits" object. Each window is
+// individually optional; nil means Claude Code didn't report it.
+type RateLimitsInput struct {
+	FiveHour *RateLimitWindow `json:"five_hour"`
+	SevenDay *RateLimitWindow `json:"seven_day"`
+}
+
+// RateLimitWindow is one rolling rate-limit window (five-hour or
+// seven-day) with its usage percentage and Unix reset timestamp.
+type RateLimitWindow struct {
+	UsedPercentage float64 `json:"used_percentage"`
+	ResetsAt       int64   `json:"resets_at"`
+}
+
+// EffortInput is stdin's "effort" object. Level is one of
+// low|medium|high|xhigh|max.
+type EffortInput struct {
+	Level string `json:"level"`
+}
+
+// PRInput is stdin's "pr" object. ReviewState may be empty even when
+// the PR is present (values: approved|pending|changes_requested|draft).
+type PRInput struct {
+	Number      int    `json:"number"`
+	URL         string `json:"url"`
+	ReviewState string `json:"review_state"`
 }
 
 // CachedData represents cached statusline data.
@@ -59,6 +96,10 @@ type CachedData struct {
 	Hostname       string
 	Devspace       string
 	TermWidth      int
+	RateLimits     *RateLimitsInput
+	Cost           CostInput
+	Effort         *EffortInput
+	PR             *PRInput
 }
 
 // Dependencies contains all external dependencies.
@@ -220,6 +261,13 @@ func (s *Statusline) computeData(currentDir string) *CachedData {
 
 	// Devspace
 	data.Devspace = s.getDevspace()
+
+	// Rate limits, cost, effort, and PR pass straight through from the
+	// parsed input; the pointer fields stay nil when absent from stdin.
+	data.RateLimits = s.input.RateLimits
+	data.Cost = s.input.Cost
+	data.Effort = s.input.Effort
+	data.PR = s.input.PR
 
 	return data
 }

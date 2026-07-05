@@ -46,7 +46,7 @@ func (s *Statusline) Render(data *CachedData) string {
 	}
 
 	// Build components with proper sizing that accounts for spacers
-	leftSection := s.buildLeftSection(dirPath, data.ModelDisplay, modelIcon, contentWidth)
+	leftSection := s.buildLeftSection(dirPath, data.ModelDisplay, modelIcon, data.Effort, contentWidth)
 	rightSection := s.buildRightSection(data, contentWidth)
 
 	// Spacers are width constraints, not visible spaces
@@ -103,10 +103,39 @@ func (s *Statusline) Render(data *CachedData) string {
 	return result
 }
 
+// effortCode maps an effort level to the compact code shown inside the
+// model chip. Unknown or empty levels return "" (no suffix).
+func effortCode(effort *EffortInput) string {
+	if effort == nil {
+		return ""
+	}
+	switch effort.Level {
+	case "low":
+		return "L"
+	case "medium":
+		return "M"
+	case "high":
+		return "H"
+	case "xhigh":
+		return "XH"
+	case "max":
+		return "MAX"
+	default:
+		return ""
+	}
+}
+
 func (s *Statusline) buildLeftSection(
 	dirPath, modelDisplay, modelIcon string,
+	effort *EffortInput,
 	availableWidth int,
 ) string {
+	// Effort suffix joins the model text before truncation so the
+	// chip's width math accounts for the extra characters.
+	if code := effortCode(effort); code != "" {
+		modelDisplay += " ×" + code
+	}
+
 	// Calculate proportional truncation lengths based on available width
 	// Default allocations when width is sufficient
 	minDirLen := 10

@@ -75,6 +75,14 @@ func buildScenario(width int, ctxPercent float64, gitState, envState string) Sce
 	input.ContextWindow.UsedPercentage = ctxPercent
 	input.Workspace.ProjectDir = scenarioProjectDir
 
+	// Widest scenarios carry an effort level so the model chip's effort
+	// suffix ("×H") is exercised in goldens; other widths stay
+	// effort-absent rather than adding a full cross-product axis.
+	const effortScenarioWidth = 200
+	if width == effortScenarioWidth {
+		input.Effort = &EffortInput{Level: "high"}
+	}
+
 	fr := newFixedFileReader()
 	env := newFixedEnvReader(map[string]string{"HOME": scenarioHome})
 

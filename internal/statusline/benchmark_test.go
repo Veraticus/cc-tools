@@ -33,16 +33,6 @@ func BenchmarkStatuslineRender(b *testing.B) {
 		}{
 			DisplayName: "Claude 3 Opus",
 		},
-		Cost: struct {
-			TotalCostUSD     float64 `json:"total_cost_usd"`
-			InputTokens      int     `json:"input_tokens"`
-			OutputTokens     int     `json:"output_tokens"`
-			CacheReadTokens  int     `json:"cache_read_input_tokens"`
-			CacheWriteTokens int     `json:"cache_creation_input_tokens"`
-		}{
-			InputTokens:  50000,
-			OutputTokens: 2000,
-		},
 		GitInfo: struct {
 			Branch       string `json:"branch"`
 			IsGitRepo    bool   `json:"is_git_repo"`
@@ -154,11 +144,6 @@ func TestStatuslineRenderTiming(t *testing.T) {
 				},
 			}
 
-			if sc.contextLength > 0 {
-				input.Cost.InputTokens = sc.contextLength
-				input.Cost.OutputTokens = 2000
-			}
-
 			if sc.hasGit {
 				input.GitInfo.Branch = "feature/long-branch-name"
 				input.GitInfo.IsGitRepo = true
@@ -210,18 +195,6 @@ func TestStatuslineRenderTiming(t *testing.T) {
 				DisplayName string `json:"display_name"`
 			}{
 				DisplayName: "Claude 3 Opus Ultra Long Name For Testing",
-			},
-			Cost: struct {
-				TotalCostUSD     float64 `json:"total_cost_usd"`
-				InputTokens      int     `json:"input_tokens"`
-				OutputTokens     int     `json:"output_tokens"`
-				CacheReadTokens  int     `json:"cache_read_input_tokens"`
-				CacheWriteTokens int     `json:"cache_creation_input_tokens"`
-			}{
-				InputTokens:      123456,
-				OutputTokens:     7890,
-				CacheReadTokens:  10000,
-				CacheWriteTokens: 5000,
 			},
 			GitInfo: struct {
 				Branch       string `json:"branch"`
