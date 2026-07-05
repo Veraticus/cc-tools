@@ -343,39 +343,39 @@ func TestContextBar(t *testing.T) {
 
 	tests := []struct {
 		percentage    float64
-		barWidth      int
 		shouldContain []string
 	}{
 		{
-			percentage:    20.0, // 20% - green
-			barWidth:      50,
-			shouldContain: []string{"20.0%", ContextIcon},
+			percentage:    20.0, // 20% - teal
+			shouldContain: []string{"20%", ContextIcon},
 		},
 		{
-			percentage:    50.0, // 50% - yellow
-			barWidth:      50,
-			shouldContain: []string{"50.0%", ContextIcon},
+			percentage:    50.0, // 50% - teal
+			shouldContain: []string{"50%", ContextIcon},
 		},
 		{
-			percentage:    75.0, // 75% - peach
-			barWidth:      50,
-			shouldContain: []string{"75.0%", ContextIcon},
+			percentage:    75.0, // 75% - yellow
+			shouldContain: []string{"75%", ContextIcon},
 		},
 		{
 			percentage:    100.0, // 100% - red
-			barWidth:      50,
-			shouldContain: []string{"100.0%", ContextIcon},
+			shouldContain: []string{"100%", ContextIcon},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.shouldContain[0], func(t *testing.T) {
-			result := sl.createContextBarFromPercentage(tt.percentage, tt.barWidth)
+			result := sl.buildContextElement(tt.percentage)
 
 			for _, expected := range tt.shouldContain {
 				if !strings.Contains(result, expected) {
 					t.Errorf("Context bar doesn't contain %q\nGot: %q", expected, result)
 				}
+			}
+
+			// No decimal point should ever appear in the percentage.
+			if strings.Contains(result, ".") {
+				t.Errorf("Context bar should not contain a decimal point\nGot: %q", result)
 			}
 
 			// Check that ANSI codes are present

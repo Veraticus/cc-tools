@@ -31,9 +31,80 @@ func TestContextBar_NoLabelWord(t *testing.T) {
 	if !strings.Contains(stripped, ContextIcon) {
 		t.Errorf("rendered output should contain the context icon; got %q", stripped)
 	}
-	// Percentage must appear.
-	if !strings.Contains(stripped, "42.0%") {
-		t.Errorf("rendered output should contain '42.0%%'; got %q", stripped)
+	// Percentage must appear with no decimal.
+	if !strings.Contains(stripped, "42%") {
+		t.Errorf("rendered output should contain '42%%'; got %q", stripped)
+	}
+	if strings.Contains(stripped, "42.0%") {
+		t.Errorf("rendered output should NOT contain a decimal ('42.0%%'); got %q", stripped)
+	}
+}
+
+// TestContextElement_FixedWidth pins the wide-mode context element
+// (curve + icon + bar + percentage + curve) to exactly 30 visible
+// cells for a 2-digit percentage, per the redesign's fixed-width rule.
+func TestContextElement_FixedWidth(t *testing.T) {
+	s := CreateStatusline(&Dependencies{})
+
+	for _, pct := range []float64{5, 42, 65, 85, 100} {
+		element := s.buildContextElement(pct)
+		w := runewidth.StringWidth(stripAnsi(element))
+		if w > 30 {
+			t.Errorf("buildContextElement(%v) width = %d, want <= 30", pct, w)
+		}
+	}
+
+	// The brief pins the 2-digit case to exactly 30.
+	if w := runewidth.StringWidth(stripAnsi(s.buildContextElement(42))); w != 30 {
+		t.Errorf("buildContextElement(42) width = %d, want exactly 30", w)
+	}
+}
+
+// TestBuildMiddleSection_ElementWidthAtTerm200 exercises
+// buildMiddleSection directly (per the brief) at a generous width and
+// checks the non-space middle content stays within the 30-cell budget.
+func TestBuildMiddleSection_ElementWidthAtTerm200(t *testing.T) {
+	deps := &Dependencies{
+		FileReader:    &MockFileReader{},
+		CommandRunner: &MockCommandRunner{},
+		EnvReader:     &MockEnvReader{vars: make(map[string]string)},
+		TerminalWidth: &MockTerminalWidth{width: 200},
+	}
+	s := CreateStatusline(deps)
+	s.colors = CatppuccinMocha{}
+	data := &CachedData{UsedPercentage: 42}
+
+	middle := s.buildMiddleSection(data, 160)
+	stripped := stripAnsi(middle)
+	if w := runewidth.StringWidth(stripped); w != 160 {
+		t.Fatalf("buildMiddleSection total width = %d, want 160", w)
+	}
+	trimmed := strings.TrimSpace(stripped)
+	if w := runewidth.StringWidth(trimmed); w > 30 {
+		t.Errorf("middle element visible (non-space) width = %d, want <= 30; content=%q", w, trimmed)
+	}
+}
+
+// TestContextElement_ThresholdColors pins the wide-mode threshold
+// colors: teal below 60%, yellow 60-79%, red at 80%+.
+func TestContextElement_ThresholdColors(t *testing.T) {
+	s := CreateStatusline(&Dependencies{})
+	s.colors = CatppuccinMocha{}
+
+	cases := []struct {
+		pct   float64
+		fg    string
+		label string
+	}{
+		{42, s.colors.TealFG(), "teal"},
+		{65, s.colors.YellowFG(), "yellow"},
+		{85, s.colors.RedFG(), "red"},
+	}
+	for _, c := range cases {
+		element := s.buildContextElement(c.pct)
+		if !strings.Contains(element, c.fg) {
+			t.Errorf("buildContextElement(%v) should use %s FG escape, got %q", c.pct, c.label, element)
+		}
 	}
 }
 
@@ -194,42 +265,36 @@ func TestContextBarPadding(t *testing.T) {
 		}
 	})
 
-	t.Run("padding is exactly 4 spaces on each side", func(t *testing.T) {
-		// Direct test of createContextBarFromPercentage method
+	t.Run("element is centered with plain-space slack on each side", func(t *testing.T) {
+		// The redesign replaces the old fixed-4-space padding with a
+		// centered fixed-width (<=30 cell) element; the surrounding
+		// region absorbs the rest as plain spaces, split as evenly as
+		// possible between the two sides.
 		s := CreateStatusline(deps)
 		s.colors = CatppuccinMocha{} // Initialize colors
 
-		// Give it plenty of width so we can clearly see the padding
-		barWidth := 60
+		regionWidth := 60
 		percentage := 25.0
 
-		result := s.createContextBarFromPercentage(percentage, barWidth)
+		result := s.buildMiddleSection(&CachedData{UsedPercentage: percentage}, regionWidth)
 
-		// The result should be exactly barWidth characters
 		stripped := stripAnsi(result)
 		actualWidth := runewidth.StringWidth(stripped)
-		if actualWidth != barWidth {
-			t.Errorf("Context bar width incorrect: got %d, want %d", actualWidth, barWidth)
-			t.Logf("Raw result length: %d", len(result))
-			t.Logf("Stripped length: %d", len(stripped))
-			t.Logf("Stripped width: %d", actualWidth)
+		if actualWidth != regionWidth {
+			t.Errorf("middle section width incorrect: got %d, want %d", actualWidth, regionWidth)
 		}
 
-		// Should start with exactly 4 spaces
-		if !strings.HasPrefix(result, "    ") {
-			t.Error("Context bar should start with exactly 4 spaces")
-		}
-
-		// Should end with exactly 4 spaces
-		if !strings.HasSuffix(stripped, "    ") {
-			t.Error("Context bar should end with exactly 4 spaces")
-		}
-
-		// The actual bar content should be in the middle
 		trimmed := strings.TrimSpace(stripped)
-		trimmedWidth := runewidth.StringWidth(trimmed)
-		if trimmedWidth != barWidth-8 { // 8 = 4 spaces on each side
-			t.Errorf("Bar content width incorrect: got %d, want %d", trimmedWidth, barWidth-8)
+		elementWidth := runewidth.StringWidth(trimmed)
+		if elementWidth > 30 {
+			t.Errorf("centered element width incorrect: got %d, want <= 30", elementWidth)
+		}
+
+		leftSpaces := len(stripped) - len(strings.TrimLeft(stripped, " "))
+		rightSpaces := len(stripped) - len(strings.TrimRight(stripped, " "))
+		if diff := leftSpaces - rightSpaces; diff < -1 || diff > 1 {
+			t.Errorf("element should be centered (left/right slack should differ by at most 1), got left=%d right=%d",
+				leftSpaces, rightSpaces)
 		}
 	})
 }

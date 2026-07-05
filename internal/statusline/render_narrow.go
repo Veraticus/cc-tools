@@ -19,14 +19,6 @@ import (
 // and desktop terminals are routinely 100+.
 const narrowWidthThreshold = 80
 
-// Context threshold percentages — same as the wide layout for
-// consistency. <40 green, <60 yellow, <80 peach, else red.
-const (
-	contextThresholdYellow = 40
-	contextThresholdPeach  = 60
-	contextThresholdRed    = 80
-)
-
 // Quintile block rendering for the context chip body, matching
 // internal/subagentstatusline/chips.go conventions exactly.
 const (
@@ -116,7 +108,7 @@ func gatherNarrowChips(deps *Dependencies, data *CachedData) []narrowChip {
 
 	pct := int(data.UsedPercentage)
 	chips = append(chips, narrowChip{
-		Color: contextColor(pct),
+		Color: contextColor(data.UsedPercentage),
 		Body:  buildNarrowContextBody(pct),
 		Kind:  kindContext,
 	})
@@ -151,23 +143,6 @@ func buildNarrowContextBody(pct int) string {
 	return strings.Repeat("▰", filled) +
 		strings.Repeat("▱", empty) +
 		fmt.Sprintf(" %d%%", pct)
-}
-
-// contextColor maps a 0-100 percent to the palette key matching the
-// wide layout's thresholds. Green <40, Yellow <60, Peach <80, Red ≥80.
-// Identical thresholds to internal/subagentstatusline so all three
-// statuslines (wide, narrow, subagent) stay visually consistent.
-func contextColor(pct int) string {
-	switch {
-	case pct < contextThresholdYellow:
-		return colorGreen
-	case pct < contextThresholdPeach:
-		return colorYellow
-	case pct < contextThresholdRed:
-		return colorPeach
-	default:
-		return colorRed
-	}
 }
 
 // firstEnvChip returns the highest-priority env chip available, or

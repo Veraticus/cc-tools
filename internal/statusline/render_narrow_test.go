@@ -30,22 +30,48 @@ func TestNarrowWidthThreshold_Value(t *testing.T) {
 
 func TestContextColor_Thresholds(t *testing.T) {
 	cases := []struct {
-		pct  int
+		pct  float64
 		want string
 	}{
-		{0, "green"},
-		{39, "green"},
-		{40, "yellow"},
-		{59, "yellow"},
-		{60, "peach"},
-		{79, "peach"},
+		{0, "teal"},
+		{42, "teal"},
+		{59, "teal"},
+		{60, "yellow"},
+		{65, "yellow"},
+		{79, "yellow"},
 		{80, "red"},
+		{85, "red"},
 		{100, "red"},
 	}
 	for _, c := range cases {
 		got := contextColor(c.pct)
 		if got != c.want {
-			t.Errorf("contextColor(%d) = %q, want %q", c.pct, got, c.want)
+			t.Errorf("contextColor(%v) = %q, want %q", c.pct, got, c.want)
+		}
+	}
+}
+
+// TestGatherNarrowChips_ThresholdColors pins the narrow-mode context
+// chip to the same shared thresholds as the wide bar: teal <60,
+// yellow 60-79, red >=80.
+func TestGatherNarrowChips_ThresholdColors(t *testing.T) {
+	deps := depsFor(t, "")
+	cases := []struct {
+		pct  float64
+		want string
+	}{
+		{42, "teal"},
+		{65, "yellow"},
+		{85, "red"},
+	}
+	for _, c := range cases {
+		data := &CachedData{CurrentDir: "/tmp/x", UsedPercentage: c.pct}
+		chips := gatherNarrowChips(deps, data)
+		if len(chips) < 2 || chips[1].Kind != kindContext {
+			t.Fatalf("expected context chip at index 1, got %+v", chips)
+		}
+		if chips[1].Color != c.want {
+			t.Errorf("context chip Color at pct=%v = %q, want %q", c.pct, chips[1].Color, c.want)
 		}
 	}
 }

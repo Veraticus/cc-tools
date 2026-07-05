@@ -78,14 +78,11 @@ func (c CatppuccinMocha) SapphireFG() string { return "\033[38;2;116;199;236m" }
 // BaseFG returns base foreground color (dark text on colored backgrounds).
 func (c CatppuccinMocha) BaseFG() string { return "\033[38;2;30;30;46m" } // #1e1e2e
 
-// GreenLightBG returns light green background color for progress bar.
-func (c CatppuccinMocha) GreenLightBG() string { return "\033[48;2;86;127;81m" } // Muted green
+// TealLightBG returns light teal background color for progress bar.
+func (c CatppuccinMocha) TealLightBG() string { return "\033[48;2;89;136;128m" } // Muted teal
 
 // YellowLightBG returns light yellow background color for progress bar.
 func (c CatppuccinMocha) YellowLightBG() string { return "\033[48;2;149;136;95m" } // Muted yellow
-
-// PeachLightBG returns light peach background color for progress bar.
-func (c CatppuccinMocha) PeachLightBG() string { return "\033[48;2;150;107;81m" } // Muted peach
 
 // RedLightBG returns light red background color for progress bar.
 func (c CatppuccinMocha) RedLightBG() string { return "\033[48;2;146;83;100m" } // Muted red

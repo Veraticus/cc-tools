@@ -384,81 +384,82 @@ func (s *Statusline) buildMiddleSection(data *CachedData, width int) string {
 		return ""
 	}
 
-	// Context bar only appears if there's at least 25 chars of space left after components
-	// This ensures components get priority for space
-	const minContextBarWidth = 25
-	if data.UsedPercentage > 0 && width >= minContextBarWidth {
-		return s.createContextBarFromPercentage(data.UsedPercentage, width)
+	if data.UsedPercentage <= 0 {
+		return strings.Repeat(" ", width)
 	}
 
-	// Otherwise just spaces
-	return strings.Repeat(" ", width)
+	element := s.buildContextElement(data.UsedPercentage)
+	elementWidth := runewidth.StringWidth(stripAnsi(element))
+	if width < elementWidth {
+		// Doesn't fit even centered — blank, same as today.
+		return strings.Repeat(" ", width)
+	}
+
+	return s.centerElement(element, elementWidth, width)
 }
 
-func (s *Statusline) createContextBarFromPercentage(percentage float64, barWidth int) string {
-	availableForBar := s.calculateAvailableBarWidth(barWidth)
-	const minSensibleBarSize = 15
-	if availableForBar < minSensibleBarSize {
-		return strings.Repeat(" ", barWidth)
-	}
+// centerElement centers a pre-rendered element of elementWidth visible
+// cells inside a region of `width` cells, padding the remaining slack
+// with plain (uncolored) spaces. Odd slack puts the extra cell on the
+// right.
+func (s *Statusline) centerElement(element string, elementWidth, width int) string {
+	const halfDivisor = 2
+	slack := width - elementWidth
+	left := slack / halfDivisor
+	right := slack - left
+	return strings.Repeat(" ", left) + element + strings.Repeat(" ", right)
+}
 
+// contextElementWidth is the fixed visible-cell budget for the wide
+// middle cluster (curve + icon + progress bar + percentage + curve).
+// buildContextElement sizes the bar fill to absorb whatever the
+// percentage text needs, so the cluster is exactly this width for any
+// 0-100 percentage (a future rate-limit/cost chip can join this
+// cluster alongside it without reworking the centering math).
+const contextElementWidth = 30
+
+// buildContextElement renders the curve+icon+bar+percentage+curve
+// cluster for the wide-mode context indicator. The bar fill width is
+// computed to absorb whatever the percentage text needs, so "5%",
+// "42%", and "100%" all produce a contextElementWidth-cell element.
+func (s *Statusline) buildContextElement(percentage float64) string {
 	bgColor, fgColor, fgLightBg := s.getContextColors(percentage)
 
-	barInfo := s.prepareContextBarInfo(percentage, availableForBar)
-	const minFillWidth = 4
-	if barInfo.fillWidth < minFillWidth {
-		return strings.Repeat(" ", barWidth)
+	percentText := fmt.Sprintf(" %.0f%%", percentage)
+	const curvesWidth = 2 // LeftCurve + RightCurve, 1 cell each
+	fillWidth := contextElementWidth - curvesWidth -
+		runewidth.StringWidth(ContextIcon) - runewidth.StringWidth(percentText)
+	if fillWidth < 1 {
+		fillWidth = 1
 	}
-
-	s.debugContextBarInfo(barWidth, availableForBar, barInfo)
-
-	progressBar := s.buildProgressBar(barInfo.fillWidth, barInfo.filledWidth, fgColor, fgLightBg)
-	return s.assembleContextBar(barInfo, bgColor, fgColor, progressBar, barWidth)
-}
-
-type contextBarInfo struct {
-	label       string
-	percentText string
-	textLength  int
-	fillWidth   int
-	filledWidth int
-}
-
-func (s *Statusline) prepareContextBarInfo(percentage float64, availableForBar int) contextBarInfo {
-	label := ContextIcon
-	percentText := fmt.Sprintf(" %.1f%%", percentage)
-	textLength := runewidth.StringWidth(label) + runewidth.StringWidth(percentText)
-
-	const curvesWidth = 2
-	fillWidth := availableForBar - textLength - curvesWidth
 	const percentDivisor = 100.0
 	filledWidth := int(float64(fillWidth) * percentage / percentDivisor)
 
-	return contextBarInfo{
-		label:       label,
-		percentText: percentText,
-		textLength:  textLength,
-		fillWidth:   fillWidth,
-		filledWidth: filledWidth,
-	}
-}
+	progressBar := s.buildProgressBar(fillWidth, filledWidth, fgColor, fgLightBg)
 
-func (s *Statusline) debugContextBarInfo(barWidth, availableForBar int, info contextBarInfo) {
-	if os.Getenv("DEBUG_WIDTH") != "1" {
-		return
-	}
-	fmt.Fprintf(
-		os.Stderr,
-		"createContextBar: barWidth=%d, availableForBar=%d, label='%s' width=%d, percentText='%s' width=%d, textLength=%d\n",
-		barWidth,
-		availableForBar,
-		info.label,
-		runewidth.StringWidth(info.label),
-		info.percentText,
-		runewidth.StringWidth(info.percentText),
-		info.textLength,
-	)
-	fmt.Fprintf(os.Stderr, "  fillWidth=%d, leftPad=4, rightPad=4\n", info.fillWidth)
+	var sb strings.Builder
+
+	sb.WriteString(fgColor)
+	sb.WriteString(LeftCurve)
+	sb.WriteString(s.colors.NC())
+
+	sb.WriteString(bgColor)
+	sb.WriteString(s.colors.BaseFG())
+	sb.WriteString(ContextIcon)
+	sb.WriteString(s.colors.NC())
+
+	sb.WriteString(progressBar)
+
+	sb.WriteString(bgColor)
+	sb.WriteString(s.colors.BaseFG())
+	sb.WriteString(percentText)
+	sb.WriteString(s.colors.NC())
+
+	sb.WriteString(fgColor)
+	sb.WriteString(RightCurve)
+	sb.WriteString(s.colors.NC())
+
+	return sb.String()
 }
 
 func (s *Statusline) buildProgressBar(fillWidth, filledWidth int, fgColor, fgLightBg string) string {
@@ -490,60 +491,6 @@ func selectProgressChar(position, fillWidth, filledWidth int) string {
 			return ProgressMidFull
 		}
 		return ProgressMidEmpty
-	}
-}
-
-func (s *Statusline) assembleContextBar(
-	info contextBarInfo,
-	bgColor, fgColor, progressBar string,
-	barWidth int,
-) string {
-	var result strings.Builder
-	const contextBarPadding = 4
-
-	// Left padding
-	result.WriteString(strings.Repeat(" ", contextBarPadding))
-
-	// Start curve
-	result.WriteString(fgColor)
-	result.WriteString(LeftCurve)
-	result.WriteString(s.colors.NC())
-
-	// Label
-	result.WriteString(bgColor)
-	result.WriteString(s.colors.BaseFG())
-	result.WriteString(info.label)
-	result.WriteString(s.colors.NC())
-
-	// Progress bar
-	result.WriteString(progressBar)
-
-	// Percentage
-	result.WriteString(bgColor)
-	result.WriteString(s.colors.BaseFG())
-	result.WriteString(info.percentText)
-	result.WriteString(s.colors.NC())
-
-	// End curve
-	result.WriteString(fgColor)
-	result.WriteString(RightCurve)
-	result.WriteString(s.colors.NC())
-
-	// Right padding
-	result.WriteString(strings.Repeat(" ", contextBarPadding))
-
-	s.debugContextBarResult(result.String(), barWidth)
-	return result.String()
-}
-
-func (s *Statusline) debugContextBarResult(finalResult string, barWidth int) {
-	if os.Getenv("DEBUG_WIDTH") != "1" {
-		return
-	}
-	finalWidth := runewidth.StringWidth(stripAnsi(finalResult))
-	fmt.Fprintf(os.Stderr, "  context bar final width=%d (should be %d)\n", finalWidth, barWidth)
-	if finalWidth != barWidth {
-		fmt.Fprintf(os.Stderr, "  WARNING: Context bar width mismatch!\n")
 	}
 }
 
@@ -714,26 +661,41 @@ func (s *Statusline) calculateWidths(termWidth int) (int, int, int) {
 	return leftSpacer, rightSpacer, content
 }
 
-func (s *Statusline) calculateAvailableBarWidth(barWidth int) int {
-	const contextBarPadding = 4
-	const paddingMultiplier = 2
-	return barWidth - (contextBarPadding * paddingMultiplier)
+// contextColor maps a 0-100 context-window usage percentage to the
+// palette color name shared by the wide context bar and the narrow
+// context chip: teal below 60%, yellow from 60-79%, red at 80% and
+// above. This is the single source of truth for both render paths.
+func contextColor(usedPct float64) string {
+	const (
+		yellowThreshold = 60.0
+		redThreshold    = 80.0
+	)
+	switch {
+	case usedPct < yellowThreshold:
+		return colorTeal
+	case usedPct < redThreshold:
+		return colorYellow
+	default:
+		return colorRed
+	}
 }
 
 func (s *Statusline) getContextColors(percentage float64) (string, string, string) {
-	const (
-		greenThreshold  = 40.0
-		yellowThreshold = 60.0
-		peachThreshold  = 80.0
-	)
-	switch {
-	case percentage < greenThreshold:
-		return s.colors.GreenBG(), s.colors.GreenFG(), s.colors.GreenLightBG()
-	case percentage < yellowThreshold:
-		return s.colors.YellowBG(), s.colors.YellowFG(), s.colors.YellowLightBG()
-	case percentage < peachThreshold:
-		return s.colors.PeachBG(), s.colors.PeachFG(), s.colors.PeachLightBG()
+	name := contextColor(percentage)
+	return s.getColorBG(name), s.getColorFG(name), s.contextLightBG(name)
+}
+
+// contextLightBG returns the muted "LightBG" variant used for the
+// bar's empty fill segment. getColorBG/getColorFG have no LightBG
+// case — only the context bar uses this muted treatment — so this is
+// a small dedicated switch over the colors contextColor can return.
+func (s *Statusline) contextLightBG(name string) string {
+	switch name {
+	case colorTeal:
+		return s.colors.TealLightBG()
+	case colorYellow:
+		return s.colors.YellowLightBG()
 	default:
-		return s.colors.RedBG(), s.colors.RedFG(), s.colors.RedLightBG()
+		return s.colors.RedLightBG()
 	}
 }
