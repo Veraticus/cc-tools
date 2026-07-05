@@ -1,0 +1,3 @@
+{"type":"attachment","attachment":{"type":"goal_status","met":fal
+not even remotely json, just garbage on this line ###???
+{"parentUuid":"00000000-0000-0000-0000-000000000040","isSidechain":false,"type":"attachment","uuid":"00000000-0000-0000-0000-000000000041","timestamp":"2026-05-25T17:45:43.950Z","attachment":{"type":"goal_status","met":false,"sentinel":true,"condition":"Valid record after garbage lines."},"userType":"external","entrypoint":"cli","cwd":"/home/user/project","sessionId":"anon-session-0004","version":"2.1.150","gitBranch":"main"}
