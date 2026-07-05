@@ -55,6 +55,8 @@ func main() {
 		runRenderCloudsCommand()
 	case "subagent-statusline":
 		runSubagentStatuslineCommand()
+	case "notify":
+		runNotifyCommand()
 	case "version":
 		// Print version to stdout as intended output
 		out.Raw(fmt.Sprintf("cc-tools %s\n", version))
@@ -81,6 +83,7 @@ Commands:
   resolve       Look up alias label + env for a host/aws/k8s/gcloud value
   render-clouds Emit AWS/gcloud/k8s chip chain as ANSI (for starship)
   subagent-statusline  Render per-row chip decorations for the claude agents view
+  notify        Turn-aware hook notifier (Stop/Notification/SessionEnd)
   version       Print version information
   help          Show this help message
 

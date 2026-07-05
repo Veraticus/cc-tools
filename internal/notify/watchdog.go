@@ -397,7 +397,7 @@ func logWatchdogSend(
 		Time:      deps.Now(),
 		SessionID: sessionID,
 		Event:     "watchdog",
-		Outcome:   "send",
+		Outcome:   OutcomeSend.String(),
 		Urgency:   n.Urgency,
 		Title:     n.Title,
 		Body:      n.Body,
