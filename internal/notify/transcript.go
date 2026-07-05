@@ -1,7 +1,8 @@
-// Package notify parses Claude Code session transcripts (JSONL) into goal
-// state and live background task information. It is the ground-truth layer
-// a notification pipeline builds on: deterministic gates, digests, and a
-// watchdog all consume ScanTranscript's output.
+// Package notify parses Claude Code session transcripts (JSONL) into a
+// ScanResult: goal state, live background task information, recent
+// conversation text, session timing, and bytes consumed. It is the
+// ground-truth layer a notification pipeline builds on: deterministic
+// gates, digests, and a watchdog all consume ScanTranscript's output.
 package notify
 
 import (
@@ -22,12 +23,29 @@ const (
 	initialScanBufferSize = 64 * 1024
 	maxLineBufferSize     = 10 * 1024 * 1024
 	maxDetailLen          = 200
+	// substantiveUserMinLen is the trimmed length (in bytes) a human-typed
+	// user message must reach to update LastSubstantiveUser rather than only
+	// LastUserMessage. Chosen to exclude one-word acks ("yes", "ok", "go
+	// ahead") while still capturing short-but-real asks.
+	substantiveUserMinLen = 40
+	// maxAssistantTextLen bounds LastAssistantText via truncateHead, which
+	// keeps the tail: the end of an assistant turn carries the ask or
+	// conclusion, unlike the user-message truncation elsewhere in this
+	// package which keeps the head.
+	maxAssistantTextLen = 2000
 )
 
 var (
 	bgIDPattern    = regexp.MustCompile(`Command running in background with ID: ([a-z0-9]+)`)
 	agentIDPattern = regexp.MustCompile(`agentId: ([a-z0-9]{6,20})`)
 	taskIDPattern  = regexp.MustCompile(`<task-id>([^<]+)</task-id>`)
+
+	// systemReminderPattern matches an embedded <system-reminder>...</system-reminder>
+	// span so it can be stripped from a user message before the human-typed-text
+	// checks run: a real prompt often carries one of these appended by the CLI,
+	// and a reminder-only record must not be mistaken for typed text. Non-greedy
+	// and dot-matches-newline since reminders are frequently multiline.
+	systemReminderPattern = regexp.MustCompile(`(?s)<system-reminder>.*?</system-reminder>`)
 
 	// bashOutputFilePattern and agentOutputFilePattern extract the on-disk
 	// output path from a launch acknowledgment. Real transcript text (not
@@ -112,6 +130,7 @@ type transcriptRecord struct {
 	Type       string          `json:"type"`
 	Timestamp  string          `json:"timestamp"`
 	Content    string          `json:"content"`
+	IsMeta     bool            `json:"isMeta"`
 	Message    *rawMessage     `json:"message"`
 	Attachment json.RawMessage `json:"attachment"`
 }
@@ -187,6 +206,49 @@ type toolUseInfo struct {
 	runInBackground bool
 }
 
+// ScanResult is the full result of a single streaming pass over a session
+// transcript: goal state, live background tasks, the most recent
+// conversation turns, session timing, and how many bytes were consumed.
+// This is the ground-truth layer a notification pipeline builds on:
+// deterministic gates, digests, and a watchdog all consume it.
+type ScanResult struct {
+	Goal      GoalState
+	LiveTasks []LiveTask
+
+	// LastUserMessage is the most recently human-typed user text found in
+	// the transcript, of any length (e.g. a bare "yes").
+	LastUserMessage string
+	// LastSubstantiveUser is the most recently human-typed user text whose
+	// trimmed/stripped length is at least substantiveUserMinLen; short acks
+	// never update it.
+	LastSubstantiveUser string
+	// LastAssistantText is the most recent non-empty concatenation of an
+	// assistant record's text blocks, tail-truncated to maxAssistantTextLen
+	// via truncateHead so the end of the message (the ask or conclusion)
+	// survives truncation.
+	LastAssistantText string
+
+	// FirstTimestamp and LastTimestamp are the first and last top-level
+	// "timestamp" values that parsed successfully, across every record type
+	// in the transcript.
+	FirstTimestamp time.Time
+	LastTimestamp  time.Time
+
+	// UserTurns counts human-typed user records (the same records that can
+	// update LastUserMessage/LastSubstantiveUser).
+	UserTurns int
+
+	// BytesScanned is the number of input bytes consumed, including the line
+	// terminator per line: bufio.Scanner strips terminators, so this
+	// accumulates len(line)+1 for every line read (blank lines included). A
+	// final unterminated line still counts +1 under this convention, which
+	// undercounts the true file size by one byte in that one case; ordinary
+	// JSONL files end with a trailing newline, so the count is exact for
+	// them and remains a monotone growth baseline otherwise (the only use a
+	// watchdog needs).
+	BytesScanned int64
+}
+
 // scanState is the mutable state threaded through a single streaming pass
 // over a transcript.
 type scanState struct {
@@ -194,6 +256,16 @@ type scanState struct {
 	toolUses map[string]toolUseInfo
 	live     map[string]*LiveTask
 	order    []string
+
+	lastUserMessage     string
+	lastSubstantiveUser string
+	lastAssistantText   string
+
+	firstTimestamp time.Time
+	lastTimestamp  time.Time
+
+	userTurns    int
+	bytesScanned int64
 }
 
 func newScanState() *scanState {
@@ -205,27 +277,43 @@ func newScanState() *scanState {
 }
 
 // ScanTranscript reads a Claude Code session transcript in JSONL format and
-// returns the most recent goal state along with any background bash or
-// agent tasks that have not yet received a completion notification.
+// returns a ScanResult combining goal state, live background/agent tasks,
+// the most recent conversation turns, session timing, and bytes consumed.
 // Malformed or unparseable lines are skipped rather than treated as fatal;
-// an empty transcript yields a zero-value GoalState and no tasks.
-func ScanTranscript(r io.Reader) (GoalState, []LiveTask, error) {
+// an empty transcript yields a zero-value ScanResult.
+func ScanTranscript(r io.Reader) (ScanResult, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, initialScanBufferSize), maxLineBufferSize)
 
 	state := newScanState()
 	for scanner.Scan() {
 		line := scanner.Bytes()
+		state.bytesScanned += int64(len(line)) + 1
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
 		state.processLine(line)
 	}
 	if err := scanner.Err(); err != nil {
-		return state.goal, nil, fmt.Errorf("scanning transcript: %w", err)
+		return state.result(), fmt.Errorf("scanning transcript: %w", err)
 	}
 
-	return state.goal, state.tasks(), nil
+	return state.result(), nil
+}
+
+// result assembles the accumulated scan state into a ScanResult.
+func (s *scanState) result() ScanResult {
+	return ScanResult{
+		Goal:                s.goal,
+		LiveTasks:           s.tasks(),
+		LastUserMessage:     s.lastUserMessage,
+		LastSubstantiveUser: s.lastSubstantiveUser,
+		LastAssistantText:   s.lastAssistantText,
+		FirstTimestamp:      s.firstTimestamp,
+		LastTimestamp:       s.lastTimestamp,
+		UserTurns:           s.userTurns,
+		BytesScanned:        s.bytesScanned,
+	}
 }
 
 func (s *scanState) processLine(line []byte) {
@@ -233,6 +321,8 @@ func (s *scanState) processLine(line []byte) {
 	if err := json.Unmarshal(line, &rec); err != nil {
 		return
 	}
+
+	s.recordTimestamp(rec.Timestamp)
 
 	switch rec.Type {
 	case "attachment":
@@ -249,7 +339,89 @@ func (s *scanState) processLine(line []byte) {
 		s.processAssistantMessage(rec.Message.Content)
 	case "user":
 		s.processUserMessage(rec.Message.Content, rec.Timestamp)
+		s.captureUserText(rec.Message.Content, rec.IsMeta)
 	}
+}
+
+// recordTimestamp updates the running first/last timestamps from a
+// top-level "timestamp" value, across every record type. Unparseable or
+// empty timestamps are ignored rather than resetting the running values.
+func (s *scanState) recordTimestamp(ts string) {
+	t := parseTimestamp(ts)
+	if t.IsZero() {
+		return
+	}
+	if s.firstTimestamp.IsZero() {
+		s.firstTimestamp = t
+	}
+	s.lastTimestamp = t
+}
+
+// captureUserText updates LastUserMessage/LastSubstantiveUser/UserTurns from
+// a user-role message.content payload, applying each exclusion as its own
+// documented check:
+//   - isMeta:true records never count, regardless of content.
+//   - a payload that isn't a plain string, or an array of blocks including a
+//     tool_result, is not human-typed text.
+//   - any embedded <system-reminder>...</system-reminder> span is stripped
+//     before the remaining checks, so a real prompt with an appended
+//     reminder still counts on its typed portion, and a reminder-only
+//     record (which strips down to nothing) does not count at all.
+//   - text whose trimmed, stripped form starts with "<" (task-notification
+//     and local-command wrappers) is excluded.
+func (s *scanState) captureUserText(raw json.RawMessage, isMeta bool) {
+	if isMeta {
+		return
+	}
+	text, ok := humanTypedText(raw)
+	if !ok {
+		return
+	}
+	text = systemReminderPattern.ReplaceAllString(text, "")
+	text = strings.TrimSpace(text)
+	if text == "" || strings.HasPrefix(text, "<") {
+		return
+	}
+
+	s.userTurns++
+	s.lastUserMessage = text
+	if len(text) >= substantiveUserMinLen {
+		s.lastSubstantiveUser = text
+	}
+}
+
+// humanTypedText extracts the candidate human-typed text from a user
+// message.content payload. ok is false when the payload is structurally not
+// human-typed text: an array containing a tool_result block, or neither a
+// plain string nor an array of blocks at all. A plain string is always
+// human-typed (ok); an array of blocks is human-typed only if it contains at
+// least one text block and no tool_result block, with all text blocks
+// concatenated.
+func humanTypedText(raw json.RawMessage) (string, bool) {
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s, true
+	}
+
+	var blocks []contentBlock
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		return "", false
+	}
+	var sb strings.Builder
+	hasText := false
+	for _, b := range blocks {
+		switch b.Type {
+		case "tool_result":
+			return "", false
+		case "text":
+			hasText = true
+			sb.WriteString(b.Text)
+		}
+	}
+	if !hasText {
+		return "", false
+	}
+	return sb.String(), true
 }
 
 // processAttachment handles the top-level "attachment" field, which carries
@@ -314,6 +486,7 @@ func (s *scanState) processAssistantMessage(raw json.RawMessage) {
 	if err := json.Unmarshal(raw, &blocks); err != nil {
 		return
 	}
+	s.captureAssistantText(blocks)
 	for _, block := range blocks {
 		if block.Type != "tool_use" || block.ID == "" {
 			continue
@@ -345,6 +518,24 @@ func (s *scanState) processAssistantMessage(raw json.RawMessage) {
 			}
 		}
 	}
+}
+
+// captureAssistantText concatenates an assistant record's "text" blocks and,
+// if the result is non-empty, replaces LastAssistantText with it
+// (tail-truncated). A record with no text blocks (a pure tool_use turn)
+// leaves the previous LastAssistantText in place rather than clearing it.
+func (s *scanState) captureAssistantText(blocks []contentBlock) {
+	var sb strings.Builder
+	for _, b := range blocks {
+		if b.Type == "text" {
+			sb.WriteString(b.Text)
+		}
+	}
+	text := sb.String()
+	if text == "" {
+		return
+	}
+	s.lastAssistantText = truncateHead(text, maxAssistantTextLen)
 }
 
 // processUserMessage looks for tool_result blocks announcing a background
@@ -475,6 +666,16 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen]
+}
+
+// truncateHead mirrors truncate but keeps the END of s rather than the
+// start, for text where the tail carries the meaningful content (an
+// assistant turn's ask or conclusion is at the end, not the beginning).
+func truncateHead(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[len(s)-maxLen:]
 }
 
 func parseTimestamp(ts string) time.Time {
