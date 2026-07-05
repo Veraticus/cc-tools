@@ -126,6 +126,9 @@ func gatherNarrowChips(deps *Dependencies, data *CachedData) []narrowChip {
 		})
 	}
 
+	// Narrow mode's branch chip stays branch-only — no dirty/ahead/behind
+	// counts, no PR glyph — the narrow width budget is too tight to add
+	// them.
 	if data.GitBranch != "" && validNarrowBranchName.MatchString(data.GitBranch) {
 		chips = append(chips, narrowChip{
 			Color: colorPink,

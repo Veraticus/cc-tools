@@ -2,22 +2,20 @@ package statusline
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
-	"time"
 )
 
 // MockFileReader implements FileReader for testing.
 type MockFileReader struct {
 	files map[string][]byte
-	times map[string]time.Time
 }
 
 func NewMockFileReader() *MockFileReader {
 	return &MockFileReader{
 		files: make(map[string][]byte),
-		times: make(map[string]time.Time),
 	}
 }
 
@@ -31,13 +29,6 @@ func (m *MockFileReader) ReadFile(path string) ([]byte, error) {
 func (m *MockFileReader) Exists(path string) bool {
 	_, ok := m.files[path]
 	return ok
-}
-
-func (m *MockFileReader) ModTime(path string) (time.Time, error) {
-	if t, ok := m.times[path]; ok {
-		return t, nil
-	}
-	return time.Now(), nil
 }
 
 // MockCommandRunner implements CommandRunner for testing.
@@ -73,6 +64,14 @@ func (m *MockCommandRunner) Run(command string, args ...string) ([]byte, error) 
 
 	// Default: return empty with no error
 	return []byte(""), nil
+}
+
+// RunContext ignores ctx and delegates to Run: none of the existing
+// MockCommandRunner-based tests need per-call context/timeout
+// behavior, and Run's key-based response/error lookup already covers
+// what they configure.
+func (m *MockCommandRunner) RunContext(_ context.Context, command string, args ...string) ([]byte, error) {
+	return m.Run(command, args...)
 }
 
 // MockEnvReader implements EnvReader for testing.
@@ -422,6 +421,52 @@ func TestEffortSuffixInModelChip(t *testing.T) {
 	}
 }
 
+func TestGetCurrentDir_TopLevelCWD(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "top-level cwd only",
+			input: `{"cwd": "/top/level/dir"}`,
+			want:  "/top/level/dir",
+		},
+		{
+			name:  "workspace project_dir wins over top-level cwd",
+			input: `{"cwd": "/top/level/dir", "workspace": {"project_dir": "/ws/project"}}`,
+			want:  "/ws/project",
+		},
+		{
+			name:  "workspace cwd wins over top-level cwd",
+			input: `{"cwd": "/top/level/dir", "workspace": {"cwd": "/ws/cwd"}}`,
+			want:  "/ws/cwd",
+		},
+		{
+			name:  "empty payload falls back to ~",
+			input: `{}`,
+			want:  "~",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sl := CreateStatusline(&Dependencies{
+				FileReader:    NewMockFileReader(),
+				CommandRunner: NewMockCommandRunner(),
+				EnvReader:     NewMockEnvReader(),
+				TerminalWidth: &MockTerminalWidth{width: 210},
+			})
+			if err := sl.parseInput(bytes.NewReader([]byte(tt.input))); err != nil {
+				t.Fatalf("parseInput: %v", err)
+			}
+			if got := sl.getCurrentDir(); got != tt.want {
+				t.Errorf("getCurrentDir() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestStatuslineGenerate(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -463,8 +508,13 @@ func TestStatuslineGenerate(t *testing.T) {
 				fr, _ := deps.FileReader.(*MockFileReader)
 				fr.files["/home/user/project/.git"] = []byte{} // Make .git exist as a directory
 				fr.files["/home/user/project/.git/HEAD"] = []byte("ref: refs/heads/main\n")
-				fr.files["/home/user/project/.git/index"] = []byte("index")
-				fr.times["/home/user/project/.git/index"] = time.Now() // Recent modification
+				// Canned dirty porcelain response: real dirty-count now
+				// drives the "!" suffix, replacing the deleted
+				// index-mtime heuristic.
+				if cr, ok := deps.CommandRunner.(*MockCommandRunner); ok {
+					cr.responses["git -C /home/user/project status --porcelain=v2 --branch"] =
+						[]byte("# branch.head main\n1 .M N... 100644 100644 100644 aaa bbb file.go\n")
+				}
 			},
 			contains: []string{
 				"main", // Git branch
@@ -693,14 +743,6 @@ func TestGitInfo(t *testing.T) {
 	info = sl.getGitInfo("/project")
 	if info.Branch != "a1b2c3d" {
 		t.Errorf("Expected short hash 'a1b2c3d', got %q", info.Branch)
-	}
-
-	// Test with recent index modification
-	fr.files["/project/.git/index"] = []byte("index")
-	fr.times["/project/.git/index"] = time.Now()
-	info = sl.getGitInfo("/project")
-	if info.Status != "!" {
-		t.Errorf("Expected status '!', got %q", info.Status)
 	}
 }
 

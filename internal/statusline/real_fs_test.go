@@ -175,11 +175,3 @@ func (r *RealFileReader) Exists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
 }
-
-func (r *RealFileReader) ModTime(path string) (time.Time, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return time.Time{}, err
-	}
-	return info.ModTime(), nil
-}

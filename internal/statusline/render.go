@@ -335,13 +335,58 @@ func (s *Statusline) collectRightComponents(
 	return components
 }
 
+// createGitComponent builds the git chip body: branch, then " !N" when
+// dirty, then " ↑A" / " ↓B" for nonzero ahead/behind counts, then a
+// review-state-colored PR glyph when data.PR is present.
+//
+// This is the one chip whose body carries non-BaseFG text: the PR
+// glyph gets its own inline foreground color (green/yellow/red/muted
+// gray) instead of the BaseFG renderComponentContent applies to every
+// other chip. The chip's background stays sky throughout, and the
+// branch/dirty/ahead/behind text stays BaseFG (inherited from
+// renderComponentContent's preamble) — only the glyph itself switches
+// color, and switches back to BaseFG immediately after so nothing
+// downstream is left in the glyph's color.
 func (s *Statusline) createGitComponent(data *CachedData, maxLen int) Component {
 	branch := truncateText(data.GitBranch, maxLen)
-	text := GitIcon + branch
-	if data.GitStatus != "" {
-		text += " " + data.GitStatus
+
+	var sb strings.Builder
+	sb.WriteString(GitIcon)
+	sb.WriteString(branch)
+	if data.GitDirtyCount > 0 {
+		fmt.Fprintf(&sb, " !%d", data.GitDirtyCount)
 	}
-	return Component{"sky", text}
+	if data.GitAhead > 0 {
+		fmt.Fprintf(&sb, " ↑%d", data.GitAhead)
+	}
+	if data.GitBehind > 0 {
+		fmt.Fprintf(&sb, " ↓%d", data.GitBehind)
+	}
+	if data.PR != nil {
+		sb.WriteString(" ")
+		sb.WriteString(s.getColorFG(prGlyphColor(data.PR.ReviewState)))
+		sb.WriteString(PRIcon)
+		sb.WriteString(s.colors.BaseFG())
+	}
+
+	return Component{"sky", sb.String()}
+}
+
+// prGlyphColor maps a PR's review_state to the git chip's PR glyph
+// foreground color: approved is green, changes_requested is red,
+// draft is the muted overlay gray, and pending or an absent/unknown
+// state (including "") default to yellow.
+func prGlyphColor(reviewState string) string {
+	switch reviewState {
+	case "approved":
+		return colorGreen
+	case "changes_requested":
+		return colorRed
+	case "draft":
+		return colorOverlay
+	default:
+		return colorYellow
+	}
 }
 
 func (s *Statusline) createAwsComponent(awsProfile string, maxLen int) Component {

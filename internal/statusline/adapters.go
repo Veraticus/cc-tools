@@ -29,23 +29,26 @@ func (f *DefaultFileReader) Exists(path string) bool {
 	return err == nil
 }
 
-// ModTime returns the modification time of a file.
-func (f *DefaultFileReader) ModTime(path string) (time.Time, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("stat file %s: %w", path, err)
-	}
-	return info.ModTime(), nil
-}
-
 // DefaultCommandRunner implements CommandRunner using exec.
 type DefaultCommandRunner struct{}
 
-// Run executes a command with arguments.
+// Run executes a command with arguments, bounded by a fixed 5s timeout.
 func (c *DefaultCommandRunner) Run(command string, args ...string) ([]byte, error) {
 	const commandTimeout = 5 * time.Second
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
+	return c.RunContext(ctx, command, args...)
+}
+
+// RunContext executes a command bounded by the caller-supplied context
+// instead of Run's fixed timeout — used by callers that need a tighter
+// budget (e.g. the git-status chip's ≤500ms deadline).
+//
+// cmd.Output() always calls cmd.Wait() after Start(), on every return
+// path — including when ctx's deadline fires and the default Cancel
+// (Process.Kill, since Go 1.20) runs — so the child process is
+// guaranteed to be reaped here; no zombie process can be left behind.
+func (c *DefaultCommandRunner) RunContext(ctx context.Context, command string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, command, args...)
 	output, err := cmd.Output()
 	if err != nil {

@@ -78,6 +78,12 @@ func (c CatppuccinMocha) SapphireFG() string { return "\033[38;2;116;199;236m" }
 // BaseFG returns base foreground color (dark text on colored backgrounds).
 func (c CatppuccinMocha) BaseFG() string { return "\033[38;2;30;30;46m" } // #1e1e2e
 
+// OverlayFG returns overlay0 foreground color — Catppuccin Mocha's
+// muted gray. Added for the git chip's draft-PR glyph: this palette had
+// no muted-gray foreground before (TealLightBG/YellowLightBG/RedLightBG
+// below are muted BG-only variants used by the progress bar, not FG).
+func (c CatppuccinMocha) OverlayFG() string { return "\033[38;2;108;112;134m" } // #6c7086
+
 // TealLightBG returns light teal background color for progress bar.
 func (c CatppuccinMocha) TealLightBG() string { return "\033[48;2;89;136;128m" } // Muted teal
 

@@ -210,9 +210,3 @@ func (c *countingFileReader) Exists(path string) bool {
 	atomic.AddInt64(c.existsCount, 1)
 	return c.wrapped.Exists(path)
 }
-
-func (c *countingFileReader) ModTime(path string) (time.Time, error) {
-	// Count as a read since it accesses file metadata
-	atomic.AddInt64(c.readCount, 1)
-	return c.wrapped.ModTime(path)
-}

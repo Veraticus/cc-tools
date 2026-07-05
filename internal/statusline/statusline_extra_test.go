@@ -6,55 +6,60 @@ import (
 	"time"
 )
 
-// Test cache functionality.
+// TestStatusline_CacheExpiration exercises the git-status cache through
+// the production computeData path: a fresh cache serves the previous
+// porcelain result without re-running git; once the cache is older than
+// CacheDuration (simulated via the injected Now, no sleeping), the next
+// render re-runs git and picks up new state.
 func TestStatusline_CacheExpiration(t *testing.T) {
 	cacheDir := t.TempDir()
 
 	fr := NewMockFileReader()
 	fr.files["/test/dir/.git"] = []byte{}
 	fr.files["/test/dir/.git/HEAD"] = []byte("ref: refs/heads/main\n")
-	fr.files["/test/dir/.git/index"] = []byte("index")
-	fr.times["/test/dir/.git/index"] = time.Now().Add(-5 * time.Second)
 
+	const gitStatusKey = "git -C /test/dir status --porcelain=v2 --branch"
 	cr := NewMockCommandRunner()
-	cr.responses["git branch --show-current"] = []byte("main")
+	cr.responses[gitStatusKey] = []byte("# branch.head main\n? file1.go\n")
 
-	er := NewMockEnvReader()
-	er.vars["PWD"] = "/test/dir"
+	baseNow := time.Now()
+	currentNow := baseNow
 
 	deps := &Dependencies{
 		FileReader:    fr,
 		CommandRunner: cr,
-		EnvReader:     er,
+		EnvReader:     NewMockEnvReader(),
 		TerminalWidth: &MockTerminalWidth{width: 120},
 		CacheDir:      cacheDir,
-		CacheDuration: 100 * time.Millisecond, // Very short cache
+		CacheDuration: time.Hour,
+		Now:           func() time.Time { return currentNow },
 	}
 
 	s := CreateStatusline(deps)
 	// Initialize input to avoid nil pointer
 	s.input = &Input{}
 
-	// First call should populate cache
+	// First call runs git and populates the cache.
 	data1 := s.computeData("/test/dir")
-
-	// Immediate second call should use cache
-	data2 := s.computeData("/test/dir")
-
-	// These should be the same (from cache)
-	if data1.GitBranch != data2.GitBranch {
-		t.Error("Expected same data from cache")
+	if data1.GitBranch != "main" || data1.GitDirtyCount != 1 {
+		t.Fatalf("expected branch main with 1 dirty entry, got branch=%q dirty=%d",
+			data1.GitBranch, data1.GitDirtyCount)
 	}
 
-	// Wait for cache to expire
-	time.Sleep(150 * time.Millisecond)
+	// The repo state changes, but the cache is still fresh: the second
+	// call must serve the cached count, not the new porcelain.
+	cr.responses[gitStatusKey] = []byte("# branch.head main\n? file1.go\n? file2.go\n")
+	data2 := s.computeData("/test/dir")
+	if data2.GitDirtyCount != 1 {
+		t.Errorf("fresh cache should serve the cached dirty count 1, got %d", data2.GitDirtyCount)
+	}
 
-	// This call should bypass cache
+	// Advance the injected clock past CacheDuration: the cache is now
+	// stale, so git re-runs and the new state is visible.
+	currentNow = baseNow.Add(2 * time.Hour)
 	data3 := s.computeData("/test/dir")
-
-	// Should still get same result (but from fresh computation)
-	if data1.GitBranch != data3.GitBranch {
-		t.Error("Expected same git branch after cache expiration")
+	if data3.GitDirtyCount != 2 {
+		t.Errorf("expired cache should re-run git and pick up dirty count 2, got %d", data3.GitDirtyCount)
 	}
 }
 

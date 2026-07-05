@@ -3,6 +3,7 @@ package statusline
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -37,6 +38,10 @@ type Input struct {
 		CWD        string `json:"cwd"`
 	} `json:"workspace"`
 	TranscriptPath string `json:"transcript_path"`
+	// CWD is the top-level "cwd" field Claude Code sends as a baseline on
+	// every payload. It's the last directory fallback before "~" — the
+	// richer workspace object wins when present (see getCurrentDir).
+	CWD string `json:"cwd"`
 	// RateLimits is nil when Claude Code sends no rate_limits object,
 	// meaning the session is not a subscription session — that nil/non-nil
 	// distinction drives whether rate-limit chips or a cost chip render.
@@ -89,7 +94,9 @@ type CachedData struct {
 	CurrentDir     string
 	TranscriptPath string
 	GitBranch      string
-	GitStatus      string
+	GitDirtyCount  int
+	GitAhead       int
+	GitBehind      int
 	K8sContext     string
 	GcloudProject  string
 	UsedPercentage float64
@@ -131,12 +138,17 @@ type Dependencies struct {
 type FileReader interface {
 	ReadFile(path string) ([]byte, error)
 	Exists(path string) bool
-	ModTime(path string) (time.Time, error)
 }
 
 // CommandRunner interface for executing commands.
 type CommandRunner interface {
 	Run(command string, args ...string) ([]byte, error)
+
+	// RunContext behaves like Run but honors ctx's deadline/cancellation,
+	// letting a caller bound a subprocess's runtime explicitly (e.g. the
+	// git-status chip's ≤500ms budget) instead of relying on Run's own
+	// fixed internal timeout.
+	RunContext(ctx context.Context, command string, args ...string) ([]byte, error)
 }
 
 // EnvReader interface for reading environment variables.
@@ -234,6 +246,9 @@ func (s *Statusline) getCurrentDir() string {
 	if s.input.Workspace.CWD != "" {
 		return s.input.Workspace.CWD
 	}
+	if s.input.CWD != "" {
+		return s.input.CWD
+	}
 	return "~"
 }
 
@@ -249,10 +264,22 @@ func (s *Statusline) computeData(currentDir string) *CachedData {
 	// "Sonnet 4.6 (1M Context)" → "S4.6").
 	data.ModelDisplay = abbreviateModel(s.input.Model.DisplayName)
 
-	// Git information
+	// Git information. Branch comes from the zero-subprocess .git/HEAD
+	// file-read path (getGitInfo/readGitInfo); dirty/ahead/behind state
+	// comes from one cached, timeout-guarded `git status` subprocess
+	// (gitStatus), only attempted when a branch was actually found. A
+	// failed/timed-out gitStatus call (OK: false) leaves these fields at
+	// their zero value, so the chip degrades to branch-only.
 	gitInfo := s.getGitInfo(currentDir)
 	data.GitBranch = gitInfo.Branch
-	data.GitStatus = gitInfo.Status
+	if gitInfo.Branch != "" {
+		gs := gitStatus(s.deps.CommandRunner, s.deps.CacheDir, s.deps.CacheDuration, currentDir, s.now())
+		if gs.OK {
+			data.GitDirtyCount = gs.DirtyCount
+			data.GitAhead = gs.Ahead
+			data.GitBehind = gs.Behind
+		}
+	}
 
 	// Kubernetes context
 	data.K8sContext = s.getK8sContext()
@@ -309,7 +336,11 @@ func (s *Statusline) getGitInfo(dir string) GitInfo {
 func (s *Statusline) readGitInfo(gitDir string) GitInfo {
 	info := GitInfo{}
 
-	// Read HEAD file for branch
+	// Read HEAD file for branch. This is the zero-subprocess fallback
+	// path: it's always consulted for the branch name (including the
+	// detached-HEAD short-SHA case), independent of whether the
+	// gitStatus subprocess in git.go succeeds, times out, or is skipped
+	// entirely.
 	headPath := filepath.Join(gitDir, "HEAD")
 	if content, err := s.deps.FileReader.ReadFile(headPath); err == nil {
 		head := strings.TrimSpace(string(content))
@@ -319,23 +350,6 @@ func (s *Statusline) readGitInfo(gitDir string) GitInfo {
 			// Detached HEAD - show short hash
 			info.Branch = head[:7]
 		}
-	}
-
-	// Check for uncommitted changes
-	indexPath := filepath.Join(gitDir, "index")
-	if modTime, err := s.deps.FileReader.ModTime(indexPath); err == nil {
-		// If index was modified in last 60 seconds, likely have changes
-		const recentChangeWindow = 60 * time.Second
-		if time.Since(modTime) < recentChangeWindow {
-			info.Status = "!"
-		}
-	}
-
-	// Check for merge/rebase states
-	if s.deps.FileReader.Exists(filepath.Join(gitDir, "MERGE_HEAD")) ||
-		s.deps.FileReader.Exists(filepath.Join(gitDir, "rebase-merge")) ||
-		s.deps.FileReader.Exists(filepath.Join(gitDir, "rebase-apply")) {
-		info.Status = "!"
 	}
 
 	return info
@@ -518,15 +532,18 @@ func (s *Statusline) getColorFG(color string) string {
 		return s.colors.PinkFG()
 	case colorSapphire:
 		return s.colors.SapphireFG()
+	case colorOverlay:
+		return s.colors.OverlayFG()
 	default:
 		return ""
 	}
 }
 
-// GitInfo contains git repository information.
+// GitInfo contains git repository information from the zero-subprocess
+// .git/HEAD file-read path. Dirty/ahead/behind state comes separately
+// from gitStatus (git.go), which runs a real `git status` subprocess.
 type GitInfo struct {
 	Branch string
-	Status string
 }
 
 // Component represents a statusline component.

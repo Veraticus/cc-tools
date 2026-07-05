@@ -1,7 +1,9 @@
 package statusline
 
 import (
+	"context"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -165,6 +167,26 @@ func buildRLScenario(width int, rlState string) Scenario {
 	return Scenario{Name: name, Width: width, Input: input, Deps: deps}
 }
 
+// scenarioCleanPorcelain is the canned `git status --porcelain=v2
+// --branch` output for the "clean" git-state dimension: on branch
+// main, no ahead/behind, no changed entries.
+const scenarioCleanPorcelain = "# branch.oid abcdef1234567890\n" +
+	"# branch.head main\n" +
+	"# branch.upstream origin/main\n" +
+	"# branch.ab +0 -0\n"
+
+// scenarioDirtyPorcelain is the canned porcelain output for the
+// "dirty" git-state dimension: 3 changed/untracked entries, 2 commits
+// ahead of upstream, 0 behind — matching the epic's "dirty(3
+// entries)+ahead(2)" scenario spec.
+const scenarioDirtyPorcelain = "# branch.oid abcdef1234567890\n" +
+	"# branch.head main\n" +
+	"# branch.upstream origin/main\n" +
+	"# branch.ab +2 -0\n" +
+	"1 .M N... 100644 100644 100644 aaaaaaa bbbbbbb file1.go\n" +
+	"1 .M N... 100644 100644 100644 aaaaaaa bbbbbbb file2.go\n" +
+	"? file3.go\n"
+
 // buildScenario constructs one Scenario for the given axis values.
 func buildScenario(width int, ctxPercent float64, gitState, envState string) Scenario {
 	name := fmt.Sprintf("w%d_ctx%d_git-%s_env-%s", width, int(ctxPercent), gitState, envState)
@@ -184,13 +206,14 @@ func buildScenario(width int, ctxPercent float64, gitState, envState string) Sce
 
 	fr := newFixedFileReader()
 	env := newFixedEnvReader(map[string]string{"HOME": scenarioHome})
+	cr := newFixedCommandRunner()
 
-	applyGitState(fr, gitState)
+	applyGitState(fr, cr, gitState)
 	applyEnvState(fr, env, envState)
 
 	deps := &Dependencies{
 		FileReader:    fr,
-		CommandRunner: newFixedCommandRunner(),
+		CommandRunner: cr,
 		EnvReader:     env,
 		TerminalWidth: fixedTerminalWidth(width),
 		CacheDir:      "/tmp",
@@ -202,15 +225,17 @@ func buildScenario(width int, ctxPercent float64, gitState, envState string) Sce
 	return Scenario{Name: name, Width: width, Input: input, Deps: deps}
 }
 
-// applyGitState configures fr so getGitInfo/readGitInfo observe the
-// requested git state for scenarioProjectDir:
+// applyGitState configures fr and cr so getGitInfo/readGitInfo and
+// gitStatus observe the requested git state for scenarioProjectDir:
 //   - "none": no .git present anywhere on the walk up from the
-//     project dir.
-//   - "clean": .git exists with an old index mtime (no "!" status).
-//   - "dirty": .git exists with an index mtime inside the 60s
-//     recent-change window (readGitInfo's heuristic for uncommitted
-//     changes), rendering the "!" status.
-func applyGitState(fr *fixedFileReader, gitState string) {
+//     project dir, so gitStatus is never invoked.
+//   - "clean": .git exists with a "main" HEAD; cr returns clean
+//     porcelain output (no dirty entries, no ahead/behind) for the
+//     `git -C scenarioProjectDir status --porcelain=v2 --branch`
+//     command.
+//   - "dirty": same HEAD; cr returns porcelain output with 3
+//     changed/untracked entries and 2 commits ahead of upstream.
+func applyGitState(fr *fixedFileReader, cr *fixedCommandRunner, gitState string) {
 	if gitState == "none" {
 		return
 	}
@@ -219,12 +244,12 @@ func applyGitState(fr *fixedFileReader, gitState string) {
 	fr.setExists(gitDir, true)
 	fr.setFile(gitDir+"/HEAD", []byte("ref: refs/heads/main\n"))
 
+	gitStatusArgs := []string{"-C", scenarioProjectDir, "status", "--porcelain=v2", "--branch"}
 	switch gitState {
 	case "dirty":
-		fr.setModTime(gitDir+"/index", time.Now())
+		cr.setResponse("git", gitStatusArgs, []byte(scenarioDirtyPorcelain))
 	case "clean":
-		const longAgo = 24 * time.Hour
-		fr.setModTime(gitDir+"/index", time.Now().Add(-longAgo))
+		cr.setResponse("git", gitStatusArgs, []byte(scenarioCleanPorcelain))
 	}
 }
 
@@ -250,14 +275,12 @@ func applyEnvState(fr *fixedFileReader, env *fixedEnvReader, envState string) {
 // consumes Scenarios() at runtime).
 type fixedFileReader struct {
 	files  map[string][]byte
-	times  map[string]time.Time
 	exists map[string]bool
 }
 
 func newFixedFileReader() *fixedFileReader {
 	return &fixedFileReader{
 		files:  make(map[string][]byte),
-		times:  make(map[string]time.Time),
 		exists: make(map[string]bool),
 	}
 }
@@ -271,10 +294,6 @@ func (f *fixedFileReader) setExists(path string, v bool) {
 	f.exists[path] = v
 }
 
-func (f *fixedFileReader) setModTime(path string, t time.Time) {
-	f.times[path] = t
-}
-
 func (f *fixedFileReader) ReadFile(path string) ([]byte, error) {
 	if content, ok := f.files[path]; ok {
 		return content, nil
@@ -286,26 +305,45 @@ func (f *fixedFileReader) Exists(path string) bool {
 	return f.exists[path]
 }
 
-func (f *fixedFileReader) ModTime(path string) (time.Time, error) {
-	if t, ok := f.times[path]; ok {
-		return t, nil
-	}
-	return time.Time{}, fmt.Errorf("fixedFileReader: no mtime for %s", path)
-}
-
 // fixedCommandRunner is a deterministic CommandRunner fixture:
 // unconfigured commands return empty output with no error, matching
 // DefaultCommandRunner's behavior when a tool (e.g. `hostname`) isn't
-// available. No scenario currently needs a configured response, so
-// there's no setter yet — add one if a future scenario needs it.
-type fixedCommandRunner struct{}
-
-func newFixedCommandRunner() *fixedCommandRunner {
-	return &fixedCommandRunner{}
+// available. setResponse configures canned output for one specific
+// command+args combination (used for the git-status porcelain
+// fixtures in applyGitState).
+type fixedCommandRunner struct {
+	responses map[string][]byte
 }
 
-func (c *fixedCommandRunner) Run(string, ...string) ([]byte, error) {
+func newFixedCommandRunner() *fixedCommandRunner {
+	return &fixedCommandRunner{responses: make(map[string][]byte)}
+}
+
+// setResponse configures the canned output returned for command+args.
+func (c *fixedCommandRunner) setResponse(command string, args []string, output []byte) {
+	c.responses[fixedCommandRunnerKey(command, args)] = output
+}
+
+func (c *fixedCommandRunner) Run(command string, args ...string) ([]byte, error) {
+	if response, ok := c.responses[fixedCommandRunnerKey(command, args)]; ok {
+		return response, nil
+	}
 	return []byte(""), nil
+}
+
+// RunContext ignores ctx: scenarios are deterministic fixtures with no
+// real subprocess or timeout behavior to honor.
+func (c *fixedCommandRunner) RunContext(_ context.Context, command string, args ...string) ([]byte, error) {
+	return c.Run(command, args...)
+}
+
+// fixedCommandRunnerKey builds the same "command arg1 arg2..." lookup
+// key style used by MockCommandRunner in statusline_test.go.
+func fixedCommandRunnerKey(command string, args []string) string {
+	if len(args) == 0 {
+		return command
+	}
+	return command + " " + strings.Join(args, " ")
 }
 
 // fixedEnvReader is a deterministic EnvReader fixture backed by a

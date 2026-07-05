@@ -12,6 +12,10 @@ const (
 
 	// GitIcon is the icon for git branch display.
 	GitIcon = " "
+	// PRIcon is the pull-request review-state glyph appended to the git
+	// chip when CachedData.PR is non-nil (nf-dev-git_pull_request,
+	// codepoint U+E726).
+	PRIcon = ""
 	// AgentIcon is the icon for the subagent-name chip (nf-cod-hubot,
 	// U+EBA1). Distinct from ModelIcons (Claude model variants) so a
 	// subagent row reads as "this is an agent" at a glance.

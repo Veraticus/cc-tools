@@ -1,10 +1,45 @@
 package statusline
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+// TestDefaultCommandRunner_RunContext_TimeoutReapsChild proves the
+// no-zombie guarantee at the DefaultCommandRunner level: a real `sleep`
+// subprocess (far longer than the context budget) is killed and
+// reaped promptly when its context expires. cmd.Output() always calls
+// cmd.Wait() after Start(), on every return path -- including when
+// ctx's deadline fires and the default Cancel (Process.Kill) runs --
+// so RunContext returning at all here proves Wait() completed and the
+// child was reaped; if it hadn't, Output() itself would still be
+// blocked inside the process.
+func TestDefaultCommandRunner_RunContext_TimeoutReapsChild(t *testing.T) {
+	if _, err := exec.LookPath("sleep"); err != nil {
+		t.Skip("sleep not available on PATH")
+	}
+
+	r := &DefaultCommandRunner{}
+	const budget = 100 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+
+	start := time.Now()
+	_, err := r.RunContext(ctx, "sleep", "5")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected an error when the command is killed by context timeout")
+	}
+	const generousUpperBound = 2 * time.Second
+	if elapsed > generousUpperBound {
+		t.Fatalf("RunContext should return promptly after context timeout, took %v", elapsed)
+	}
+}
 
 func TestDefaultEnvReader_AwsProfileFromFile(t *testing.T) {
 	dir := t.TempDir()

@@ -16,6 +16,12 @@ const (
 	colorYellow    = "yellow"
 	colorTeal      = "teal"
 	colorRosewater = "rosewater"
+	// colorOverlay is the git chip's draft-PR glyph color: Catppuccin
+	// Mocha's overlay0, a muted gray. Not used as a chip background —
+	// only as an inline foreground override inside the git chip body
+	// (see createGitComponent) — so it deliberately doesn't appear in
+	// awsBgColor/gcloudBgColor/k8sBgColor above.
+	colorOverlay = "overlay"
 )
 
 // awsBgColor returns the chip background color name for an AWS profile's env.
