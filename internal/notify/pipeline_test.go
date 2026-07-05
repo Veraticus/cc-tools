@@ -100,7 +100,7 @@ func TestPipeline_Stop_GoalActive_DryRun_WouldArmWatchdog(t *testing.T) {
 	if len(recs) != 1 {
 		t.Fatalf("log records = %d, want 1", len(recs))
 	}
-	if recs[0].Outcome != "silent" {
+	if recs[0].Outcome != OutcomeSilent.String() {
 		t.Errorf("Outcome = %q, want silent", recs[0].Outcome)
 	}
 	if !strings.Contains(recs[0].Reason, "would arm watchdog") {
@@ -199,7 +199,7 @@ func TestPipeline_Stop_LiveTasks_DecideNotifyFalse_Silent(t *testing.T) {
 		t.Errorf("stdout = %q, want empty (silent, no DRY RUN line)", stdout.String())
 	}
 	recs := readDecisionLog(t, logPath)
-	if len(recs) != 1 || recs[0].Outcome != "silent" {
+	if len(recs) != 1 || recs[0].Outcome != OutcomeSilent.String() {
 		t.Fatalf("records = %+v, want one silent record", recs)
 	}
 	if !strings.Contains(recs[0].Reason, "parked, still building") {
@@ -229,7 +229,7 @@ func TestPipeline_Stop_LiveTasks_DecideNotifyTrue_UserPresent_Suppressed(t *test
 		t.Errorf("stdout = %q, want empty (suppressed)", stdout.String())
 	}
 	recs := readDecisionLog(t, logPath)
-	if len(recs) != 1 || recs[0].Outcome != "silent" {
+	if len(recs) != 1 || recs[0].Outcome != OutcomeSilent.String() {
 		t.Fatalf("records = %+v, want one silent record", recs)
 	}
 	if !strings.Contains(recs[0].Reason, "suppressed: user present") {
@@ -363,7 +363,7 @@ func TestPipeline_IdlePrompt_DedupeWindow_Silent(t *testing.T) {
 		t.Errorf("stdout = %q, want empty (dedupe silence)", stdout.String())
 	}
 	recs := readDecisionLog(t, logPath)
-	if len(recs) != 1 || recs[0].Outcome != "silent" {
+	if len(recs) != 1 || recs[0].Outcome != OutcomeSilent.String() {
 		t.Fatalf("records = %+v, want one silent record", recs)
 	}
 	if !strings.Contains(recs[0].Reason, "dedupe") {

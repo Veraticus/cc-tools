@@ -50,12 +50,14 @@ func ParseHookInput(r io.Reader) (HookInput, error) {
 	// SessionID is used by the caller (Pipeline.Run) to compose a per-session
 	// state directory, StateBase/SessionID, that gets os.RemoveAll'd whole on
 	// SessionEnd. An empty SessionID would collapse that path to StateBase
-	// itself, wiping every session's state on the next SessionEnd; a
+	// itself, wiping every session's state on the next SessionEnd — and so
+	// would ".", since filepath.Join(StateBase, ".") == StateBase; a
 	// SessionID carrying a path separator or ".." could likewise steer the
 	// directory (and its RemoveAll) outside the intended per-session
-	// location. Reject all three here rather than let a malformed or
+	// location. Reject all four here rather than let a malformed or
 	// hostile session_id ever reach that composition.
-	if in.SessionID == "" || strings.ContainsRune(in.SessionID, filepath.Separator) ||
+	if in.SessionID == "" || in.SessionID == "." ||
+		strings.ContainsRune(in.SessionID, filepath.Separator) ||
 		strings.Contains(in.SessionID, "..") {
 		return HookInput{}, fmt.Errorf("parsing hook input: invalid session_id %q", in.SessionID)
 	}

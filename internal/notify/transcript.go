@@ -675,11 +675,18 @@ func extractBlockText(raw json.RawMessage) string {
 	return sb.String()
 }
 
+// truncate returns s cut to at most maxLen bytes. The truncated branch
+// returns strings.Clone(s[:maxLen]) rather than the bare substring: callers
+// (processAssistantMessage's toolUseInfo.detail, and the goal-condition
+// fallback text in watchdog.go) store the result long-term, and a plain
+// substring slice would still alias — and therefore pin in memory — the
+// entire source backing array (a full command or prompt) for as long as the
+// truncated copy lives.
 func truncate(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
-	return s[:maxLen]
+	return strings.Clone(s[:maxLen])
 }
 
 // truncateHead mirrors truncate but keeps the END of s rather than the

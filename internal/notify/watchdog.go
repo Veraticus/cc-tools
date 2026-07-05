@@ -472,6 +472,17 @@ func composeGoalNotification(
 	m.Event = event
 	digest := BuildDigest(m, res, tasks, now)
 
+	// This compose call is a deliberately budget-exempt one-shot terminal
+	// call, distinct from handleStaleness's initialStaleBudget: that budget
+	// (2) caps only decide-mode staleness judgments (step e) and does not
+	// apply here. A goal transition (met/failed) reaches this call exactly
+	// once per watchdog lifetime, with no subsequent Stop hook able to retry
+	// it, so a global cap shared with staleness would let an already-
+	// exhausted staleness budget silently swallow the mandatory goal
+	// met/failed ping. Worst-case judge calls per watchdog lifetime is
+	// therefore 3 (2 staleness + 1 terminal compose); the ≤1-send invariant
+	// is unaffected, since RunWatchdog still sends at most once regardless of
+	// how many judge calls it took to get there.
 	verdict, err := deps.Judge(ctx, digest, JudgeModeCompose)
 	if err != nil {
 		return Notification{Title: fallbackTitle, Body: fallbackBody, Urgency: fallbackUrgency}, digest, err
@@ -490,6 +501,13 @@ func handleStaleness(
 	ctx context.Context, deps WatchdogDeps, st SessionState, lockPath string,
 	meta DigestMeta, res ScanResult, tasks []TaskActivity, sessionID string, now time.Time, state *wakeState,
 ) string {
+	// This budget caps only decide-mode staleness judgments (this function);
+	// it does not apply to the goal-transition compose call in
+	// composeGoalNotification, which is a deliberately exempt one-shot
+	// terminal call — see the comment there for why a shared cap would be
+	// wrong. Worst case, a watchdog spends this budget's 2 calls here plus 1
+	// more on that terminal compose: 3 judge calls per lifetime, still ≤1
+	// send.
 	if state.budget <= 0 {
 		return ""
 	}

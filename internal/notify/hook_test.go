@@ -97,6 +97,23 @@ func TestParseHookInput(t *testing.T) {
 		}
 	})
 
+	// "." carries no separator and no "..", but filepath.Join(StateBase, ".")
+	// collapses to StateBase itself, so SessionEnd's reap would RemoveAll the
+	// entire state base. It must be rejected explicitly.
+	t.Run("session_id of dot errors", func(t *testing.T) {
+		_, err := ParseHookInput(strings.NewReader(`{"session_id": ".", "hook_event_name": "Stop"}`))
+		if err == nil {
+			t.Fatal("ParseHookInput: expected error for session_id \".\", got nil")
+		}
+	})
+
+	t.Run("session_id with trailing slash errors", func(t *testing.T) {
+		_, err := ParseHookInput(strings.NewReader(`{"session_id": "abc/", "hook_event_name": "Stop"}`))
+		if err == nil {
+			t.Fatal("ParseHookInput: expected error for session_id with trailing slash, got nil")
+		}
+	})
+
 	// Two top-level objects in the stream: json.Decoder.Decode reads exactly
 	// one object and leaves the rest in the buffer unread, so the first
 	// object wins and the second is simply ignored — that is the chosen,

@@ -914,6 +914,9 @@ func TestRunWatchdog_NoGrowthWake_ReusesCachedScan(t *testing.T) {
 	h.clock.mu.Lock()
 	h.clock.now = h.clock.now.Add(watchdogCeiling + time.Minute)
 	h.clock.mu.Unlock()
+	if os.Geteuid() == 0 {
+		t.Skip("chmod 0000 does not deny root; cache proof needs non-root euid")
+	}
 	if err := os.Chmod(transcript, 0o000); err != nil {
 		t.Fatalf("chmod transcript unreadable: %v", err)
 	}
