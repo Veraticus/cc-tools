@@ -1,0 +1,239 @@
+package notify
+
+import (
+	"testing"
+	"time"
+)
+
+// neverNotified is the sentinel Env.SinceLastNotify value meaning this
+// session has not sent a notification yet.
+const neverNotified = -1 * time.Second
+
+func TestDecide(t *testing.T) {
+	liveTasks := []LiveTask{{ID: "t1", Kind: TaskBash, Description: "run tests"}}
+
+	tests := []struct {
+		name string
+		in   HookInput
+		scan ScanResult
+		env  Env
+		want Decision
+	}{
+		// --- Gate 1: agent context, all events ---
+		{
+			name: "agent context silences any event",
+			in:   HookInput{HookEventName: "Notification", NotificationType: "agent_completed", AgentID: "agent-1"},
+			scan: ScanResult{},
+			env:  Env{},
+			want: Decision{Outcome: OutcomeSilent, Reason: "agent context"},
+		},
+
+		// --- Gate 2: SessionEnd ---
+		{
+			name: "session end reaps watchdog",
+			in:   HookInput{HookEventName: "SessionEnd"},
+			scan: ScanResult{},
+			env:  Env{},
+			want: Decision{Outcome: OutcomeSilent, Reason: "session end", ReapWatchdog: true},
+		},
+
+		// --- Gate 3: Stop ---
+		{
+			name: "stop with goal active arms watchdog",
+			in:   HookInput{HookEventName: "Stop"},
+			scan: ScanResult{Goal: GoalState{Status: GoalActive}},
+			env:  Env{},
+			want: Decision{Outcome: OutcomeSilent, Reason: "goal active", ArmWatchdog: true},
+		},
+		{
+			name: "stop with live tasks judges decide mode",
+			in:   HookInput{HookEventName: "Stop"},
+			scan: ScanResult{LiveTasks: liveTasks},
+			env:  Env{},
+			want: Decision{
+				Outcome: OutcomeJudge, JudgeMode: JudgeModeDecide,
+				Reason: "live tasks: parked vs pending", ArmWatchdog: true,
+			},
+		},
+		{
+			name: "stop with user present and no work is silent",
+			in:   HookInput{HookEventName: "Stop"},
+			scan: ScanResult{},
+			env:  Env{UserPresent: true},
+			want: Decision{Outcome: OutcomeSilent, Reason: "user present at focused pane"},
+		},
+		{
+			name: "stop with no goal, no tasks, no presence composes",
+			in:   HookInput{HookEventName: "Stop"},
+			scan: ScanResult{},
+			env:  Env{},
+			want: Decision{Outcome: OutcomeJudge, JudgeMode: JudgeModeCompose, Reason: "turn ended, composing"},
+		},
+
+		// --- Gate 4: Notification ---
+		{
+			name: "permission prompt always sends blocked",
+			in: HookInput{
+				HookEventName: "Notification", NotificationType: "permission_prompt",
+				Message: "allow this?",
+			},
+			scan: ScanResult{},
+			env:  Env{},
+			want: Decision{
+				Outcome: OutcomeSend, Urgency: UrgencyBlocked,
+				Message: "allow this?", Reason: "permission prompt",
+			},
+		},
+		{
+			name: "idle prompt within dedupe window is silent",
+			in:   HookInput{HookEventName: "Notification", NotificationType: "idle_prompt"},
+			scan: ScanResult{},
+			env:  Env{SinceLastNotify: 30 * time.Second},
+			want: Decision{Outcome: OutcomeSilent, Reason: "dedupe: notified 30s ago"},
+		},
+		{
+			name: "idle prompt with goal active is silent",
+			in:   HookInput{HookEventName: "Notification", NotificationType: "idle_prompt"},
+			scan: ScanResult{Goal: GoalState{Status: GoalActive}},
+			env:  Env{SinceLastNotify: neverNotified},
+			want: Decision{Outcome: OutcomeSilent, Reason: "goal active"},
+		},
+		{
+			name: "idle prompt with user present is silent",
+			in:   HookInput{HookEventName: "Notification", NotificationType: "idle_prompt"},
+			scan: ScanResult{},
+			env:  Env{SinceLastNotify: neverNotified, UserPresent: true},
+			want: Decision{Outcome: OutcomeSilent, Reason: "user present"},
+		},
+		{
+			name: "idle prompt otherwise composes as backstop",
+			in:   HookInput{HookEventName: "Notification", NotificationType: "idle_prompt"},
+			scan: ScanResult{},
+			env:  Env{SinceLastNotify: 5 * time.Minute},
+			want: Decision{Outcome: OutcomeJudge, JudgeMode: JudgeModeCompose, Reason: "idle backstop"},
+		},
+		{
+			name: "agent needs input always sends blocked",
+			in: HookInput{
+				HookEventName: "Notification", NotificationType: "agent_needs_input",
+				Message: "need a decision",
+			},
+			scan: ScanResult{},
+			env:  Env{UserPresent: true, SinceLastNotify: 1 * time.Second},
+			want: Decision{
+				Outcome: OutcomeSend, Urgency: UrgencyBlocked,
+				Message: "need a decision", Reason: "background session needs input",
+			},
+		},
+		{
+			name: "agent completed with user present is silent",
+			in: HookInput{
+				HookEventName: "Notification", NotificationType: "agent_completed",
+				Message: "finished the run",
+			},
+			scan: ScanResult{},
+			env:  Env{UserPresent: true},
+			want: Decision{Outcome: OutcomeSilent, Reason: "user present"},
+		},
+		{
+			name: "agent completed without presence sends done",
+			in: HookInput{
+				HookEventName: "Notification", NotificationType: "agent_completed",
+				Message: "finished the run",
+			},
+			scan: ScanResult{},
+			env:  Env{},
+			want: Decision{
+				Outcome: OutcomeSend, Urgency: UrgencyDone,
+				Message: "finished the run", Reason: "background session completed",
+			},
+		},
+		{
+			name: "unhandled notification type is silent",
+			in:   HookInput{HookEventName: "Notification", NotificationType: "auth_success"},
+			scan: ScanResult{},
+			env:  Env{},
+			want: Decision{Outcome: OutcomeSilent, Reason: "unhandled notification type: auth_success"},
+		},
+
+		// --- Gate 5: any other event ---
+		{
+			name: "unhandled event is silent",
+			in:   HookInput{HookEventName: "PreToolUse"},
+			scan: ScanResult{},
+			env:  Env{},
+			want: Decision{Outcome: OutcomeSilent, Reason: "unhandled event: PreToolUse"},
+		},
+
+		// --- Precedence rows ---
+		{
+			name: "agent context wins over stop with goal active",
+			in:   HookInput{HookEventName: "Stop", AgentID: "agent-1"},
+			scan: ScanResult{Goal: GoalState{Status: GoalActive}},
+			env:  Env{},
+			want: Decision{Outcome: OutcomeSilent, Reason: "agent context"},
+		},
+		{
+			name: "goal active wins over live tasks",
+			in:   HookInput{HookEventName: "Stop"},
+			scan: ScanResult{Goal: GoalState{Status: GoalActive}, LiveTasks: liveTasks},
+			env:  Env{},
+			want: Decision{Outcome: OutcomeSilent, Reason: "goal active", ArmWatchdog: true},
+		},
+		{
+			name: "permission prompt sends even with user present and recent notify",
+			in: HookInput{
+				HookEventName: "Notification", NotificationType: "permission_prompt",
+				Message: "allow this?",
+			},
+			scan: ScanResult{},
+			env:  Env{UserPresent: true, SinceLastNotify: 1 * time.Second},
+			want: Decision{
+				Outcome: OutcomeSend, Urgency: UrgencyBlocked,
+				Message: "allow this?", Reason: "permission prompt",
+			},
+		},
+		{
+			name: "idle prompt never notified with no goal and not present still judges",
+			in:   HookInput{HookEventName: "Notification", NotificationType: "idle_prompt"},
+			scan: ScanResult{},
+			env:  Env{SinceLastNotify: neverNotified},
+			want: Decision{Outcome: OutcomeJudge, JudgeMode: JudgeModeCompose, Reason: "idle backstop"},
+		},
+		{
+			name: "stop with live tasks still judges even when user present",
+			in:   HookInput{HookEventName: "Stop"},
+			scan: ScanResult{LiveTasks: liveTasks},
+			env:  Env{UserPresent: true},
+			want: Decision{
+				Outcome: OutcomeJudge, JudgeMode: JudgeModeDecide,
+				Reason: "live tasks: parked vs pending", ArmWatchdog: true,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Decide(tt.in, tt.scan, tt.env)
+			if got != tt.want {
+				t.Errorf("Decide() mismatch\ngot:  %+v\nwant: %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestOutcomeString(t *testing.T) {
+	tests := []struct {
+		o    Outcome
+		want string
+	}{
+		{OutcomeSilent, "silent"},
+		{OutcomeSend, "send"},
+		{OutcomeJudge, "judge"},
+	}
+	for _, tt := range tests {
+		if got := tt.o.String(); got != tt.want {
+			t.Errorf("Outcome(%d).String() = %q, want %q", tt.o, got, tt.want)
+		}
+	}
+}

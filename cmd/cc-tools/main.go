@@ -57,6 +57,8 @@ func main() {
 		runSubagentStatuslineCommand()
 	case "preview":
 		runPreviewCommand()
+	case "notify":
+		runNotifyCommand()
 	case "version":
 		// Print version to stdout as intended output
 		out.Raw(fmt.Sprintf("cc-tools %s\n", version))
@@ -84,6 +86,7 @@ Commands:
   render-clouds Emit AWS/gcloud/k8s chip chain as ANSI (for starship)
   subagent-statusline  Render per-row chip decorations for the claude agents view
   preview       Render every statusline/subagent-statusline scenario, labeled
+  notify        Turn-aware hook notifier (Stop/Notification/SessionEnd)
   version       Print version information
   help          Show this help message
 
