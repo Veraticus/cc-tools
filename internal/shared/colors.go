@@ -2,8 +2,6 @@
 package shared
 
 import (
-	"fmt"
-
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -25,11 +23,6 @@ type RawANSIStyle struct {
 // NewRawANSIStyle creates a raw ANSI style.
 func NewRawANSIStyle(color string) RawANSIStyle {
 	return RawANSIStyle{color: color}
-}
-
-// Render applies the ANSI color codes to text.
-func (s RawANSIStyle) Render(text string) string {
-	return fmt.Sprintf("%s%s%s", s.color, text, ANSIReset)
 }
 
 // Raw ANSI styles matching bash hooks exactly.

@@ -329,28 +329,6 @@ func TestTruncateText(t *testing.T) {
 	}
 }
 
-func TestFormatTokens(t *testing.T) {
-	tests := []struct {
-		count    int
-		expected string
-	}{
-		{100, "100"},
-		{1000, "1.0k"},
-		{1500, "1.5k"},
-		{1000000, "1.0M"},
-		{2500000, "2.5M"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.expected, func(t *testing.T) {
-			result := formatTokens(tt.count)
-			if result != tt.expected {
-				t.Errorf("formatTokens(%d) = %q, want %q", tt.count, result, tt.expected)
-			}
-		})
-	}
-}
-
 func TestContextBar(t *testing.T) {
 	deps := &Dependencies{
 		FileReader:    NewMockFileReader(),

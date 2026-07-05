@@ -22,8 +22,6 @@ const (
 	K8sIcon = "☸ "
 	// GcloudIcon is the icon for gcloud project display.
 	GcloudIcon = "󱇶 "
-	// DevspaceIcon is the icon for devspace display (set dynamically).
-	DevspaceIcon = "" // Will be set based on devspace name
 	// HostnameIcon is the icon for hostname display.
 	HostnameIcon = " "
 	// ContextIcon is the icon for context bar display.

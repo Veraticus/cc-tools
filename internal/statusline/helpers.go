@@ -70,21 +70,6 @@ func truncateText(text string, maxWidth int) string {
 	return runewidth.Truncate(text, maxWidth-ellipsisWidth, "") + "…"
 }
 
-// formatTokens formats token count for display.
-func formatTokens(count int) string {
-	const (
-		million  = 1000000
-		thousand = 1000
-	)
-	if count >= million {
-		return fmt.Sprintf("%.1fM", float64(count)/float64(million))
-	}
-	if count >= thousand {
-		return fmt.Sprintf("%.1fk", float64(count)/float64(thousand))
-	}
-	return fmt.Sprintf("%d", count)
-}
-
 // stripAnsi removes ANSI escape sequences from a string.
 func stripAnsi(text string) string {
 	// Remove all ANSI escape sequences

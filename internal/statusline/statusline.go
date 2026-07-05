@@ -58,7 +58,6 @@ type CachedData struct {
 	UsedPercentage float64
 	Hostname       string
 	Devspace       string
-	DevspaceSymbol string
 	TermWidth      int
 }
 
@@ -213,7 +212,7 @@ func (s *Statusline) computeData(currentDir string) *CachedData {
 	data.Hostname = s.getHostname()
 
 	// Devspace
-	data.Devspace, data.DevspaceSymbol = s.getDevspace()
+	data.Devspace, _ = s.getDevspace()
 
 	return data
 }
