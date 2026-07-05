@@ -371,6 +371,40 @@ func TestComposeNarrowChain_AllFourChips_MirrorPattern(t *testing.T) {
 	}
 }
 
+func TestComposeNarrowChain_PostPivotChevronColorOrder(t *testing.T) {
+	// Post-pivot junctions render RightChevron (U+E0B2), a mirrored
+	// powerline glyph: the solid triangle must carry the RIGHT
+	// (next) chip's color over the LEFT (current) chip's
+	// background — bg = chip.Color, fg = next.Color. This is the
+	// opposite convention from the pre-pivot LeftChevron
+	// (bg = next.Color, fg = chip.Color), because the chevron
+	// direction has mirrored but the "which side is which color"
+	// rule mirrors with it.
+	s := newTestStatusline(t, newTestResolver(t, ""))
+	chips := []narrowChip{
+		{Color: "lavender", Body: "~/x", Kind: kindDir},
+		{Color: "green", Body: "0%", Kind: kindContext},
+		{Color: "pink", Body: " main", Kind: kindBranch},
+		{Color: "peach", Body: " staging", Kind: kindEnv},
+	}
+	got := s.composeNarrowChain(chips)
+
+	// Junction under test: branch(pink) -> env(peach), the second
+	// post-pivot junction, both chips distinctly colored.
+	wantCorrect := s.getColorBG("pink") + s.getColorFG("peach") + RightChevron
+	wantBuggy := s.getColorBG("peach") + s.getColorFG("pink") + RightChevron
+
+	if !strings.Contains(got, wantCorrect) {
+		t.Errorf(
+			"post-pivot RightChevron between branch and env should have bg=branch(pink) fg=env(peach); got %q",
+			got,
+		)
+	}
+	if strings.Contains(got, wantBuggy) {
+		t.Errorf("post-pivot RightChevron has inverted colors (bg=next, fg=current); got %q", got)
+	}
+}
+
 func TestComposeNarrowChain_StartsWithLeftCurveEndsWithRightCurve(t *testing.T) {
 	s := newTestStatusline(t, newTestResolver(t, ""))
 	chips := []narrowChip{

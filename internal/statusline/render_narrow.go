@@ -221,6 +221,37 @@ func firstEnvChip(deps *Dependencies, data *CachedData) (narrowChip, bool) {
 	return narrowChip{}, false
 }
 
+// narrowChevronColors returns the bg escape, fg escape, and glyph for
+// the interior chevron between chip (current) and next. The two
+// chevron glyphs are mirror images of each other, so the color
+// convention mirrors too:
+//   - prePivot (LeftChevron, points right): bg = next chip,
+//     fg = current chip.
+//   - post-pivot (RightChevron, points left): bg = current chip,
+//     fg = next chip.
+//
+// In both cases, when the adjacent chips share a bg color (e.g.
+// context=green next to AWS-dev=green), the default chevron fg would
+// equal the bg and the glyph would disappear, making the chips
+// visually fuse. Fall back to the dark BaseFG so the boundary stays
+// legible.
+func (s *Statusline) narrowChevronColors(chip, next narrowChip, prePivot bool) (string, string, string) {
+	var bg, fg, glyph string
+	if prePivot {
+		bg = s.getColorBG(next.Color)
+		fg = s.getColorFG(chip.Color)
+		glyph = LeftChevron
+	} else {
+		bg = s.getColorBG(chip.Color)
+		fg = s.getColorFG(next.Color)
+		glyph = RightChevron
+	}
+	if chip.Color == next.Color {
+		fg = s.colors.BaseFG()
+	}
+	return bg, fg, glyph
+}
+
 // composeNarrowChain renders the chip slice as an ANSI string framed
 // by LeftCurve at the start and RightCurve at the end. Interior
 // chevrons mirror around the context chip: forward-pointing
@@ -271,22 +302,10 @@ func (s *Statusline) composeNarrowChain(chips []narrowChip) string {
 		// Interior chevron between chip[i] and chip[i+1].
 		if i+1 < len(chips) {
 			next := chips[i+1]
-			sb.WriteString(s.getColorBG(next.Color))
-			// When adjacent chips share a bg color (e.g. context=green
-			// next to AWS-dev=green), the default chevron fg would
-			// equal the bg and the glyph would disappear, making the
-			// chips visually fuse. Fall back to the dark BaseFG so the
-			// boundary stays legible.
-			if chip.Color == next.Color {
-				sb.WriteString(s.colors.BaseFG())
-			} else {
-				sb.WriteString(s.getColorFG(chip.Color))
-			}
-			if i+1 < pivot {
-				sb.WriteString(LeftChevron)
-			} else {
-				sb.WriteString(RightChevron)
-			}
+			bg, fg, glyph := s.narrowChevronColors(chip, next, i+1 < pivot)
+			sb.WriteString(bg)
+			sb.WriteString(fg)
+			sb.WriteString(glyph)
 			sb.WriteString(s.colors.NC())
 		}
 	}
