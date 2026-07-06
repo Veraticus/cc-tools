@@ -24,6 +24,10 @@ const (
 	OutcomeSend
 	// OutcomeJudge means hand off to the LLM judge; JudgeMode says why.
 	OutcomeJudge
+	// OutcomeGoalJudge means a goal is active and live tasks are present:
+	// the pipeline calls EvaluateGoal to get a verdict and decides arming
+	// from it, rather than Decide arming (or not) up front.
+	OutcomeGoalJudge
 )
 
 // String renders an Outcome as the lowercase word the decision log shows.
@@ -35,6 +39,8 @@ func (o Outcome) String() string {
 		return "send"
 	case OutcomeJudge:
 		return "judge"
+	case OutcomeGoalJudge:
+		return "goal-judge"
 	default:
 		return "unknown"
 	}
@@ -133,7 +139,22 @@ func Decide(in HookInput, scan ScanResult, env Env) Decision {
 // there is genuinely nothing left for the session to track.
 func decideStop(scan ScanResult, env Env) Decision {
 	if scan.Goal.Status == GoalActive {
-		return Decision{Outcome: OutcomeSilent, Reason: "goal active", ArmWatchdog: true}
+		// Claude Code's built-in /goal evaluator is skipped at any Stop
+		// while background tasks are live (verified empirically,
+		// undocumented). So when live tasks are present, this notifier is
+		// the only place left that owns goal continuation, and it hands
+		// off to the goal judge for the pipeline to execute; it must not
+		// pre-arm the watchdog, since arming depends on the verdict. When
+		// no tasks are live, the built-in /goal evaluator still owns
+		// continuation, so the notifier just stays silent and arms the
+		// watchdog to keep checking.
+		if len(scan.LiveTasks) == 0 {
+			return Decision{Outcome: OutcomeSilent, Reason: "goal active", ArmWatchdog: true}
+		}
+		return Decision{
+			Outcome: OutcomeGoalJudge,
+			Reason:  "goal active with live tasks: goal continuation",
+		}
 	}
 	if len(scan.LiveTasks) > 0 {
 		return Decision{

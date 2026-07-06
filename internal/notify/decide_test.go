@@ -56,6 +56,16 @@ func TestDecide(t *testing.T) {
 			},
 		},
 		{
+			name: "stop with goal active and live tasks routes to goal judge",
+			in:   HookInput{HookEventName: "Stop"},
+			scan: ScanResult{Goal: GoalState{Status: GoalActive}, LiveTasks: liveTasks},
+			env:  Env{},
+			want: Decision{
+				Outcome: OutcomeGoalJudge,
+				Reason:  "goal active with live tasks: goal continuation",
+			},
+		},
+		{
 			name: "stop with user present and no work is silent",
 			in:   HookInput{HookEventName: "Stop"},
 			scan: ScanResult{},
@@ -174,11 +184,11 @@ func TestDecide(t *testing.T) {
 			want: Decision{Outcome: OutcomeSilent, Reason: "agent context"},
 		},
 		{
-			name: "goal active wins over live tasks",
-			in:   HookInput{HookEventName: "Stop"},
+			name: "agent context wins over stop with goal active and live tasks",
+			in:   HookInput{HookEventName: "Stop", AgentID: "agent-1"},
 			scan: ScanResult{Goal: GoalState{Status: GoalActive}, LiveTasks: liveTasks},
 			env:  Env{},
-			want: Decision{Outcome: OutcomeSilent, Reason: "goal active", ArmWatchdog: true},
+			want: Decision{Outcome: OutcomeSilent, Reason: "agent context"},
 		},
 		{
 			name: "permission prompt sends even with user present and recent notify",
@@ -230,6 +240,7 @@ func TestOutcomeString(t *testing.T) {
 		{OutcomeSilent, "silent"},
 		{OutcomeSend, "send"},
 		{OutcomeJudge, "judge"},
+		{OutcomeGoalJudge, "goal-judge"},
 	}
 	for _, tt := range tests {
 		if got := tt.o.String(); got != tt.want {
