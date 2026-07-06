@@ -2,6 +2,7 @@ package notify
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -17,6 +18,12 @@ import (
 // truncateHead) is what carries the meaningful content, matching the
 // head/tail convention established in transcript.go/digest.go.
 const maxNotificationTailLen = 160
+
+// goalBlockCap bounds how many consecutive Stop-hook blocks the pipeline
+// will emit for one goal condition before it gives up blocking and sends a
+// "goal stalled" notification instead: 8, mirroring Claude Code's own
+// built-in stop-hook override cap.
+const goalBlockCap = 8
 
 // Pipeline is the top-level orchestrator for a single hook invocation: it
 // scans the transcript, computes the deterministic Decide() gates, and
@@ -74,6 +81,8 @@ func (p Pipeline) Run(ctx context.Context, in HookInput) error {
 		p.handleSend(ctx, state, in, now, project, d, reasonSuffix)
 	case OutcomeJudge:
 		p.handleJudge(ctx, state, in, res, env, now, project, host, d, reasonSuffix)
+	case OutcomeGoalJudge:
+		p.handleGoalJudge(ctx, state, in, res, now, project, host, d, reasonSuffix)
 	}
 	return nil
 }
@@ -310,6 +319,186 @@ func (p Pipeline) handleDecideVerdict(
 	p.logJudged(
 		in, now, OutcomeSend.String(), d.Reason+reasonSuffix+sendSuffix, n, JudgeModeDecide, nil, digest, judgeMs,
 	)
+}
+
+// handleGoalJudge implements the OutcomeGoalJudge branch: build the digest,
+// call the goal-continuation judge, and route on verdict.Tasks FIRST — a
+// "pending" verdict is inert regardless of GoalMet (the goal cannot be
+// judged met while genuine pending work is still awaited, per goalRubric),
+// so branching on Tasks before ever looking at GoalMet is what keeps that
+// guarantee even if the judge ever violated its own rubric. A judge error
+// fails toward the pre-epic behavior: silent and arm the watchdog, never a
+// block.
+func (p Pipeline) handleGoalJudge(
+	ctx context.Context, state SessionState, in HookInput, res ScanResult, now time.Time,
+	project, host string, d Decision, reasonSuffix string,
+) {
+	tasks := EnrichTasks(res.LiveTasks, now)
+	digest := BuildDigest(DigestMeta{
+		Project: project, Host: host, Event: in.HookEventName, LastAssistantMessage: in.LastAssistantMessage,
+	}, res, tasks, now)
+
+	start := time.Now()
+	verdict, jerr := p.Judge.EvaluateGoal(ctx, digest)
+	judgeMs := time.Since(start).Milliseconds()
+
+	if jerr != nil {
+		p.handleGoalJudgeError(state, in, res, now, project, host, d, jerr, digest, judgeMs, reasonSuffix)
+		return
+	}
+
+	switch verdict.Tasks {
+	case "pending":
+		p.handleGoalPending(state, in, res, now, project, host, verdict, digest, judgeMs, reasonSuffix)
+	case "parked":
+		if verdict.GoalMet {
+			p.handleGoalParkedMet(ctx, state, in, now, project, res.Goal, verdict, digest, judgeMs, reasonSuffix)
+		} else {
+			p.handleGoalParkedUnmet(ctx, state, in, now, project, res.Goal, verdict, digest, judgeMs, reasonSuffix)
+		}
+	}
+}
+
+// handleGoalJudgeError implements disposition 4: EvaluateGoal errored, so
+// the pipeline fails toward the pre-epic behavior (silent, arm the
+// watchdog) rather than ever guessing a verdict. The decision log's Outcome
+// is the distinct string "judge error" (not "silent") so this fallback path
+// stays distinguishable in the log from a genuine pending verdict; Reason
+// falls back to d.Reason (the Decide-level reason) since there is no
+// verdict to quote, mirroring handleDecideVerdict's own jerr!=nil branch.
+func (p Pipeline) handleGoalJudgeError(
+	state SessionState, in HookInput, res ScanResult, now time.Time, project, host string,
+	d Decision, jerr error, digest string, judgeMs int64, reasonSuffix string,
+) {
+	if !p.DryRun {
+		//nolint:contextcheck // arming spawns a detached child that must outlive this hook's ctx; see SpawnRecheck
+		p.arm(state, in, res, now, project, host)
+		_ = state.SetGoalBlockCount(res.Goal.Condition, 0)
+	}
+	p.logGoalJudged(
+		in, now, "judge error", d.Reason+reasonSuffix+stopHookActiveSuffix(in.StopHookActive),
+		Notification{}, jerr, digest, judgeMs,
+	)
+}
+
+// handleGoalPending implements disposition 1: at least one live task is
+// still genuine pending work, so the goal cannot be judged yet — same
+// effect as the pre-split goal-active outcome (silent, arm the watchdog),
+// reusing the existing arm path exactly.
+func (p Pipeline) handleGoalPending(
+	state SessionState, in HookInput, res ScanResult, now time.Time, project, host string,
+	verdict GoalVerdict, digest string, judgeMs int64, reasonSuffix string,
+) {
+	reason := verdict.Reason + reasonSuffix + stopHookActiveSuffix(in.StopHookActive)
+	if p.DryRun {
+		reason += " (would arm watchdog)"
+	} else {
+		//nolint:contextcheck // arming spawns a detached child that must outlive this hook's ctx; see SpawnRecheck
+		p.arm(state, in, res, now, project, host)
+		_ = state.SetGoalBlockCount(res.Goal.Condition, 0)
+	}
+	p.logGoalJudged(in, now, OutcomeSilent.String(), reason, Notification{}, nil, digest, judgeMs)
+}
+
+// handleGoalParkedUnmet implements disposition 2 (block, under cap) and the
+// cap-hit fallback: all live tasks are parked and the goal is not yet met.
+// Under goalBlockCap consecutive blocks for this exact goal condition, it
+// writes the Stop-hook block control message; at or past the cap, it gives
+// up blocking and sends a deterministic "goal stalled" notification
+// instead. The count is reset whenever a block is NOT emitted (cap-hit),
+// matching every other non-block disposition.
+func (p Pipeline) handleGoalParkedUnmet(
+	ctx context.Context, state SessionState, in HookInput, now time.Time, project string,
+	goal GoalState, verdict GoalVerdict, digest string, judgeMs int64, reasonSuffix string,
+) {
+	count := state.GoalBlockCount(goal.Condition)
+	reason := verdict.Reason + reasonSuffix + stopHookActiveSuffix(in.StopHookActive)
+
+	if count >= goalBlockCap {
+		n := Notification{Title: project + " · goal stalled", Body: verdict.Reason, Urgency: UrgencyBlocked}
+		sendSuffix := p.deliver(ctx, n)
+		if !p.DryRun {
+			_ = state.MarkNotified(now)
+			_ = state.SetGoalBlockCount(goal.Condition, 0)
+		}
+		p.logGoalJudged(in, now, OutcomeSend.String(), reason+sendSuffix, n, nil, digest, judgeMs)
+		return
+	}
+
+	blockReason := truncate(goal.Condition, maxGoalConditionLen) + " — " + verdict.Reason
+	if p.DryRun {
+		_, _ = fmt.Fprintf(p.Stdout, "DRY RUN: would block (goal continuation) — %s\n", blockReason)
+	} else {
+		reason += writeBlockDecision(p.Stdout, blockReason)
+		_ = state.SetGoalBlockCount(goal.Condition, count+1)
+	}
+	p.logGoalJudged(in, now, "block", reason, Notification{}, nil, digest, judgeMs)
+}
+
+// handleGoalParkedMet implements disposition 3: all live tasks are parked
+// and the goal condition already holds. Sends a "goal complete"
+// notification and resets the block count — no block, no watchdog.
+func (p Pipeline) handleGoalParkedMet(
+	ctx context.Context, state SessionState, in HookInput, now time.Time, project string,
+	goal GoalState, verdict GoalVerdict, digest string, judgeMs int64, reasonSuffix string,
+) {
+	n := Notification{Title: project + " · goal complete", Body: verdict.Reason, Urgency: UrgencyDone}
+	sendSuffix := p.deliver(ctx, n)
+	if !p.DryRun {
+		_ = state.MarkNotified(now)
+		_ = state.SetGoalBlockCount(goal.Condition, 0)
+	}
+	reason := verdict.Reason + reasonSuffix + stopHookActiveSuffix(in.StopHookActive) + sendSuffix
+	p.logGoalJudged(in, now, OutcomeSend.String(), reason, n, nil, digest, judgeMs)
+}
+
+// stopHookActiveSuffix renders in.StopHookActive as a decision-log Reason
+// suffix, folding the parsed field into the log the same way reasonSuffix
+// folds a transcript-scan error in: appended text on an existing Reason,
+// never a separate control path.
+func stopHookActiveSuffix(active bool) string {
+	return fmt.Sprintf(" (stop_hook_active=%t)", active)
+}
+
+// writeBlockDecision marshals the Stop-hook block control message —
+// {"decision":"block","reason":reason} — and writes it, newline-terminated,
+// to w. This is the only stdout write in the whole pipeline outside DryRun's
+// own reporting lines: Claude Code parses hook stdout as a control message,
+// so a marshal or write failure here is folded into the decision log's
+// Reason via a returned suffix (mirroring deliver's sendSuffix) rather than
+// panicking or retrying — this call must never be able to fail the hook.
+func writeBlockDecision(w io.Writer, reason string) string {
+	line, err := json.Marshal(struct {
+		Decision string `json:"decision"`
+		Reason   string `json:"reason"`
+	}{Decision: "block", Reason: reason})
+	if err != nil {
+		return fmt.Sprintf(" (block write failed: %s)", err)
+	}
+	line = append(line, '\n')
+	if _, writeErr := w.Write(line); writeErr != nil {
+		return fmt.Sprintf(" (block write failed: %s)", writeErr)
+	}
+	return ""
+}
+
+// logGoalJudged builds and appends a decision record for a goal-judge
+// evaluation: every goal-judge record carries Digest, JudgeMs, and (if
+// non-nil) JudgeErr, with JudgeMode fixed to "goal" — EvaluateGoal shares no
+// JudgeMode value with Evaluate's compose/decide modes, so it is not routed
+// through judgeModeLabel.
+func (p Pipeline) logGoalJudged(
+	in HookInput, now time.Time, outcome, reason string, n Notification, jerr error, digest string, judgeMs int64,
+) {
+	rec := DecisionRecord{
+		Outcome: outcome, Reason: reason,
+		Urgency: n.Urgency, Title: n.Title, Body: n.Body,
+		JudgeMode: "goal", JudgeMs: judgeMs, Digest: digest,
+	}
+	if jerr != nil {
+		rec.JudgeErr = jerr.Error()
+	}
+	p.logRecord(in, now, rec)
 }
 
 // deliver sends n: in DryRun mode it writes a "DRY RUN: ..." line to Stdout

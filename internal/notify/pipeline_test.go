@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,6 +59,82 @@ func newTestPipeline(
 }
 
 func neverPresent(_ []string, _ time.Time) bool { return false }
+
+// goalJudgeTestCondition is the exact goal condition text baked into the
+// goal_active_live_tasks.jsonl fixture's goal_status attachment: tests key
+// state.GoalBlockCount lookups off this literal string, the same way the
+// pipeline itself keys off res.Goal.Condition.
+const goalJudgeTestCondition = "Continue using gambit:executing-plans until we run into a decision point " +
+	"you need my input on. Do not pose false choices; take the next task and iterate on it unless there is " +
+	"a meaningful blockage."
+
+// newGoalTestPipeline builds a Pipeline pointed at a fresh temp state base,
+// with the given dryRun setting (unlike newTestPipeline, which fixes
+// DryRun:true) — goal-judge disposition tests need to exercise the real,
+// non-DryRun block-emission and notification-send paths that DryRun:true
+// can never reach. SelfBin is the same stub claude binary used as the
+// judge: it is a valid, quick-exiting executable, which is all SpawnRecheck
+// needs to succeed and write a watchdog lock.
+func newGoalTestPipeline(
+	t *testing.T,
+	stdout *bytes.Buffer,
+	judgeBin string,
+	present func([]string, time.Time) bool,
+	dryRun bool,
+) (Pipeline, string) {
+	t.Helper()
+	stateBase := t.TempDir()
+	logPath := filepath.Join(stateBase, "notify-decisions.jsonl")
+	p := Pipeline{
+		StateBase: stateBase,
+		DryRun:    dryRun,
+		Judge:     Judge{Bin: judgeBin, Model: "claude-haiku-4-5"},
+		Log:       DecisionLog{Path: logPath},
+		Stdout:    stdout,
+		SelfBin:   judgeBin,
+		Present:   present,
+	}
+	return p, logPath
+}
+
+// capturedRequest is what stubSenderRecording's round tripper records for
+// one Sender.Send call: everything a real ntfy POST would have carried.
+type capturedRequest struct {
+	Title    string
+	Body     string
+	Priority string
+	Tags     string
+}
+
+// roundTripFunc adapts a plain function to http.RoundTripper, so
+// stubSenderRecording can inject its capture logic without a real network
+// call.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// stubSenderRecording returns a Sender whose Send calls are captured into
+// *captured and always succeed with 200 OK, never touching the network:
+// Pipeline.Sender is a concrete Sender struct (not an interface), so tests
+// intercept delivery via Sender.Client's Transport rather than a fake
+// implementation.
+func stubSenderRecording(captured *[]capturedRequest) Sender {
+	return Sender{
+		URL: "http://stub.invalid/publish",
+		Client: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				body, _ := io.ReadAll(req.Body)
+				*captured = append(*captured, capturedRequest{
+					Title:    req.Header.Get("Title"),
+					Body:     string(body),
+					Priority: req.Header.Get("Priority"),
+					Tags:     req.Header.Get("Tags"),
+				})
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(""))}, nil
+			}),
+		},
+	}
+}
 
 func TestPipeline_SessionEnd_ReapsExistingStateDir(t *testing.T) {
 	var stdout bytes.Buffer
@@ -368,5 +446,446 @@ func TestPipeline_IdlePrompt_DedupeWindow_Silent(t *testing.T) {
 	}
 	if !strings.Contains(recs[0].Reason, "dedupe") {
 		t.Errorf("Reason = %q, want dedupe reason", recs[0].Reason)
+	}
+}
+
+// TestPipeline_Stop_GoalJudge_Pending_SilentAndArms exercises disposition 1:
+// tasks=="pending" must be silent + arm the watchdog, reusing the existing
+// arm path — and must be inert to goal_met regardless of what the judge said
+// (the rubric guarantees goal_met is false whenever tasks is pending, but the
+// pipeline branches on Tasks first either way).
+func TestPipeline_Stop_GoalJudge_Pending_SilentAndArms(t *testing.T) {
+	stubBin := writeStubClaude(t)
+	const judgeReason = "waiting on the research subagent to finish"
+	t.Setenv("STUB_STDOUT", `{"tasks":"pending","goal_met":false,"reason":"`+judgeReason+`"}`)
+
+	var stdout bytes.Buffer
+	var sent []capturedRequest
+	p, logPath := newGoalTestPipeline(t, &stdout, stubBin, neverPresent, false)
+	p.Sender = stubSenderRecording(&sent)
+	transcript := copyFixture(t, "goal_active_live_tasks.jsonl")
+
+	sessionID := "sess-goal-pending"
+	in := HookInput{
+		SessionID: sessionID, CWD: "/home/user/project", TranscriptPath: transcript,
+		HookEventName: "Stop", StopHookActive: true,
+	}
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if stdout.String() != "" {
+		t.Errorf("stdout = %q, want empty (silent, no stdout write)", stdout.String())
+	}
+	if len(sent) != 0 {
+		t.Errorf("sent = %+v, want no notification", sent)
+	}
+
+	state := SessionState{Dir: filepath.Join(p.StateBase, sessionID)}
+	if _, err := os.Stat(filepath.Join(state.Dir, "watchdog.lock")); err != nil {
+		t.Errorf("watchdog.lock missing, want armed: %v", err)
+	}
+	if got := state.GoalBlockCount(goalJudgeTestCondition); got != 0 {
+		t.Errorf("GoalBlockCount() = %d, want 0", got)
+	}
+
+	recs := readDecisionLog(t, logPath)
+	if len(recs) != 1 {
+		t.Fatalf("log records = %d, want 1: %+v", len(recs), recs)
+	}
+	if recs[0].Outcome != OutcomeSilent.String() {
+		t.Errorf("Outcome = %q, want silent", recs[0].Outcome)
+	}
+	if !strings.Contains(recs[0].Reason, judgeReason) {
+		t.Errorf("Reason = %q, want it to contain the judge's reason", recs[0].Reason)
+	}
+	if !strings.Contains(recs[0].Reason, "stop_hook_active=true") {
+		t.Errorf("Reason = %q, want it to mention stop_hook_active=true", recs[0].Reason)
+	}
+}
+
+// TestPipeline_Stop_GoalJudge_ParkedUnmet_UnderCap_EmitsBlockAndIncrements
+// exercises disposition 2: a golden byte-exact assertion on the Stop-hook
+// block control message, since a stray or malformed write here corrupts
+// every Stop on every host.
+func TestPipeline_Stop_GoalJudge_ParkedUnmet_UnderCap_EmitsBlockAndIncrements(t *testing.T) {
+	stubBin := writeStubClaude(t)
+	const judgeReason = "dev server still needs the restart script re-run"
+	t.Setenv("STUB_STDOUT", `{"tasks":"parked","goal_met":false,"reason":"`+judgeReason+`"}`)
+
+	var stdout bytes.Buffer
+	var sent []capturedRequest
+	p, logPath := newGoalTestPipeline(t, &stdout, stubBin, neverPresent, false)
+	p.Sender = stubSenderRecording(&sent)
+	transcript := copyFixture(t, "goal_active_live_tasks.jsonl")
+
+	sessionID := "sess-goal-block-1"
+	in := HookInput{
+		SessionID: sessionID, CWD: "/home/user/project", TranscriptPath: transcript, HookEventName: "Stop",
+	}
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	wantLine, err := json.Marshal(struct {
+		Decision string `json:"decision"`
+		Reason   string `json:"reason"`
+	}{Decision: "block", Reason: truncate(goalJudgeTestCondition, maxGoalConditionLen) + " — " + judgeReason})
+	if err != nil {
+		t.Fatalf("marshaling expected line: %v", err)
+	}
+	wantStdout := string(wantLine) + "\n"
+	if stdout.String() != wantStdout {
+		t.Errorf("stdout = %q, want %q", stdout.String(), wantStdout)
+	}
+	if len(sent) != 0 {
+		t.Errorf("sent = %+v, want no notification", sent)
+	}
+
+	state := SessionState{Dir: filepath.Join(p.StateBase, sessionID)}
+	if _, err := os.Stat(filepath.Join(state.Dir, "watchdog.lock")); !os.IsNotExist(err) {
+		t.Errorf("watchdog.lock exists (err=%v), want not armed", err)
+	}
+	if got := state.GoalBlockCount(goalJudgeTestCondition); got != 1 {
+		t.Errorf("GoalBlockCount() = %d, want 1", got)
+	}
+
+	recs := readDecisionLog(t, logPath)
+	if len(recs) != 1 || recs[0].Outcome != "block" {
+		t.Fatalf("records = %+v, want one block record", recs)
+	}
+	if !strings.Contains(recs[0].Reason, judgeReason) {
+		t.Errorf("Reason = %q, want judge reason", recs[0].Reason)
+	}
+}
+
+// TestPipeline_Stop_GoalJudge_ParkedMet_SendsGoalCompleteAndResets exercises
+// disposition 3: goal met sends a "goal complete" notification and resets
+// the block count, with no block and no watchdog arm.
+func TestPipeline_Stop_GoalJudge_ParkedMet_SendsGoalCompleteAndResets(t *testing.T) {
+	stubBin := writeStubClaude(t)
+	const judgeReason = "all plan steps finished and tests are green"
+	t.Setenv("STUB_STDOUT", `{"tasks":"parked","goal_met":true,"reason":"`+judgeReason+`"}`)
+
+	var stdout bytes.Buffer
+	var sent []capturedRequest
+	p, logPath := newGoalTestPipeline(t, &stdout, stubBin, neverPresent, false)
+	p.Sender = stubSenderRecording(&sent)
+	transcript := copyFixture(t, "goal_active_live_tasks.jsonl")
+
+	sessionID := "sess-goal-met-1"
+	state := SessionState{Dir: filepath.Join(p.StateBase, sessionID)}
+	if err := state.SetGoalBlockCount(goalJudgeTestCondition, 3); err != nil {
+		t.Fatalf("SetGoalBlockCount() error = %v", err)
+	}
+
+	in := HookInput{
+		SessionID: sessionID, CWD: "/home/user/project", TranscriptPath: transcript, HookEventName: "Stop",
+	}
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if stdout.String() != "" {
+		t.Errorf("stdout = %q, want empty", stdout.String())
+	}
+	if len(sent) != 1 {
+		t.Fatalf("sent = %+v, want exactly one notification", sent)
+	}
+	if sent[0].Title != "project · goal complete" {
+		t.Errorf("Title = %q, want %q", sent[0].Title, "project · goal complete")
+	}
+	if sent[0].Body != judgeReason {
+		t.Errorf("Body = %q, want %q", sent[0].Body, judgeReason)
+	}
+	if sent[0].Priority != "4" {
+		t.Errorf("Priority = %q, want 4 (done)", sent[0].Priority)
+	}
+
+	if _, err := os.Stat(filepath.Join(state.Dir, "watchdog.lock")); !os.IsNotExist(err) {
+		t.Errorf("watchdog.lock exists (err=%v), want not armed", err)
+	}
+	if got := state.GoalBlockCount(goalJudgeTestCondition); got != 0 {
+		t.Errorf("GoalBlockCount() = %d, want reset to 0", got)
+	}
+
+	recs := readDecisionLog(t, logPath)
+	if len(recs) != 1 || recs[0].Outcome != OutcomeSend.String() {
+		t.Fatalf("records = %+v, want one send record", recs)
+	}
+	if !strings.Contains(recs[0].Reason, judgeReason) {
+		t.Errorf("Reason = %q, want judge reason", recs[0].Reason)
+	}
+}
+
+// TestPipeline_Stop_GoalJudge_Error_SilentArmsAndLogsJudgeError exercises
+// disposition 4: a judge error fails toward the pre-epic behavior (silent,
+// arm the watchdog) and logs a distinct "judge error" outcome, resetting the
+// block count like every other non-block disposition.
+func TestPipeline_Stop_GoalJudge_Error_SilentArmsAndLogsJudgeError(t *testing.T) {
+	stubBin := writeStubClaude(t)
+	t.Setenv("STUB_EXIT", "1")
+	t.Setenv("STUB_STDERR", "boom: judge unavailable")
+
+	var stdout bytes.Buffer
+	var sent []capturedRequest
+	p, logPath := newGoalTestPipeline(t, &stdout, stubBin, neverPresent, false)
+	p.Sender = stubSenderRecording(&sent)
+	transcript := copyFixture(t, "goal_active_live_tasks.jsonl")
+
+	sessionID := "sess-goal-err-1"
+	state := SessionState{Dir: filepath.Join(p.StateBase, sessionID)}
+	if err := state.SetGoalBlockCount(goalJudgeTestCondition, 2); err != nil {
+		t.Fatalf("SetGoalBlockCount() error = %v", err)
+	}
+
+	in := HookInput{
+		SessionID: sessionID, CWD: "/home/user/project", TranscriptPath: transcript, HookEventName: "Stop",
+	}
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if stdout.String() != "" {
+		t.Errorf("stdout = %q, want empty", stdout.String())
+	}
+	if len(sent) != 0 {
+		t.Errorf("sent = %+v, want no notification", sent)
+	}
+	if _, err := os.Stat(filepath.Join(state.Dir, "watchdog.lock")); err != nil {
+		t.Errorf("watchdog.lock missing, want armed: %v", err)
+	}
+	if got := state.GoalBlockCount(goalJudgeTestCondition); got != 0 {
+		t.Errorf("GoalBlockCount() = %d, want reset to 0", got)
+	}
+
+	recs := readDecisionLog(t, logPath)
+	if len(recs) != 1 {
+		t.Fatalf("log records = %d, want 1: %+v", len(recs), recs)
+	}
+	if recs[0].Outcome != "judge error" {
+		t.Errorf("Outcome = %q, want %q", recs[0].Outcome, "judge error")
+	}
+	if !strings.Contains(recs[0].Reason, "goal active with live tasks: goal continuation") {
+		t.Errorf("Reason = %q, want it to contain the Decide-level reason", recs[0].Reason)
+	}
+	if recs[0].JudgeErr == "" || !strings.Contains(recs[0].JudgeErr, "judge unavailable") {
+		t.Errorf("JudgeErr = %q, want it to mention the stub's stderr", recs[0].JudgeErr)
+	}
+}
+
+// TestPipeline_Stop_GoalJudge_CapBoundary pins the exact cap edge: a prior
+// count of 7 still blocks (the 8th consecutive block), but a prior count of
+// 8 gives up blocking and sends a "goal stalled" notification instead.
+func TestPipeline_Stop_GoalJudge_CapBoundary(t *testing.T) {
+	const judgeReason = "still finishing the final review pass"
+
+	t.Run("count seven still blocks as the eighth", func(t *testing.T) {
+		stubBin := writeStubClaude(t)
+		t.Setenv("STUB_STDOUT", `{"tasks":"parked","goal_met":false,"reason":"`+judgeReason+`"}`)
+
+		var stdout bytes.Buffer
+		var sent []capturedRequest
+		p, logPath := newGoalTestPipeline(t, &stdout, stubBin, neverPresent, false)
+		p.Sender = stubSenderRecording(&sent)
+		transcript := copyFixture(t, "goal_active_live_tasks.jsonl")
+
+		sessionID := "sess-cap-7"
+		state := SessionState{Dir: filepath.Join(p.StateBase, sessionID)}
+		if err := state.SetGoalBlockCount(goalJudgeTestCondition, 7); err != nil {
+			t.Fatalf("SetGoalBlockCount() error = %v", err)
+		}
+
+		in := HookInput{
+			SessionID: sessionID, CWD: "/home/user/project", TranscriptPath: transcript, HookEventName: "Stop",
+		}
+		if err := p.Run(context.Background(), in); err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+
+		if !strings.Contains(stdout.String(), `"decision":"block"`) {
+			t.Errorf("stdout = %q, want the block JSON (8th consecutive block, still under cap)", stdout.String())
+		}
+		if len(sent) != 0 {
+			t.Errorf("sent = %+v, want no notification", sent)
+		}
+		if got := state.GoalBlockCount(goalJudgeTestCondition); got != 8 {
+			t.Errorf("GoalBlockCount() = %d, want 8", got)
+		}
+		recs := readDecisionLog(t, logPath)
+		if len(recs) != 1 || recs[0].Outcome != "block" {
+			t.Fatalf("records = %+v, want one block record", recs)
+		}
+	})
+
+	t.Run("count eight hits the cap and notifies instead", func(t *testing.T) {
+		stubBin := writeStubClaude(t)
+		t.Setenv("STUB_STDOUT", `{"tasks":"parked","goal_met":false,"reason":"`+judgeReason+`"}`)
+
+		var stdout bytes.Buffer
+		var sent []capturedRequest
+		p, logPath := newGoalTestPipeline(t, &stdout, stubBin, neverPresent, false)
+		p.Sender = stubSenderRecording(&sent)
+		transcript := copyFixture(t, "goal_active_live_tasks.jsonl")
+
+		sessionID := "sess-cap-8"
+		state := SessionState{Dir: filepath.Join(p.StateBase, sessionID)}
+		if err := state.SetGoalBlockCount(goalJudgeTestCondition, 8); err != nil {
+			t.Fatalf("SetGoalBlockCount() error = %v", err)
+		}
+
+		in := HookInput{
+			SessionID: sessionID, CWD: "/home/user/project", TranscriptPath: transcript, HookEventName: "Stop",
+		}
+		if err := p.Run(context.Background(), in); err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+
+		if strings.Contains(stdout.String(), `"decision":"block"`) {
+			t.Errorf("stdout = %q, want no block JSON once the cap is reached", stdout.String())
+		}
+		if len(sent) != 1 {
+			t.Fatalf("sent = %+v, want one goal-stalled notification", sent)
+		}
+		if sent[0].Title != "project · goal stalled" {
+			t.Errorf("Title = %q, want %q", sent[0].Title, "project · goal stalled")
+		}
+		if sent[0].Body != judgeReason {
+			t.Errorf("Body = %q, want %q", sent[0].Body, judgeReason)
+		}
+		if sent[0].Priority != "5" {
+			t.Errorf("Priority = %q, want 5 (blocked)", sent[0].Priority)
+		}
+		if got := state.GoalBlockCount(goalJudgeTestCondition); got != 0 {
+			t.Errorf("GoalBlockCount() = %d, want reset to 0 after cap-hit", got)
+		}
+		recs := readDecisionLog(t, logPath)
+		if len(recs) != 1 || recs[0].Outcome != OutcomeSend.String() {
+			t.Fatalf("records = %+v, want one send record", recs)
+		}
+	})
+}
+
+// TestPipeline_Stop_GoalJudge_TwoRuns_PersistIncrementThenReset exercises
+// the state base persisting the count across separate Pipeline.Run calls
+// (as separate hook invocations would see it): two consecutive
+// parked-and-unmet Stops increment 1 then 2, and a parked-and-met Stop
+// afterwards resets it to 0.
+func TestPipeline_Stop_GoalJudge_TwoRuns_PersistIncrementThenReset(t *testing.T) {
+	stubBin := writeStubClaude(t)
+	transcript := copyFixture(t, "goal_active_live_tasks.jsonl")
+	var stdout bytes.Buffer
+	var sent []capturedRequest
+	p, _ := newGoalTestPipeline(t, &stdout, stubBin, neverPresent, false)
+	p.Sender = stubSenderRecording(&sent)
+	state := SessionState{Dir: filepath.Join(p.StateBase, "sess-two-runs")}
+
+	in := HookInput{
+		SessionID: "sess-two-runs", CWD: "/home/user/project", TranscriptPath: transcript, HookEventName: "Stop",
+	}
+
+	t.Setenv("STUB_STDOUT", `{"tasks":"parked","goal_met":false,"reason":"first pass, not there yet"}`)
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() #1 error = %v", err)
+	}
+	if got := state.GoalBlockCount(goalJudgeTestCondition); got != 1 {
+		t.Fatalf("GoalBlockCount() after run 1 = %d, want 1", got)
+	}
+
+	t.Setenv("STUB_STDOUT", `{"tasks":"parked","goal_met":false,"reason":"second pass, still not there"}`)
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() #2 error = %v", err)
+	}
+	if got := state.GoalBlockCount(goalJudgeTestCondition); got != 2 {
+		t.Fatalf("GoalBlockCount() after run 2 = %d, want 2", got)
+	}
+
+	t.Setenv("STUB_STDOUT", `{"tasks":"parked","goal_met":true,"reason":"criteria now satisfied"}`)
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() #3 error = %v", err)
+	}
+	if got := state.GoalBlockCount(goalJudgeTestCondition); got != 0 {
+		t.Errorf("GoalBlockCount() after parked-met run = %d, want reset to 0", got)
+	}
+	if len(sent) != 1 {
+		t.Fatalf("sent = %+v, want exactly one notification (from the final parked-met run)", sent)
+	}
+	if sent[0].Title != "project · goal complete" {
+		t.Errorf("Title = %q, want %q", sent[0].Title, "project · goal complete")
+	}
+}
+
+// TestPipeline_Stop_GoalJudge_ParkedUnmet_DryRun_NoBlockJSON exercises the
+// DryRun contract for the block disposition: the real Stop-hook block
+// control message must NEVER be written in DryRun, but a human-readable
+// "DRY RUN: ..." preview line, following the existing dry-run reporting
+// pattern, must still appear.
+func TestPipeline_Stop_GoalJudge_ParkedUnmet_DryRun_NoBlockJSON(t *testing.T) {
+	stubBin := writeStubClaude(t)
+	const judgeReason = "still waiting on manual verification"
+	t.Setenv("STUB_STDOUT", `{"tasks":"parked","goal_met":false,"reason":"`+judgeReason+`"}`)
+
+	var stdout bytes.Buffer
+	p, _ := newGoalTestPipeline(t, &stdout, stubBin, neverPresent, true)
+	transcript := copyFixture(t, "goal_active_live_tasks.jsonl")
+
+	sessionID := "sess-dryrun-block"
+	in := HookInput{
+		SessionID: sessionID, CWD: "/home/user/project", TranscriptPath: transcript, HookEventName: "Stop",
+	}
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if strings.Contains(stdout.String(), `"decision":"block"`) {
+		t.Errorf("stdout = %q, want no block JSON in DryRun", stdout.String())
+	}
+	if !strings.HasPrefix(stdout.String(), "DRY RUN: would block (goal continuation)") {
+		t.Errorf("stdout = %q, want a DRY RUN would-block preview line", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), judgeReason) {
+		t.Errorf("stdout = %q, want it to contain the judge's reason", stdout.String())
+	}
+
+	state := SessionState{Dir: filepath.Join(p.StateBase, sessionID)}
+	if got := state.GoalBlockCount(goalJudgeTestCondition); got != 0 {
+		t.Errorf("GoalBlockCount() = %d, want 0 (DryRun must not persist state)", got)
+	}
+	if _, err := os.Stat(filepath.Join(state.Dir, "watchdog.lock")); !os.IsNotExist(err) {
+		t.Errorf("watchdog.lock exists (err=%v), want not armed", err)
+	}
+}
+
+// TestPipeline_Regression_ComposePath_NonDryRun_StdoutEmpty pins that a
+// non-goal outcome (the existing compose path) writes NOTHING to stdout,
+// even outside DryRun — this task is the only one permitted to add stdout
+// writes to the pipeline, and this test guards against a future change
+// accidentally leaking the new block-JSON write (or anything else) onto an
+// unrelated Stop's stdout.
+func TestPipeline_Regression_ComposePath_NonDryRun_StdoutEmpty(t *testing.T) {
+	stubBin := writeStubClaude(t)
+	t.Setenv(
+		"STUB_STDOUT",
+		`{"notify":true,"urgency":"done","task":"ship it","body":"all tests green","reason":"turn ended cleanly"}`,
+	)
+
+	var stdout bytes.Buffer
+	var sent []capturedRequest
+	p, _ := newGoalTestPipeline(t, &stdout, stubBin, neverPresent, false)
+	p.Sender = stubSenderRecording(&sent)
+	transcript := copyFixture(t, "goal_none.jsonl")
+
+	in := HookInput{
+		SessionID: "sess-regression-1", CWD: "/home/user/project", TranscriptPath: transcript, HookEventName: "Stop",
+	}
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if stdout.String() != "" {
+		t.Errorf("stdout = %q, want empty (non-goal outcome must never write to stdout)", stdout.String())
+	}
+	if len(sent) != 1 {
+		t.Fatalf("sent = %+v, want exactly one notification (compose path still delivers normally)", sent)
 	}
 }
