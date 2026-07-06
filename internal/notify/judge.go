@@ -44,7 +44,7 @@ Rules:
 
 Write:
 - task: at most 6 words naming what the session is doing right now. Never "Claude finished" or similar filler.
-- body: at most 180 characters, leading with what happened, then what (if anything) is needed from the user.
+- body: one sentence, at most 180 characters, in your own words — state what the session is waiting for (if blocked) or what was delivered (if done), and why. Never quote or copy text from the digest or transcript — write your own summary, not an excerpt.
 - reason: one line explaining the call. This is for a decision log only — it is never shown to the user.
 
 Output contract: respond with a single raw JSON object and nothing else — no markdown code fences, no commentary before or after. It must have exactly these keys: notify (bool), urgency (one of "blocked", "done", "info"), task (string), body (string), reason (string).`

@@ -252,6 +252,23 @@ func TestEvaluate_ArgvPassesValidEmptyMCPConfig(t *testing.T) {
 	}
 }
 
+func TestBuildJudgePrompt_BodyContractDemandsOwnWordsSummary(t *testing.T) {
+	got, err := buildJudgePrompt("DIGEST-MARKER", JudgeModeDecide)
+	if err != nil {
+		t.Fatalf("buildJudgePrompt() error = %v", err)
+	}
+	for _, phrase := range []string{
+		"one sentence",
+		"in your own words",
+		"what the session is waiting for (if blocked) or what was delivered (if done)",
+		"Never quote or copy text from the digest or transcript",
+	} {
+		if !strings.Contains(got, phrase) {
+			t.Errorf("buildJudgePrompt() = %q, want it to contain %q", got, phrase)
+		}
+	}
+}
+
 func TestBuildGoalPrompt_ContainsRubricAndDigest(t *testing.T) {
 	got := buildGoalPrompt("DIGEST-MARKER-GOAL")
 	if !strings.Contains(got, goalRubric) {
