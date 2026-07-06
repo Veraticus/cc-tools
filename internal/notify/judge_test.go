@@ -252,6 +252,166 @@ func TestEvaluate_ArgvPassesValidEmptyMCPConfig(t *testing.T) {
 	}
 }
 
+func TestBuildGoalPrompt_ContainsRubricAndDigest(t *testing.T) {
+	got := buildGoalPrompt("DIGEST-MARKER-GOAL")
+	if !strings.Contains(got, goalRubric) {
+		t.Errorf("buildGoalPrompt() does not contain goalRubric")
+	}
+	if !strings.Contains(got, "DIGEST\nDIGEST-MARKER-GOAL") {
+		t.Errorf("buildGoalPrompt() = %q, want it to contain the digest under a DIGEST heading", got)
+	}
+}
+
+func TestParseGoalVerdict_ValidVerdictsRoundTrip(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want GoalVerdict
+	}{
+		{
+			name: "pending",
+			raw:  `{"tasks":"pending","goal_met":false,"reason":"build running"}`,
+			want: GoalVerdict{Tasks: "pending", GoalMet: false, Reason: "build running"},
+		},
+		{
+			name: "parked unmet",
+			raw:  `{"tasks":"parked","goal_met":false,"reason":"review not run"}`,
+			want: GoalVerdict{Tasks: "parked", GoalMet: false, Reason: "review not run"},
+		},
+		{
+			name: "parked met",
+			raw:  `{"tasks":"parked","goal_met":true,"reason":"all criteria shown met"}`,
+			want: GoalVerdict{Tasks: "parked", GoalMet: true, Reason: "all criteria shown met"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseGoalVerdict(tc.raw)
+			if err != nil {
+				t.Fatalf("parseGoalVerdict() error = %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("parseGoalVerdict() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseGoalVerdict_StripsMarkdownFences(t *testing.T) {
+	raw := "```json\n" + `{"tasks":"parked","goal_met":true,"reason":"met"}` + "\n```"
+	got, err := parseGoalVerdict(raw)
+	if err != nil {
+		t.Fatalf("parseGoalVerdict() error = %v", err)
+	}
+	if got.Tasks != "parked" || !got.GoalMet || got.Reason != "met" {
+		t.Errorf("parseGoalVerdict() = %+v, fences not stripped correctly", got)
+	}
+}
+
+func TestParseGoalVerdict_ClampsLongReason(t *testing.T) {
+	longReason := strings.Repeat("r", maxGoalReasonBytes+40)
+	raw := `{"tasks":"pending","goal_met":false,"reason":"` + longReason + `"}`
+	got, err := parseGoalVerdict(raw)
+	if err != nil {
+		t.Fatalf("parseGoalVerdict() error = %v", err)
+	}
+	if len(got.Reason) != maxGoalReasonBytes {
+		t.Errorf("Reason length = %d, want %d", len(got.Reason), maxGoalReasonBytes)
+	}
+}
+
+func TestParseGoalVerdict_RejectsMissingTasks(t *testing.T) {
+	_, err := parseGoalVerdict(`{"goal_met":false,"reason":"r"}`)
+	if err == nil {
+		t.Fatalf("parseGoalVerdict() error = nil, want error for missing tasks")
+	}
+}
+
+func TestParseGoalVerdict_RejectsInvalidTasksValue(t *testing.T) {
+	_, err := parseGoalVerdict(`{"tasks":"running","goal_met":false,"reason":"r"}`)
+	if err == nil {
+		t.Fatalf("parseGoalVerdict() error = nil, want error for invalid tasks value")
+	}
+	if !strings.Contains(err.Error(), "tasks") {
+		t.Errorf("parseGoalVerdict() error = %q, want it to mention tasks", err.Error())
+	}
+}
+
+func TestParseGoalVerdict_RejectsNonJSON(t *testing.T) {
+	_, err := parseGoalVerdict("this is not json at all")
+	if err == nil {
+		t.Fatalf("parseGoalVerdict() error = nil, want malformed JSON error")
+	}
+}
+
+func TestParseGoalVerdict_RejectsEmptyInput(t *testing.T) {
+	_, err := parseGoalVerdict("")
+	if err == nil {
+		t.Fatalf("parseGoalVerdict() error = nil, want error for empty input")
+	}
+}
+
+func TestEvaluateGoal_ValidVerdictRoundTrips(t *testing.T) {
+	t.Setenv("STUB_STDOUT", `{"tasks":"parked","goal_met":true,"reason":"all criteria shown met"}`)
+
+	j := Judge{Bin: writeStubClaude(t), Model: "claude-haiku-4-5"}
+	got, err := j.EvaluateGoal(context.Background(), "DIGEST-MARKER")
+	if err != nil {
+		t.Fatalf("EvaluateGoal() error = %v", err)
+	}
+	want := GoalVerdict{Tasks: "parked", GoalMet: true, Reason: "all criteria shown met"}
+	if got != want {
+		t.Errorf("EvaluateGoal() = %+v, want %+v", got, want)
+	}
+}
+
+func TestEvaluateGoal_TimeoutErrorsOnContextDeadline(t *testing.T) {
+	t.Setenv("STUB_SLEEP", "1")
+
+	j := Judge{Bin: writeStubClaude(t), Model: "claude-haiku-4-5", Timeout: 100 * time.Millisecond}
+	got, err := j.EvaluateGoal(context.Background(), "digest")
+	if err == nil {
+		t.Fatalf("EvaluateGoal() error = nil, want timeout error")
+	}
+	if !strings.Contains(err.Error(), "timed out") && !strings.Contains(err.Error(), "deadline") {
+		t.Errorf("EvaluateGoal() error = %q, want it to mention timeout/deadline", err.Error())
+	}
+	if got != (GoalVerdict{}) {
+		t.Errorf("EvaluateGoal() verdict = %+v, want zero value on error", got)
+	}
+}
+
+func TestEvaluateGoal_NonzeroExitErrorsWithStderrSnippet(t *testing.T) {
+	t.Setenv("STUB_EXIT", "1")
+	t.Setenv("STUB_STDERR", "boom: something broke")
+
+	j := Judge{Bin: writeStubClaude(t), Model: "claude-haiku-4-5"}
+	got, err := j.EvaluateGoal(context.Background(), "digest")
+	if err == nil {
+		t.Fatalf("EvaluateGoal() error = nil, want nonzero exit error")
+	}
+	if !strings.Contains(err.Error(), "boom: something broke") {
+		t.Errorf("EvaluateGoal() error = %q, want it to include the stderr snippet", err.Error())
+	}
+	if got != (GoalVerdict{}) {
+		t.Errorf("EvaluateGoal() verdict = %+v, want zero value on error", got)
+	}
+}
+
+func TestEvaluateGoal_EmptyStdoutErrors(t *testing.T) {
+	j := Judge{Bin: writeStubClaude(t), Model: "claude-haiku-4-5"}
+	got, err := j.EvaluateGoal(context.Background(), "digest")
+	if err == nil {
+		t.Fatalf("EvaluateGoal() error = nil, want empty stdout error")
+	}
+	if !strings.Contains(err.Error(), "empty stdout") {
+		t.Errorf("EvaluateGoal() error = %q, want it to mention empty stdout", err.Error())
+	}
+	if got != (GoalVerdict{}) {
+		t.Errorf("EvaluateGoal() verdict = %+v, want zero value on error", got)
+	}
+}
+
 func TestEvaluate_StdinCarriesDigestAndDecideRubric(t *testing.T) {
 	dumpFile := filepath.Join(t.TempDir(), "dump.txt")
 	t.Setenv("STUB_DUMP_FILE", dumpFile)
