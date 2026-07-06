@@ -12,8 +12,11 @@ import (
 )
 
 // exitUsageError is the process exit code for invalid flags or arguments,
-// distinct from exitFailure (general/runtime failure).
-const exitUsageError = 2
+// distinct from exitFailure (general/runtime failure). It is 64, BSD
+// EX_USAGE, and deliberately not 2: Claude Code reserves exit code 2 as
+// the Stop-hook blocking-error channel (stderr is fed back to Claude and
+// the stop is blocked), and a usage error must never trigger that path.
+const exitUsageError = 64
 
 func runResolveCommand() {
 	flags := flag.NewFlagSet("resolve", flag.ContinueOnError)
