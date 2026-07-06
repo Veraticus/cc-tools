@@ -80,6 +80,32 @@ func TestMiddleChipKind_NoneWhenCostZero(t *testing.T) {
 	}
 }
 
+// A subscribed user with a pure-anthropic session (SessionCostUSD == 0)
+// but nonzero bedrock spend earlier today (DailyCostUSD > 0) must still
+// show the cost chip: the daily figure alone is a real, nonzero signal
+// worth displaying even though the session figure is $0.
+func TestMiddleChipKind_CostFromTranscriptSessionZeroDailyNonzero(t *testing.T) {
+	data := &CachedData{
+		CostFromTranscript: true,
+		SessionCostUSD:     0,
+		DailyCostUSD:       48.27,
+	}
+	if got := middleChipKind(data); got != chipCost {
+		t.Errorf("middleChipKind() = %v, want chipCost", got)
+	}
+}
+
+func TestMiddleChipKind_CostFromTranscriptBothZeroIsNone(t *testing.T) {
+	data := &CachedData{
+		CostFromTranscript: true,
+		SessionCostUSD:     0,
+		DailyCostUSD:       0,
+	}
+	if got := middleChipKind(data); got != chipNone {
+		t.Errorf("middleChipKind() = %v, want chipNone", got)
+	}
+}
+
 // --- Rendering: rate-limit chip ---
 
 func TestBuildRateLimitChip_ContainsBothWindowsAndSapphireBg(t *testing.T) {
@@ -126,7 +152,7 @@ func TestBuildRateLimitChip_FiveHourOnly(t *testing.T) {
 func TestBuildCostChip_ContainsDollarAmount(t *testing.T) {
 	s := CreateStatusline(&Dependencies{})
 	s.colors = CatppuccinMocha{}
-	chip := s.buildCostChip(CostInput{TotalCostUSD: 4.12})
+	chip := s.buildCostChip(&CachedData{Cost: CostInput{TotalCostUSD: 4.12}})
 	if !strings.Contains(chip, "$4.12") {
 		t.Errorf("chip should contain '$4.12'; got %q", chip)
 	}
@@ -138,9 +164,25 @@ func TestBuildCostChip_ContainsDollarAmount(t *testing.T) {
 func TestBuildCostChip_AlwaysTwoDecimals(t *testing.T) {
 	s := CreateStatusline(&Dependencies{})
 	s.colors = CatppuccinMocha{}
-	chip := s.buildCostChip(CostInput{TotalCostUSD: 4})
+	chip := s.buildCostChip(&CachedData{Cost: CostInput{TotalCostUSD: 4}})
 	if !strings.Contains(chip, "$4.00") {
 		t.Errorf("chip should contain '$4.00'; got %q", chip)
+	}
+}
+
+func TestBuildCostChip_TranscriptTwoPartBody(t *testing.T) {
+	s := CreateStatusline(&Dependencies{})
+	s.colors = CatppuccinMocha{}
+	data := &CachedData{
+		CostFromTranscript: true,
+		SessionCostUSD:     8.89,
+		DailyCostUSD:       48.27,
+	}
+	chip := s.buildCostChip(data)
+	stripped := stripAnsi(chip)
+	want := CostIcon + "$8.89 ∙ $48.27 day"
+	if !strings.Contains(stripped, want) {
+		t.Errorf("chip should contain %q; got %q", want, stripped)
 	}
 }
 
@@ -327,7 +369,7 @@ func TestBuildMiddleSection_DropsContextBeforeChipWhenTight(t *testing.T) {
 	}
 
 	// Wide enough for the chip alone, too narrow for context+chip together.
-	chipOnly := s.buildCostChip(data.Cost)
+	chipOnly := s.buildCostChip(data)
 	chipWidth := runewidth.StringWidth(stripAnsi(chipOnly))
 	tightWidth := chipWidth + 2
 
