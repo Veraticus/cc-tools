@@ -19,6 +19,11 @@ import (
 // head/tail convention established in transcript.go/digest.go.
 const maxNotificationTailLen = 160
 
+// maxBlockGoalEchoLen bounds the goal-condition echo inside a Stop-hook
+// block reason. The echo is a parenthetical reminder, not the message; the
+// judge's directive carries the instruction.
+const maxBlockGoalEchoLen = 120
+
 // goalBlockCap bounds how many consecutive Stop-hook blocks the pipeline
 // will emit for one goal condition before it gives up blocking and sends a
 // "goal stalled" notification instead: 8, mirroring Claude Code's own
@@ -45,6 +50,14 @@ type Pipeline struct {
 	Environ   []string
 	Stdout    io.Writer
 	SelfBin   string
+	// Workspace is the tmux session name this hook's pane lives in
+	// (WorkspaceName), or "" outside tmux — background jobs included.
+	// Notification titles use it as the where-to-go segment, falling back
+	// to Host.
+	Workspace string
+	// Host is the short hostname for titles and falls back to
+	// ShortHostname() when empty; tests inject a fixed value.
+	Host string
 	// Present reports whether the user is at the terminal right now.
 	// Production wires UserPresent+RunCommand; tests inject a canned func.
 	Present func(environ []string, now time.Time) bool
@@ -58,7 +71,19 @@ func (p Pipeline) Run(ctx context.Context, in HookInput) error {
 	now := time.Now()
 	state := SessionState{Dir: filepath.Join(p.StateBase, in.SessionID)}
 	project := filepath.Base(in.CWD)
-	host := shortHostname()
+	host := p.Host
+	if host == "" {
+		host = ShortHostname()
+	}
+	// The where-to-go segment of generic notification titles: the tmux
+	// workspace when the session lives in one, the machine otherwise. A
+	// ping's urgency already rides the ntfy sound/priority and its content
+	// rides the body, so a generic label ("needs input") would waste the
+	// title slot on what the ping itself already says.
+	locus := p.Workspace
+	if locus == "" {
+		locus = host
+	}
 
 	if in.HookEventName == "SessionEnd" {
 		deps := DefaultWatchdogDeps(p.Judge, p.Sender, p.Log)
@@ -74,7 +99,11 @@ func (p Pipeline) Run(ctx context.Context, in HookInput) error {
 		reasonSuffix = fmt.Sprintf(" (transcript error: %s)", scanErr)
 	}
 
-	env := Env{UserPresent: p.Present(p.Environ, now), SinceLastNotify: state.SinceLastNotify(now)}
+	env := Env{
+		UserPresent:     p.Present(p.Environ, now),
+		SinceLastNotify: state.SinceLastNotify(now),
+		Broadcast:       p.broadcastFacts(in, now),
+	}
 	d := Decide(in, res, env)
 
 	switch d.Outcome {
@@ -82,9 +111,9 @@ func (p Pipeline) Run(ctx context.Context, in HookInput) error {
 		//nolint:contextcheck // arming spawns a detached child that must outlive this hook's ctx; see SpawnRecheck
 		p.handleSilent(state, in, res, now, project, host, d, reasonSuffix)
 	case OutcomeSend:
-		p.handleSend(ctx, state, in, now, project, d, reasonSuffix)
+		p.handleSend(ctx, state, in, now, project, locus, host, d, reasonSuffix)
 	case OutcomeJudge:
-		p.handleJudge(ctx, state, in, res, env, now, project, host, d, reasonSuffix)
+		p.handleJudge(ctx, state, in, res, env, now, project, locus, host, d, reasonSuffix)
 	case OutcomeGoalJudge:
 		p.handleGoalJudge(ctx, state, in, res, now, project, host, d, reasonSuffix)
 	}
@@ -131,22 +160,31 @@ func (p Pipeline) handleSilent(
 }
 
 // handleSend implements the OutcomeSend branch: a deterministic send with
-// no judge involved, labeled by NotificationType.
+// no judge involved. The title's second segment is where to go, not what
+// happened — the ping's sound/priority and body already carry the what. A
+// broadcast is about a headless job, so the receiving session's workspace
+// would be misleading; those use the host.
 func (p Pipeline) handleSend(
 	ctx context.Context,
 	state SessionState,
 	in HookInput,
 	now time.Time,
-	project string,
+	project, locus, host string,
 	d Decision,
 	reasonSuffix string,
 ) {
-	label := sendLabel(in.NotificationType)
 	body := d.Message
 	if body == "" {
-		body = label
+		body = sendLabel(in.NotificationType)
 	}
-	n := Notification{Title: project + " · " + label, Body: body, Urgency: d.Urgency}
+	if d.ProjectOverride != "" {
+		project = d.ProjectOverride
+	}
+	where := locus
+	if in.NotificationType == notifTypeAgentNeedsInput || in.NotificationType == notifTypeAgentCompleted {
+		where = host
+	}
+	n := Notification{Title: project + " · " + where, Body: body, Urgency: d.Urgency}
 
 	sendSuffix := p.deliver(ctx, n)
 	if !p.DryRun {
@@ -158,15 +196,16 @@ func (p Pipeline) handleSend(
 	})
 }
 
-// sendLabel names the human-facing label for a deterministic
-// OutcomeSend, by NotificationType.
+// sendLabel names the fallback body for a deterministic OutcomeSend whose
+// event carried no message, by NotificationType. Titles never use it: the
+// title slot carries where to go, not what happened.
 func sendLabel(notificationType string) string {
 	switch notificationType {
 	case "permission_prompt":
 		return "needs permission"
-	case "agent_needs_input":
+	case notifTypeAgentNeedsInput:
 		return "needs input"
-	case "agent_completed":
+	case notifTypeAgentCompleted:
 		return "job finished"
 	default:
 		return "notification"
@@ -177,7 +216,7 @@ func sendLabel(notificationType string) string {
 // the judge, and route the verdict (or its absence) per JudgeMode.
 func (p Pipeline) handleJudge(
 	ctx context.Context, state SessionState, in HookInput, res ScanResult, env Env, now time.Time,
-	project, host string, d Decision, reasonSuffix string,
+	project, locus, host string, d Decision, reasonSuffix string,
 ) {
 	tasks := EnrichTasks(res.LiveTasks, now)
 	digest := BuildDigest(DigestMeta{
@@ -190,7 +229,7 @@ func (p Pipeline) handleJudge(
 
 	switch d.JudgeMode {
 	case JudgeModeCompose:
-		p.handleComposeVerdict(ctx, state, in, now, project, d, verdict, jerr, digest, judgeMs, reasonSuffix)
+		p.handleComposeVerdict(ctx, state, in, now, project, locus, d, verdict, jerr, digest, judgeMs, reasonSuffix)
 	case JudgeModeDecide:
 		p.handleDecideVerdict(
 			ctx,
@@ -200,6 +239,7 @@ func (p Pipeline) handleJudge(
 			env,
 			now,
 			project,
+			locus,
 			host,
 			d,
 			verdict,
@@ -215,21 +255,22 @@ func (p Pipeline) handleJudge(
 
 // handleComposeVerdict implements the compose route: the send is already
 // decided, the judge only writes better text. A judge error falls back to
-// a deterministic "session idle" notification — never silent, per the
+// a deterministic notification titled by locus (where to go — a generic
+// "session idle" label would waste the slot) — never silent, per the
 // reliability invariant that an LLM failure may never lose a genuine ping.
 func (p Pipeline) handleComposeVerdict(
-	ctx context.Context, state SessionState, in HookInput, now time.Time, project string,
+	ctx context.Context, state SessionState, in HookInput, now time.Time, project, locus string,
 	d Decision, verdict JudgeVerdict, jerr error, digest string, judgeMs int64, reasonSuffix string,
 ) {
 	var n Notification
 	if jerr == nil {
 		n = Notification{Title: project + " · " + verdict.Task, Body: verdict.Body, Urgency: verdict.Urgency}
 	} else {
-		body := truncateHead(in.LastAssistantMessage, maxNotificationTailLen)
+		body := truncateHeadWords(in.LastAssistantMessage, maxNotificationTailLen)
 		if body == "" {
 			body = "turn ended"
 		}
-		n = Notification{Title: project + " · session idle", Body: body, Urgency: UrgencyDone}
+		n = Notification{Title: project + " · " + locus, Body: body, Urgency: UrgencyDone}
 	}
 
 	sendSuffix := p.deliver(ctx, n)
@@ -253,7 +294,7 @@ func (p Pipeline) handleDecideVerdict(
 	res ScanResult,
 	env Env,
 	now time.Time,
-	project, host string,
+	project, locus, host string,
 	d Decision,
 	verdict JudgeVerdict,
 	jerr error,
@@ -262,11 +303,11 @@ func (p Pipeline) handleDecideVerdict(
 	reasonSuffix string,
 ) {
 	if jerr != nil {
-		body := truncateHead(in.LastAssistantMessage, maxNotificationTailLen)
+		body := truncateHeadWords(in.LastAssistantMessage, maxNotificationTailLen)
 		if body == "" {
 			body = "session has running background work"
 		}
-		n := Notification{Title: project + " · needs attention", Body: body, Urgency: UrgencyInfo}
+		n := Notification{Title: project + " · " + locus, Body: body, Urgency: UrgencyInfo}
 		sendSuffix := p.deliver(ctx, n)
 		if !p.DryRun {
 			_ = state.MarkNotified(now)
@@ -432,7 +473,11 @@ func (p Pipeline) handleGoalParkedUnmet(
 		return
 	}
 
-	blockReason := truncate(goal.Condition, maxGoalConditionLen) + " — " + verdict.Reason
+	// The judge's directive leads — it is what the resumed session acts on
+	// and what the user reads in the terminal's block line. The goal echo
+	// is demoted to a parenthetical: insurance against post-compaction
+	// amnesia, never the sentence's subject.
+	blockReason := verdict.Reason + " (goal: " + truncateWords(goal.Condition, maxBlockGoalEchoLen) + ")"
 	if p.DryRun {
 		_, _ = fmt.Fprintf(p.Stdout, "DRY RUN: would block (goal continuation) — %s\n", blockReason)
 	} else {
@@ -621,16 +666,14 @@ func (p Pipeline) logJudged(
 	p.logRecord(in, now, rec)
 }
 
-// shortHostname returns os.Hostname() with any domain suffix stripped
+// ShortHostname returns os.Hostname() with any domain suffix stripped
 // (everything from the first '.' onward). Returns "" if os.Hostname()
 // errors.
-func shortHostname() string {
+func ShortHostname() string {
 	h, err := os.Hostname()
 	if err != nil {
 		return ""
 	}
-	if idx := strings.Index(h, "."); idx >= 0 {
-		return h[:idx]
-	}
-	return h
+	short, _, _ := strings.Cut(h, ".")
+	return short
 }

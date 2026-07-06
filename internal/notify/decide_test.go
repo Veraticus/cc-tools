@@ -159,6 +159,50 @@ func TestDecide(t *testing.T) {
 			},
 		},
 		{
+			name: "agent needs input claimed elsewhere is silent",
+			in: HookInput{
+				HookEventName: "Notification", NotificationType: "agent_needs_input",
+				Message: "need a decision",
+			},
+			scan: ScanResult{},
+			env:  Env{Broadcast: &BroadcastFacts{Duplicate: true}},
+			want: Decision{Outcome: OutcomeSilent, Reason: "dedupe: broadcast claimed by another session"},
+		},
+		{
+			name: "agent needs input covered by source job is silent",
+			in: HookInput{
+				HookEventName: "Notification", NotificationType: "agent_needs_input",
+				Message: "need a decision",
+			},
+			scan: ScanResult{},
+			env:  Env{Broadcast: &BroadcastFacts{Covered: true, CoveredAgo: 2 * time.Second}},
+			want: Decision{Outcome: OutcomeSilent, Reason: "covered: source job session notified 2s ago"},
+		},
+		{
+			name: "agent needs input uncovered sends with source job project",
+			in: HookInput{
+				HookEventName: "Notification", NotificationType: "agent_needs_input",
+				Message: "need a decision",
+			},
+			scan: ScanResult{},
+			env:  Env{Broadcast: &BroadcastFacts{JobProject: "widget"}},
+			want: Decision{
+				Outcome: OutcomeSend, Urgency: UrgencyBlocked,
+				Message: "need a decision", Reason: "background session needs input",
+				ProjectOverride: "widget",
+			},
+		},
+		{
+			name: "agent completed claimed elsewhere is silent even without presence",
+			in: HookInput{
+				HookEventName: "Notification", NotificationType: "agent_completed",
+				Message: "finished the run",
+			},
+			scan: ScanResult{},
+			env:  Env{Broadcast: &BroadcastFacts{Duplicate: true}},
+			want: Decision{Outcome: OutcomeSilent, Reason: "dedupe: broadcast claimed by another session"},
+		},
+		{
 			name: "unhandled notification type is silent",
 			in:   HookInput{HookEventName: "Notification", NotificationType: "auth_success"},
 			scan: ScanResult{},

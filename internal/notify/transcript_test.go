@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func openFixture(t *testing.T, name string) *os.File {
@@ -486,4 +487,68 @@ func lastN(s string, n int) string {
 		return s
 	}
 	return s[len(s)-n:]
+}
+
+func TestTruncateWords(t *testing.T) {
+	tests := []struct {
+		name   string
+		s      string
+		maxLen int
+		want   string
+	}{
+		{name: "within budget passes through", s: "short text", maxLen: 20, want: "short text"},
+		{name: "exact budget passes through", s: "abcdef", maxLen: 6, want: "abcdef"},
+		{
+			name: "cuts at word boundary with ellipsis",
+			s:    "run the criteria sweep then review", maxLen: 20, want: "run the criteria…",
+		},
+		{
+			name: "single long token cuts at rune boundary",
+			s:    "abcdefghijklmnopqrstuvwxyz", maxLen: 10, want: "abcdefg…",
+		},
+		{name: "never splits a multibyte rune", s: "héllo wörld hére wé gö ãgain", maxLen: 12, want: "héllo…"},
+		{name: "tiny budget yields ellipsis", s: "abcdef", maxLen: 2, want: "…"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := truncateWords(tt.s, tt.maxLen)
+			if got != tt.want {
+				t.Errorf("truncateWords(%q, %d) = %q, want %q", tt.s, tt.maxLen, got, tt.want)
+			}
+			if len(tt.s) > tt.maxLen && tt.maxLen >= len(truncationEllipsis) && len(got) > tt.maxLen {
+				t.Errorf("truncateWords(%q, %d) = %q (%d bytes), exceeds budget", tt.s, tt.maxLen, got, len(got))
+			}
+			if !utf8.ValidString(got) {
+				t.Errorf("truncateWords(%q, %d) = %q, invalid UTF-8", tt.s, tt.maxLen, got)
+			}
+		})
+	}
+}
+
+func TestTruncateHeadWords(t *testing.T) {
+	tests := []struct {
+		name   string
+		s      string
+		maxLen int
+		want   string
+	}{
+		{name: "within budget passes through", s: "short text", maxLen: 20, want: "short text"},
+		{
+			name: "keeps tail at word boundary with ellipsis",
+			s:    "the meaningful ask is at the end", maxLen: 16, want: "…at the end",
+		},
+		{name: "single long token keeps rune-safe tail", s: "abcdefghijklmnopqrstuvwxyz", maxLen: 10, want: "…tuvwxyz"},
+		{name: "never splits a multibyte rune", s: "wörldwörldwörldwörldwörld", maxLen: 10, want: "…dwörld"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := truncateHeadWords(tt.s, tt.maxLen)
+			if got != tt.want {
+				t.Errorf("truncateHeadWords(%q, %d) = %q, want %q", tt.s, tt.maxLen, got, tt.want)
+			}
+			if !utf8.ValidString(got) {
+				t.Errorf("truncateHeadWords(%q, %d) = %q, invalid UTF-8", tt.s, tt.maxLen, got)
+			}
+		})
+	}
 }

@@ -70,7 +70,7 @@ Rules:
 - Only when tasks is "parked", judge whether the GOAL section's condition is already satisfied by what the digest shows. When tasks is "pending", goal_met must be false — the goal cannot be judged met while genuine pending work is still awaited.
 
 Write:
-- reason: one line. For pending, name what is being awaited. For parked and not yet met, name what remains to meet the goal. For parked and met, say why it is met.
+- reason: one line. For pending, name what is being awaited. For parked and not yet met, write the session's next action to meet the goal (e.g. "Run the remaining checks, then re-run the review") — this exact line is fed back to the session as its instruction to continue, so make it a directive, not a status report. For parked and met, say why it is met.
 
 Output contract: respond with a single raw JSON object and nothing else — no markdown code fences, no commentary before or after. It must have exactly these keys: tasks (one of "pending", "parked"), goal_met (bool), reason (string).`
 
@@ -136,8 +136,8 @@ func (j Judge) Evaluate(ctx context.Context, digest string, mode JudgeMode) (Jud
 		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 			return JudgeVerdict{}, fmt.Errorf("judge: claude -p timed out after %s: %w", timeout, runErr)
 		}
-		return JudgeVerdict{}, fmt.Errorf("judge: claude -p exited with error: %w (stderr: %s)",
-			runErr, snippet(stderr))
+		return JudgeVerdict{}, fmt.Errorf("judge: claude -p exited with error: %w (stdout: %s, stderr: %s)",
+			runErr, snippet(stdout), snippet(stderr))
 	}
 
 	out := strings.TrimSpace(stdout)
@@ -145,7 +145,18 @@ func (j Judge) Evaluate(ctx context.Context, digest string, mode JudgeMode) (Jud
 		return JudgeVerdict{}, errors.New("judge: claude -p returned empty stdout")
 	}
 
-	return parseVerdict(out)
+	v, err := parseVerdict(out)
+	if err != nil {
+		return JudgeVerdict{}, err
+	}
+	if mode == JudgeModeCompose && !v.Notify {
+		// Compose mode's contract is notify=true — the send is already
+		// decided. A notify=false verdict here has no usable text, so it is
+		// an error the caller's deterministic fallback handles, never a
+		// send of empty task/body.
+		return JudgeVerdict{}, fmt.Errorf("judge: compose-mode verdict set notify=false (stdout: %s)", snippet(out))
+	}
+	return v, nil
 }
 
 // EvaluateGoal runs the goal-continuation judge over digest and returns a
@@ -168,8 +179,8 @@ func (j Judge) EvaluateGoal(ctx context.Context, digest string) (GoalVerdict, er
 		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 			return GoalVerdict{}, fmt.Errorf("judge: claude -p timed out after %s: %w", timeout, runErr)
 		}
-		return GoalVerdict{}, fmt.Errorf("judge: claude -p exited with error: %w (stderr: %s)",
-			runErr, snippet(stderr))
+		return GoalVerdict{}, fmt.Errorf("judge: claude -p exited with error: %w (stdout: %s, stderr: %s)",
+			runErr, snippet(stdout), snippet(stderr))
 	}
 
 	out := strings.TrimSpace(stdout)
@@ -253,13 +264,22 @@ func (j Judge) run(ctx context.Context, prompt string) (string, string, error) {
 }
 
 // parseVerdict strips any markdown fences, unmarshals the JSON verdict,
-// validates urgency, and clamps Task/Body to their byte caps.
+// validates urgency, and clamps Task/Body to their byte caps. Urgency is
+// validated only when notify=true: the rubric asks for task/body/urgency
+// "if true", so a silent decide-mode verdict legitimately carries
+// null/empty fields — rejecting it would turn the judge's explicit
+// stay-silent answer into an error, and the caller's fail-open would send
+// the exact ping the verdict said not to send.
 func parseVerdict(raw string) (JudgeVerdict, error) {
 	cleaned := stripFences(raw)
 
 	var v JudgeVerdict
 	if err := json.Unmarshal([]byte(cleaned), &v); err != nil {
 		return JudgeVerdict{}, fmt.Errorf("judge: malformed verdict JSON: %w (stdout: %s)", err, snippet(raw))
+	}
+
+	if !v.Notify {
+		return JudgeVerdict{Notify: false, Reason: truncate(v.Reason, maxBodyBytes)}, nil
 	}
 
 	switch v.Urgency {
@@ -269,8 +289,8 @@ func parseVerdict(raw string) (JudgeVerdict, error) {
 		return JudgeVerdict{}, fmt.Errorf("judge: invalid urgency %q (stdout: %s)", v.Urgency, snippet(raw))
 	}
 
-	v.Task = truncate(v.Task, maxTaskBytes)
-	v.Body = truncate(v.Body, maxBodyBytes)
+	v.Task = truncateWords(v.Task, maxTaskBytes)
+	v.Body = truncateWords(v.Body, maxBodyBytes)
 	return v, nil
 }
 
@@ -292,7 +312,10 @@ func parseGoalVerdict(raw string) (GoalVerdict, error) {
 		return GoalVerdict{}, fmt.Errorf("judge: invalid tasks %q (stdout: %s)", v.Tasks, snippet(raw))
 	}
 
-	v.Reason = truncate(v.Reason, maxGoalReasonBytes)
+	// Reason is decision-log-first but also reaches the user verbatim as a
+	// goal-stalled/complete notification body and the Stop-hook block
+	// reason, so it gets the word-safe clamp.
+	v.Reason = truncateWords(v.Reason, maxGoalReasonBytes)
 	return v, nil
 }
 

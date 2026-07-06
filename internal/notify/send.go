@@ -21,6 +21,10 @@ const senderRetryDelay = 1 * time.Second
 type Sender struct {
 	URL   string
 	Token string
+	// Host, when non-empty, is appended as an extra ntfy tag on every
+	// send, so a subscriber watching a topic shared by several machines
+	// can see which one a notification came from.
+	Host string
 	// Client is the HTTP client Send uses. A nil Client gets a
 	// defaultSenderTimeout-bounded http.Client at Send time.
 	Client *http.Client
@@ -67,6 +71,9 @@ func (s Sender) Send(ctx context.Context, n Notification) error {
 		client = &http.Client{Timeout: defaultSenderTimeout}
 	}
 	priority, tags := ntfyHeaders(n.Urgency)
+	if s.Host != "" {
+		tags += "," + s.Host
+	}
 
 	retry, err := s.post(ctx, client, n, priority, tags)
 	if err == nil || !retry {

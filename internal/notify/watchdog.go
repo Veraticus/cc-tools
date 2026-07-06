@@ -434,11 +434,11 @@ func handleGoalStatus(
 	case GoalMet:
 		return finishGoalOutcome(ctx, deps, st, lockPath, meta, res, tasks, sessionID, now,
 			"recheck: goal met", meta.Project+" · goal complete",
-			truncate(res.Goal.Condition, maxGoalConditionLen), UrgencyDone, "goal met")
+			truncateWords(res.Goal.Condition, maxGoalConditionLen), UrgencyDone, "goal met")
 	case GoalFailed:
 		return finishGoalOutcome(ctx, deps, st, lockPath, meta, res, tasks, sessionID, now,
 			"recheck: goal failed", meta.Project+" · goal failed",
-			truncate(res.Goal.Condition, maxGoalConditionLen), UrgencyBlocked, "goal failed")
+			truncateWords(res.Goal.Condition, maxGoalConditionLen), UrgencyBlocked, "goal failed")
 	case GoalCleared:
 		removeLock(lockPath)
 		return logWatchdogExit(deps, sessionID, "goal cleared")

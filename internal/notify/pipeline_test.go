@@ -53,6 +53,7 @@ func newTestPipeline(
 		Judge:     Judge{Bin: judgeBin, Model: "claude-haiku-4-5"},
 		Log:       DecisionLog{Path: logPath},
 		Stdout:    stdout,
+		Host:      "testhost",
 		Present:   present,
 	}
 	return p, logPath
@@ -261,8 +262,8 @@ func TestPipeline_Stop_Clean_ComposeJudgeError_FallbackSessionIdle(t *testing.T)
 		t.Fatalf("Run() error = %v", err)
 	}
 
-	if !strings.Contains(stdout.String(), "session idle") {
-		t.Errorf("stdout = %q, want fallback session idle line", stdout.String())
+	if !strings.Contains(stdout.String(), "project · testhost") {
+		t.Errorf("stdout = %q, want fallback title located by host", stdout.String())
 	}
 	if !strings.Contains(stdout.String(), "All done here.") {
 		t.Errorf("stdout = %q, want it to contain last assistant message tail", stdout.String())
@@ -541,7 +542,7 @@ func TestPipeline_Stop_GoalJudge_ParkedUnmet_UnderCap_EmitsBlockAndIncrements(t 
 	wantLine, err := json.Marshal(struct {
 		Decision string `json:"decision"`
 		Reason   string `json:"reason"`
-	}{Decision: "block", Reason: truncate(goalJudgeTestCondition, maxGoalConditionLen) + " — " + judgeReason})
+	}{Decision: "block", Reason: judgeReason + " (goal: " + truncateWords(goalJudgeTestCondition, maxBlockGoalEchoLen) + ")"})
 	if err != nil {
 		t.Fatalf("marshaling expected line: %v", err)
 	}
@@ -1021,7 +1022,7 @@ func TestPipeline_Stop_GoalJudge_IncidentDaemon_ParkedUnmet_EmitsBlock(t *testin
 	wantLine, err := json.Marshal(struct {
 		Decision string `json:"decision"`
 		Reason   string `json:"reason"`
-	}{Decision: "block", Reason: truncate(goalIncidentDaemonCondition, maxGoalConditionLen) + " — " + judgeReason})
+	}{Decision: "block", Reason: judgeReason + " (goal: " + truncateWords(goalIncidentDaemonCondition, maxBlockGoalEchoLen) + ")"})
 	if err != nil {
 		t.Fatalf("marshaling expected line: %v", err)
 	}
@@ -1102,5 +1103,37 @@ func TestPipeline_Stop_GoalJudge_IncidentDaemon_Pending_SilentAndArms(t *testing
 	}
 	if !strings.Contains(recs[0].Reason, "stop_hook_active=true") {
 		t.Errorf("Reason = %q, want it to mention stop_hook_active=true", recs[0].Reason)
+	}
+}
+
+func TestPipeline_SendTitles_LocusByWorkspaceAndBroadcastByHost(t *testing.T) {
+	var stdout bytes.Buffer
+	p, _ := newTestPipeline(t, &stdout, writeStubClaude(t), neverPresent)
+	p.Workspace = "mercury"
+
+	// A same-session event (permission prompt) locates by workspace.
+	in := HookInput{
+		SessionID: "sess-loc-1", CWD: "/home/user/grailquest", TranscriptPath: "/nonexistent",
+		HookEventName: "Notification", NotificationType: "permission_prompt", Message: "allow rm?",
+	}
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "grailquest · mercury") {
+		t.Errorf("stdout = %q, want permission title located by workspace", stdout.String())
+	}
+
+	// A broadcast is about a headless job, so the receiving session's
+	// workspace would mislead: it locates by host instead.
+	stdout.Reset()
+	in = HookInput{
+		SessionID: "sess-loc-2", CWD: "/home/user/grailquest", TranscriptPath: "/nonexistent",
+		HookEventName: "Notification", NotificationType: "agent_needs_input", Message: "remote job needs your input",
+	}
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "grailquest · testhost") {
+		t.Errorf("stdout = %q, want broadcast title located by host", stdout.String())
 	}
 }

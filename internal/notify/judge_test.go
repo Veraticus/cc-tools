@@ -98,15 +98,45 @@ func TestEvaluate_ClampsLongTaskAndBody(t *testing.T) {
 }
 
 func TestEvaluate_StripsMarkdownFences(t *testing.T) {
-	t.Setenv("STUB_STDOUT", "```json\n"+`{"notify":false,"urgency":"info","task":"t","body":"b","reason":"r"}`+"\n```")
+	t.Setenv("STUB_STDOUT", "```json\n"+`{"notify":true,"urgency":"info","task":"t","body":"b","reason":"r"}`+"\n```")
 
 	j := Judge{Bin: writeStubClaude(t), Model: "claude-haiku-4-5"}
 	got, err := j.Evaluate(context.Background(), "digest", JudgeModeDecide)
 	if err != nil {
 		t.Fatalf("Evaluate() error = %v", err)
 	}
-	if got.Notify || got.Urgency != UrgencyInfo || got.Task != "t" {
+	if !got.Notify || got.Urgency != UrgencyInfo || got.Task != "t" {
 		t.Errorf("Evaluate() = %+v, fences not stripped correctly", got)
+	}
+}
+
+func TestEvaluate_SilentVerdictWithNullFieldsIsValid(t *testing.T) {
+	// A decide-mode judge that answers notify=false legitimately leaves
+	// urgency/task/body null — the rubric only requires them when
+	// notifying. This must parse as a valid silent verdict, not a judge
+	// error: the error path fails open to a send, which is exactly the
+	// spurious ping the verdict said not to send.
+	t.Setenv("STUB_STDOUT", `{"notify":false,"urgency":null,"task":null,"body":null,"reason":"parked dev server only"}`)
+
+	j := Judge{Bin: writeStubClaude(t), Model: "claude-haiku-4-5"}
+	got, err := j.Evaluate(context.Background(), "digest", JudgeModeDecide)
+	if err != nil {
+		t.Fatalf("Evaluate() error = %v, want valid silent verdict", err)
+	}
+	if got.Notify || got.Reason != "parked dev server only" {
+		t.Errorf("Evaluate() = %+v, want silent verdict with reason preserved", got)
+	}
+}
+
+func TestEvaluate_ComposeModeNotifyFalseErrors(t *testing.T) {
+	// Compose mode's contract is notify=true (the send is already
+	// decided); a notify=false verdict has no usable text and must surface
+	// as an error so the caller's deterministic fallback runs.
+	t.Setenv("STUB_STDOUT", `{"notify":false,"urgency":null,"task":null,"body":null,"reason":"r"}`)
+
+	j := Judge{Bin: writeStubClaude(t), Model: "claude-haiku-4-5"}
+	if _, err := j.Evaluate(context.Background(), "digest", JudgeModeCompose); err == nil {
+		t.Fatal("Evaluate() error = nil, want compose-mode notify=false error")
 	}
 }
 

@@ -195,3 +195,20 @@ func TestResolveSenderEnv_TokenFileTrimmed(t *testing.T) {
 		t.Errorf("Token = %q, want no whitespace", s.Token)
 	}
 }
+
+func TestSend_HostAppendedAsTag(t *testing.T) {
+	var gotTags string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotTags = r.Header.Get("Tags")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	s := Sender{URL: srv.URL, Host: "vermissian"}
+	if err := s.Send(context.Background(), Notification{Title: "t", Body: "b", Urgency: UrgencyBlocked}); err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+	if gotTags != "question,vermissian" {
+		t.Errorf("Tags header = %q, want %q", gotTags, "question,vermissian")
+	}
+}

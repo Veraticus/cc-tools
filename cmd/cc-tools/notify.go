@@ -16,13 +16,16 @@ import (
 // notify/silence call.
 const notifyJudgeModel = "claude-haiku-4-5"
 
-// notifyJudgeTimeout bounds the judge subprocess call. 30s: a cold
-// `claude -p` invocation was measured at ~25s.
-const notifyJudgeTimeout = 30 * time.Second
+// notifyJudgeTimeout bounds the judge subprocess call. 60s: successful
+// decide-mode calls have been logged at up to 27s, and a 30s bound was
+// producing timeout → fail-open sends; the hook's own settings.json
+// timeout is 90s, so 60s still leaves room for scanning and delivery.
+const notifyJudgeTimeout = 60 * time.Second
 
 // notifyHookTimeout bounds the whole hook invocation, comfortably above
-// notifyJudgeTimeout to leave room for transcript scanning/enrichment.
-const notifyHookTimeout = 50 * time.Second
+// notifyJudgeTimeout to leave room for transcript scanning/enrichment and
+// under the 90s hook timeout configured in settings.json.
+const notifyHookTimeout = 80 * time.Second
 
 // decisionLogName is the decision log's filename, a sibling of the
 // per-session state directories inside the notify state base.
@@ -44,6 +47,7 @@ func runNotifyCommand() {
 	log := notify.DecisionLog{Path: filepath.Join(*stateBase, decisionLogName)}
 	judge := notify.Judge{Bin: "claude", Model: notifyJudgeModel, Timeout: notifyJudgeTimeout}
 	sender, senderOK := notify.ResolveSenderEnv(os.Environ())
+	sender.Host = notify.ShortHostname()
 
 	if *recheck {
 		runNotifyRecheck(*session, *stateBase, *project, *host, judge, sender, log)
@@ -75,6 +79,7 @@ func runNotifyCommand() {
 		Environ:   os.Environ(),
 		Stdout:    os.Stdout,
 		SelfBin:   selfBin,
+		Workspace: notify.WorkspaceName(os.Environ(), notify.RunCommand),
 		Present: func(environ []string, now time.Time) bool {
 			return notify.UserPresent(environ, now, notify.RunCommand)
 		},

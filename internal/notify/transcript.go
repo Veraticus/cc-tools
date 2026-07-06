@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Scanner tuning: real transcript lines can run multi-hundred-KB and files
@@ -708,6 +709,58 @@ func truncateHead(s string, maxLen int) string {
 		return s
 	}
 	return s[len(s)-maxLen:]
+}
+
+// truncationEllipsis marks a word-boundary cut in human-visible text.
+const truncationEllipsis = "…"
+
+// truncateWords bounds s to maxLen bytes for text a person (or the session
+// model) will read: unlike truncate's raw byte chop, it never splits a
+// UTF-8 rune, prefers cutting at the last word boundary that fits, and
+// appends an ellipsis to mark the cut. Strings within budget pass through
+// unchanged.
+func truncateWords(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	budget := maxLen - len(truncationEllipsis)
+	if budget < 1 {
+		return truncationEllipsis
+	}
+	for budget > 0 && !utf8.RuneStart(s[budget]) {
+		budget--
+	}
+	cut := s[:budget]
+	if i := strings.LastIndexByte(cut, ' '); i > 0 {
+		cut = cut[:i]
+	}
+	cut = strings.TrimRight(cut, " ")
+	if cut == "" {
+		cut = s[:budget]
+	}
+	return strings.Clone(cut) + truncationEllipsis
+}
+
+// truncateHeadWords mirrors truncateWords but keeps the END of s, for
+// human-visible text whose tail carries the meaning; the ellipsis goes in
+// front. Strings within budget pass through unchanged.
+func truncateHeadWords(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	budget := maxLen - len(truncationEllipsis)
+	if budget < 1 {
+		return truncationEllipsis
+	}
+	tail := s[len(s)-budget:]
+	for tail != "" && !utf8.RuneStart(tail[0]) {
+		tail = tail[1:]
+	}
+	if i := strings.IndexByte(tail, ' '); i >= 0 && i+1 < len(tail) {
+		tail = tail[i+1:]
+	}
+	tail = strings.TrimLeft(tail, " ")
+	return truncationEllipsis + strings.Clone(tail)
 }
 
 func parseTimestamp(ts string) time.Time {
