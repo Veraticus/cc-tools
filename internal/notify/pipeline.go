@@ -376,12 +376,15 @@ func (p Pipeline) handleGoalJudgeError(
 	state SessionState, in HookInput, res ScanResult, now time.Time, project, host string,
 	d Decision, jerr error, digest string, judgeMs int64, reasonSuffix string,
 ) {
-	if !p.DryRun {
+	reason := d.Reason + reasonSuffix + stopHookActiveSuffix(in.StopHookActive)
+	if p.DryRun {
+		reason += dryRunWouldArmWatchdogSuffix
+	} else {
 		p.arm(state, in, res, now, project, host)
 		_ = state.SetGoalBlockCount(res.Goal.Condition, 0)
 	}
 	p.logGoalJudged(
-		in, now, "judge error", d.Reason+reasonSuffix+stopHookActiveSuffix(in.StopHookActive),
+		in, now, "judge error", reason,
 		Notification{}, jerr, digest, judgeMs,
 	)
 }

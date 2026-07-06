@@ -685,6 +685,60 @@ func TestPipeline_Stop_GoalJudge_Error_SilentArmsAndLogsJudgeError(t *testing.T)
 	}
 }
 
+// TestPipeline_Stop_GoalJudge_Error_DryRun_WouldArmSuffix exercises
+// disposition 4 under DryRun: a judge error must not arm the watchdog or
+// write state, but the logged Reason still needs the "(would arm watchdog)"
+// suffix every other silent-arm path carries under DryRun, and the Outcome
+// must stay the distinct "judge error" string.
+func TestPipeline_Stop_GoalJudge_Error_DryRun_WouldArmSuffix(t *testing.T) {
+	stubBin := writeStubClaude(t)
+	t.Setenv("STUB_EXIT", "1")
+	t.Setenv("STUB_STDERR", "boom: judge unavailable")
+
+	var stdout bytes.Buffer
+	var sent []capturedRequest
+	p, logPath := newGoalTestPipeline(t, &stdout, stubBin, neverPresent, true)
+	p.Sender = stubSenderRecording(&sent)
+	transcript := copyFixture(t, "goal_active_live_tasks.jsonl")
+
+	sessionID := "sess-goal-err-dryrun-1"
+	state := SessionState{Dir: filepath.Join(p.StateBase, sessionID)}
+	if err := state.SetGoalBlockCount(goalJudgeTestCondition, 2); err != nil {
+		t.Fatalf("SetGoalBlockCount() error = %v", err)
+	}
+
+	in := HookInput{
+		SessionID: sessionID, CWD: "/home/user/project", TranscriptPath: transcript, HookEventName: "Stop",
+	}
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if stdout.String() != "" {
+		t.Errorf("stdout = %q, want empty (no block JSON)", stdout.String())
+	}
+	if len(sent) != 0 {
+		t.Errorf("sent = %+v, want no notification", sent)
+	}
+	if _, err := os.Stat(filepath.Join(state.Dir, "watchdog.lock")); err == nil {
+		t.Error("watchdog.lock exists, want no lock written under DryRun")
+	}
+	if got := state.GoalBlockCount(goalJudgeTestCondition); got != 2 {
+		t.Errorf("GoalBlockCount() = %d, want unchanged at 2 (no state written under DryRun)", got)
+	}
+
+	recs := readDecisionLog(t, logPath)
+	if len(recs) != 1 {
+		t.Fatalf("log records = %d, want 1: %+v", len(recs), recs)
+	}
+	if recs[0].Outcome != "judge error" {
+		t.Errorf("Outcome = %q, want %q", recs[0].Outcome, "judge error")
+	}
+	if !strings.Contains(recs[0].Reason, "(would arm watchdog)") {
+		t.Errorf("Reason = %q, want it to contain the would-arm-watchdog suffix", recs[0].Reason)
+	}
+}
+
 // TestPipeline_Stop_GoalJudge_CapBoundary pins the exact cap edge: a prior
 // count of 7 still blocks (the 8th consecutive block), but a prior count of
 // 8 gives up blocking and sends a "goal stalled" notification instead.
