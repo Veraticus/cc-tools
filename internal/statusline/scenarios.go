@@ -137,10 +137,24 @@ const (
 	rlExtraFiveHourResetIn  = 1 * time.Hour
 
 	// rlCostSessionUSD and rlCostDailyUSD are the fixed transcript-cost
-	// figures the "rl-cost"/"rl-cost-squeeze" scenarios inject via
-	// Dependencies.CostSource.
+	// figures the "rl-cost" scenario injects via Dependencies.CostSource.
 	rlCostSessionUSD = 8.89
 	rlCostDailyUSD   = 48.27
+
+	// rlCostSqueezeSessionUSD and rlCostSqueezeDailyUSD are "rl-cost-squeeze"'s
+	// own, wider figures: at rlSqueezeScenarioWidth (85), the middle
+	// region is 32 cells wide, and rl-cost's ordinary $8.89/$48.27 full
+	// two-part body is only 24 cells -- comfortably fits, so the
+	// session-only degradation path this scenario exists to exercise
+	// never fires. These wider figures push the full body to 34 cells
+	// (over the 32-cell budget) while the session-only body stays at 16
+	// cells (well under it), so buildSessionOnlyCostChip actually
+	// engages. Measured with the real runewidth math (see
+	// buildCostChip/buildSessionOnlyCostChip) before being hardcoded
+	// here; if the layout ever changes these dollar figures, re-measure
+	// rather than guess.
+	rlCostSqueezeSessionUSD = 888888.89
+	rlCostSqueezeDailyUSD   = 8888888.27
 
 	// rlCostFixtureTranscriptPath is a non-empty stub transcript path:
 	// its only purpose is to trigger computeData's transcript-cost
@@ -157,10 +171,17 @@ const (
 //   - "rl-extra": five_hour at the alarm threshold (100%, resets in
 //     1h) with a nonzero cost, so both the alarm decision and its
 //     dollar amount are exercised.
-//   - "rl-cost" / "rl-cost-squeeze": no rate_limits at all,
-//     transcript-derived cost-only (a fixed Dependencies.CostSource
-//     plus a non-empty Input.TranscriptPath — see
-//     rlCostFixtureTranscriptPath), exercising the two-part cost chip.
+//   - "rl-cost": no rate_limits at all, transcript-derived cost-only (a
+//     fixed Dependencies.CostSource plus a non-empty
+//     Input.TranscriptPath — see rlCostFixtureTranscriptPath),
+//     exercising the two-part cost chip's ordinary (fits-at-this-width)
+//     case.
+//   - "rl-cost-squeeze": same shape as "rl-cost", but with wider dollar
+//     figures (rlCostSqueezeSessionUSD/rlCostSqueezeDailyUSD) chosen so
+//     the full two-part body actually overflows the middle region at
+//     rlSqueezeScenarioWidth, forcing buildMiddleSection's session-only
+//     degradation step to fire — see those constants' doc comment for
+//     the width math.
 func buildRLScenario(width int, rlState string) Scenario {
 	name := fmt.Sprintf("w%d_ctx%d_%s", width, rlScenarioCtx, rlState)
 
@@ -191,10 +212,15 @@ func buildRLScenario(width int, rlState string) Scenario {
 			},
 		}
 		input.Cost = CostInput{TotalCostUSD: rlExtraCostUSD}
-	case "rl-cost", "rl-cost-squeeze":
+	case "rl-cost":
 		input.TranscriptPath = rlCostFixtureTranscriptPath
 		costSource = func(string) (float64, float64, bool) {
 			return rlCostSessionUSD, rlCostDailyUSD, true
+		}
+	case "rl-cost-squeeze":
+		input.TranscriptPath = rlCostFixtureTranscriptPath
+		costSource = func(string) (float64, float64, bool) {
+			return rlCostSqueezeSessionUSD, rlCostSqueezeDailyUSD, true
 		}
 	}
 

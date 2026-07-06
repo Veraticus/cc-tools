@@ -1,9 +1,10 @@
 // Package cost computes USD cost from Claude Code session transcripts
 // (JSONL files under a project's transcripts directory). It knows nothing
-// about the statusline or any other consumer: Session prices one transcript
-// file, Daily aggregates today's cost across every transcript on disk. Both
-// are pure functions of their inputs (paths, a caller-supplied "now", and a
-// caller-supplied subscribed flag) so a later cache layer can call them
+// about the statusline or any other consumer: Costs prices one transcript
+// file as "the session" and, in the same pass, aggregates today's cost
+// across every other transcript on disk as "the day". It is a pure
+// function of its inputs (paths, a caller-supplied "now", and a
+// caller-supplied subscribed flag) so a later cache layer can call it
 // synchronously on a TTL.
 package cost
 
@@ -15,71 +16,78 @@ import (
 	"time"
 )
 
-// jsonlExt is the only file extension Daily's directory walk considers.
+// jsonlExt is the only file extension the directory walk considers.
 const jsonlExt = ".jsonl"
 
-// Session returns the USD cost of one session transcript file at
-// transcriptPath. subscribed selects anthropic pricing: true means
-// anthropic-backend rows are free (a Claude subscription), false means they
-// are priced at list rates. Bedrock-backed rows are always priced,
-// regardless of subscribed.
+// Costs returns transcriptPath's own USD cost ("session") and today's total
+// USD cost across every *.jsonl file under projectsDir ("daily"), where
+// "today" is now's local date (the date in now's own time.Location).
 //
-// Session dedups message.id+requestId pairs within this one file (see
-// Daily's doc comment for why the same dedup rule matters across files
-// too), but does not filter by date: a single transcript file is already
-// scoped to one session, so there is no "today" boundary to apply.
-func Session(transcriptPath string, subscribed bool) (float64, error) {
+// transcriptPath — the largest, live-appended file in the corpus — is
+// scanned exactly once: sessionUSD is its full-file total with no date
+// filter (a single transcript file is already scoped to one session, so
+// there is no "today" boundary to apply to it), and that same scan's
+// today-matching rows seed dailyUSD. The remaining *.jsonl files under
+// projectsDir are then walked for their own today contribution, using the
+// same dedup set the transcript scan built — a resumed session re-logs its
+// parent history into a new transcript file under a different sessionId,
+// but with the same message.id and (observed on real transcripts,
+// 2026-07-06) a null requestId, and a dedup set shared across the whole
+// call is what stops that resumed history from being counted once in the
+// original file and again in the new one. transcriptPath itself is
+// skipped during the walk (already scanned above) whenever its path
+// relative to projectsDir can be determined; if it can't, the walk simply
+// re-scans it, and the shared dedup set still prevents double-counting —
+// slower, never wrong.
+//
+// Only files whose mtime is at or after local midnight of now are walked:
+// an older file cannot contain any row written after its own mtime, so it
+// cannot contain a today row and is skipped without ever being opened. An
+// individual file that cannot be opened or read is skipped rather than
+// failing the whole call; a missing or unreadable transcriptPath or
+// projectsDir is fatal.
+func Costs(transcriptPath, projectsDir string, now time.Time, subscribed bool) (float64, float64, error) {
 	f, err := openTranscriptFile(transcriptPath)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	defer func() { _ = f.Close() }()
 
-	total, err := scanRows(f, subscribed, make(map[string]bool), nil)
+	dedup := make(map[string]bool)
+	filter := newTodayFilter(now)
+
+	sessionUSD, dailyUSD, err := scanSessionRows(f, subscribed, dedup, filter)
+	_ = f.Close()
 	if err != nil {
-		return 0, fmt.Errorf("scanning session %s: %w", transcriptPath, err)
+		return 0, 0, fmt.Errorf("scanning session %s: %w", transcriptPath, err)
 	}
-	return total, nil
-}
 
-// Daily returns today's total USD cost across every *.jsonl file found
-// recursively under projectsDir, where "today" is now's local date (the
-// date in now's own time.Location). Only files whose mtime is at or after
-// local midnight of now are scanned: an older file cannot contain any row
-// written after its own mtime, so it cannot contain a today row and is
-// skipped without ever being opened. An individual file that cannot be
-// opened or read is skipped rather than failing the whole call; a missing
-// or unreadable projectsDir is fatal.
-//
-// Daily dedups message.id+requestId pairs across the ENTIRE walk, not per
-// file: Claude Code re-logs a resumed session's parent history into a new
-// transcript file under a different sessionId, but with the same
-// message.id and (observed on real transcripts, 2026-07-06) a null
-// requestId. Without a dedup set shared across every file in the walk,
-// that resumed history would be counted once in the original file and
-// again in the new one.
-func Daily(projectsDir string, now time.Time, subscribed bool) (float64, error) {
 	root, err := os.OpenRoot(projectsDir)
 	if err != nil {
-		return 0, fmt.Errorf("opening projects dir %s: %w", projectsDir, err)
+		return 0, 0, fmt.Errorf("opening projects dir %s: %w", projectsDir, err)
 	}
 	defer func() { _ = root.Close() }()
 
-	midnight := localMidnight(now)
-	dedup := make(map[string]bool)
-	var total float64
+	skipRel, skipErr := filepath.Rel(projectsDir, transcriptPath)
+	if skipErr != nil {
+		skipRel = ""
+	}
+	skipRel = filepath.Clean(skipRel)
 
+	midnight := localMidnight(now)
 	walkErr := fs.WalkDir(root.FS(), ".", func(relPath string, d fs.DirEntry, entryErr error) error {
 		if !shouldScanEntry(relPath, d, entryErr, midnight) {
 			return nil
 		}
-		total += scanEntryCost(root, relPath, subscribed, dedup, now)
+		if skipErr == nil && filepath.Clean(relPath) == skipRel {
+			return nil
+		}
+		dailyUSD += scanEntryCost(root, relPath, subscribed, dedup, now)
 		return nil
 	})
 	if walkErr != nil {
-		return total, fmt.Errorf("walking projects dir %s: %w", projectsDir, walkErr)
+		return sessionUSD, dailyUSD, fmt.Errorf("walking projects dir %s: %w", projectsDir, walkErr)
 	}
-	return total, nil
+	return sessionUSD, dailyUSD, nil
 }
 
 // scanEntryCost scans relPath within root and returns its USD cost,

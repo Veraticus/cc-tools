@@ -557,8 +557,11 @@ const (
 // the cost-only chip (RateLimits is nil precisely when the session
 // isn't a subscription session, per statusline.go's Input.RateLimits
 // doc comment). The cost chip renders on either a nonzero stdin
-// TotalCostUSD or a successfully computed transcript-derived session
-// cost — whichever is available.
+// TotalCostUSD or a successfully computed transcript-derived cost —
+// checking SessionCostUSD OR DailyCostUSD (not SessionCostUSD alone),
+// since a subscribed user can have a pure-anthropic $0 session while
+// still carrying nonzero bedrock spend earlier today; that daily figure
+// is a real signal worth showing even when the session itself is free.
 func middleChipKind(data *CachedData) chipKind {
 	if data.RateLimits != nil {
 		if data.RateLimits.FiveHour != nil && data.RateLimits.FiveHour.UsedPercentage >= 100 {
@@ -566,7 +569,8 @@ func middleChipKind(data *CachedData) chipKind {
 		}
 		return chipRateLimit
 	}
-	if data.Cost.TotalCostUSD > 0 || (data.CostFromTranscript && data.SessionCostUSD > 0) {
+	transcriptCostNonzero := data.CostFromTranscript && (data.SessionCostUSD > 0 || data.DailyCostUSD > 0)
+	if data.Cost.TotalCostUSD > 0 || transcriptCostNonzero {
 		return chipCost
 	}
 	return chipNone

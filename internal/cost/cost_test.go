@@ -122,9 +122,21 @@ func assertWithinTolerance(t *testing.T, got, want float64, msg string) {
 	}
 }
 
+// sessionOnly calls cost.Costs against transcriptPath with a distinct,
+// otherwise-empty sibling projectsDir, so the walk side of Costs
+// contributes nothing and only sessionUSD is meaningful -- the session-scan
+// equivalent of the old standalone cost.Session for tests that have no
+// daily/projectsDir behavior to exercise.
+func sessionOnly(t *testing.T, transcriptPath string, subscribed bool) (float64, error) {
+	t.Helper()
+	projectsDir := t.TempDir()
+	sessionUSD, _, err := cost.Costs(transcriptPath, projectsDir, time.Now(), subscribed)
+	return sessionUSD, err
+}
+
 // --- Row filter ---
 
-func TestSessionRowFilter(t *testing.T) {
+func TestRowFilter(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "session.jsonl")
 
@@ -150,9 +162,9 @@ func TestSessionRowFilter(t *testing.T) {
 
 	writeJSONL(t, path, []string{kept, userRow, syntheticRow, noUsageRow})
 
-	got, err := cost.Session(path, false)
+	got, err := sessionOnly(t, path, false)
 	if err != nil {
-		t.Fatalf("Session: unexpected error: %v", err)
+		t.Fatalf("Costs: unexpected error: %v", err)
 	}
 	want := fableBedrockCost(10, 5, 1, 2)
 	assertWithinTolerance(t, got, want, "row filter should keep only the billable sidechain row")
@@ -160,7 +172,7 @@ func TestSessionRowFilter(t *testing.T) {
 
 // --- Dedup ---
 
-func TestSessionDedupSameFile(t *testing.T) {
+func TestDedupSameFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "session.jsonl")
 
@@ -179,15 +191,15 @@ func TestSessionDedupSameFile(t *testing.T) {
 
 	writeJSONL(t, path, []string{row1, row2})
 
-	got, err := cost.Session(path, false)
+	got, err := sessionOnly(t, path, false)
 	if err != nil {
-		t.Fatalf("Session: unexpected error: %v", err)
+		t.Fatalf("Costs: unexpected error: %v", err)
 	}
 	want := fableBedrockCost(10, 5, 1, 2)
 	assertWithinTolerance(t, got, want, "duplicate id+requestId within one file should be counted once")
 }
 
-func TestDailyDedupAcrossFilesWithNullRequestID(t *testing.T) {
+func TestDedupAcrossFilesWithNullRequestID(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Now()
 
@@ -199,18 +211,21 @@ func TestDailyDedupAcrossFilesWithNullRequestID(t *testing.T) {
 
 	// Simulate a resumed session: the parent session's row is re-logged into
 	// a new file under a different sessionId, but with the same message.id
-	// and a null requestId. Both files must be scanned for Daily to find
-	// today's rows across all live transcripts, but the shared dedup set
-	// must prevent double counting.
-	writeJSONL(t, filepath.Join(dir, "session-a.jsonl"), []string{row})
+	// and a null requestId. session-a is scanned as "the session"
+	// (transcriptPath); session-b is found by the projectsDir walk. Both
+	// must be scanned for Costs' daily total to find today's rows across
+	// all live transcripts, but the shared dedup set must prevent double
+	// counting.
+	transcriptPath := filepath.Join(dir, "session-a.jsonl")
+	writeJSONL(t, transcriptPath, []string{row})
 	writeJSONL(t, filepath.Join(dir, "session-b.jsonl"), []string{row})
 
-	got, err := cost.Daily(dir, now, false)
+	_, dailyUSD, err := cost.Costs(transcriptPath, dir, now, false)
 	if err != nil {
-		t.Fatalf("Daily: unexpected error: %v", err)
+		t.Fatalf("Costs: unexpected error: %v", err)
 	}
 	want := fableBedrockCost(10, 5, 1, 2)
-	assertWithinTolerance(t, got, want, "cross-file dedup on null requestId should count the resumed row once")
+	assertWithinTolerance(t, dailyUSD, want, "cross-file dedup on null requestId should count the resumed row once")
 }
 
 func TestDedupNoMessageIDCountsEachRow(t *testing.T) {
@@ -227,14 +242,81 @@ func TestDedupNoMessageIDCountsEachRow(t *testing.T) {
 
 	writeJSONL(t, path, []string{row, row})
 
-	got, err := cost.Session(path, false)
+	got, err := sessionOnly(t, path, false)
 	if err != nil {
-		t.Fatalf("Session: unexpected error: %v", err)
+		t.Fatalf("Costs: unexpected error: %v", err)
 	}
 	// No message.id means backend defaults to anthropic (no "msg_bdrk"
 	// prefix); subscribed=false so list rates apply, and both rows count.
 	want := 2 * fableListCost(10, 5, 1, 2)
 	assertWithinTolerance(t, got, want, "rows with no message.id should never be deduped")
+}
+
+// --- Byte-level pre-filter (perf-2) ---
+
+func TestByteFilterFalsePositiveContentNotCounted(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+
+	// A user row (never billable) whose own content happens to contain the
+	// literal `"type":"assistant"` byte sequence unescaped in the raw
+	// JSON bytes -- via a nested object field (as real transcripts do,
+	// e.g. a toolUseResult echoing the assistant turn's own shape) rather
+	// than as an escaped substring inside a string value, which the
+	// pre-filter's plain bytes.Contains would never see. The gate is a
+	// false positive here -- it can't tell the difference from bytes
+	// alone -- but the full unmarshal + isBillableRow that always follows
+	// it correctly reads this row's real top-level "type":"user" and
+	// rejects it, so it must still not be counted.
+	line := `{"type":"user","isSidechain":false,"timestamp":"2026-07-06T16:00:00.000Z",` +
+		`"message":{"id":"msg_bdrk_shouldnotcount","model":"claude-fable-5",` +
+		`"usage":{"input_tokens":999,"output_tokens":999,"cache_read_input_tokens":999,"cache_creation_input_tokens":999}},` +
+		`"toolUseResult":{"type":"assistant","stuff":123}}`
+
+	writeJSONL(t, path, []string{line})
+
+	got, err := sessionOnly(t, path, false)
+	if err != nil {
+		t.Fatalf("Costs: unexpected error: %v", err)
+	}
+	assertWithinTolerance(
+		t,
+		got,
+		0,
+		"a non-assistant row whose content contains the assistant marker must not be counted",
+	)
+}
+
+// --- Oversized line skip (perf-3) ---
+
+func TestOversizedLineSkippedRestOfFileStillCounted(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+
+	before := buildRow(rowOpts{
+		msgID: "msg_bdrk_before", model: "claude-fable-5",
+		timestamp: "2026-07-06T16:00:00.000Z",
+		input:     10, output: 5, cacheRead: 1, cacheWrite: 2,
+	})
+	after := buildRow(rowOpts{
+		msgID: "msg_bdrk_after", model: "claude-fable-5",
+		timestamp: "2026-07-06T16:00:01.000Z",
+		input:     20, output: 10, cacheRead: 2, cacheWrite: 4,
+	})
+	// An oversized "line" with no embedded newline, well past the 10MB
+	// per-line cap: it must be discarded without erroring or aborting the
+	// scan, and the valid rows before and after it must both still count.
+	const oversizedLineBytes = 11 * 1024 * 1024
+	junk := strings.Repeat("x", oversizedLineBytes)
+
+	writeJSONL(t, path, []string{before, junk, after})
+
+	got, err := sessionOnly(t, path, false)
+	if err != nil {
+		t.Fatalf("Costs: unexpected error scanning past an oversized line: %v", err)
+	}
+	want := fableBedrockCost(10, 5, 1, 2) + fableBedrockCost(20, 10, 2, 4)
+	assertWithinTolerance(t, got, want, "rows before and after an oversized line must both count, with no error")
 }
 
 // --- Billing ---
@@ -250,16 +332,16 @@ func TestBillingBedrockRegardlessOfSubscribed(t *testing.T) {
 
 	pathSubscribed := filepath.Join(dir, "subscribed.jsonl")
 	writeJSONL(t, pathSubscribed, []string{row})
-	gotSubscribed, err := cost.Session(pathSubscribed, true)
+	gotSubscribed, err := sessionOnly(t, pathSubscribed, true)
 	if err != nil {
-		t.Fatalf("Session (subscribed): unexpected error: %v", err)
+		t.Fatalf("Costs (subscribed): unexpected error: %v", err)
 	}
 
 	pathUnsubscribed := filepath.Join(dir, "unsubscribed.jsonl")
 	writeJSONL(t, pathUnsubscribed, []string{row})
-	gotUnsubscribed, err := cost.Session(pathUnsubscribed, false)
+	gotUnsubscribed, err := sessionOnly(t, pathUnsubscribed, false)
 	if err != nil {
-		t.Fatalf("Session (unsubscribed): unexpected error: %v", err)
+		t.Fatalf("Costs (unsubscribed): unexpected error: %v", err)
 	}
 
 	want := fableBedrockCost(100, 50, 10, 20)
@@ -278,9 +360,9 @@ func TestBillingAnthropicSubscribedIsFree(t *testing.T) {
 	})
 	writeJSONL(t, path, []string{row})
 
-	got, err := cost.Session(path, true)
+	got, err := sessionOnly(t, path, true)
 	if err != nil {
-		t.Fatalf("Session: unexpected error: %v", err)
+		t.Fatalf("Costs: unexpected error: %v", err)
 	}
 	assertWithinTolerance(t, got, 0, "subscribed anthropic row must cost $0")
 }
@@ -296,9 +378,9 @@ func TestBillingAnthropicUnsubscribedUsesListRates(t *testing.T) {
 	})
 	writeJSONL(t, path, []string{row})
 
-	got, err := cost.Session(path, false)
+	got, err := sessionOnly(t, path, false)
 	if err != nil {
-		t.Fatalf("Session: unexpected error: %v", err)
+		t.Fatalf("Costs: unexpected error: %v", err)
 	}
 	want := fableListCost(100, 50, 10, 20)
 	assertWithinTolerance(t, got, want, "unsubscribed anthropic row must use list rates")
@@ -315,9 +397,9 @@ func TestBillingUnknownModelIsZero(t *testing.T) {
 	})
 	writeJSONL(t, path, []string{row})
 
-	got, err := cost.Session(path, false)
+	got, err := sessionOnly(t, path, false)
 	if err != nil {
-		t.Fatalf("Session: unexpected error: %v", err)
+		t.Fatalf("Costs: unexpected error: %v", err)
 	}
 	assertWithinTolerance(t, got, 0, "unknown model id must never be guessed at, must cost $0")
 }
@@ -354,12 +436,48 @@ func TestDailyLocalDateBucketing(t *testing.T) {
 
 	writeJSONL(t, path, []string{inBucket, outOfBucket})
 
-	got, err := cost.Daily(dir, now, false)
+	// path is itself the session (transcriptPath): its own today-matching
+	// rows feed the daily total directly, with no separate walk
+	// contribution needed (dir contains nothing else).
+	_, dailyUSD, err := cost.Costs(path, dir, now, false)
 	if err != nil {
-		t.Fatalf("Daily: unexpected error: %v", err)
+		t.Fatalf("Costs: unexpected error: %v", err)
 	}
 	want := fableBedrockCost(10, 5, 1, 2)
-	assertWithinTolerance(t, got, want, "only the row whose local date matches now's local date should count")
+	assertWithinTolerance(t, dailyUSD, want, "only the row whose local date matches now's local date should count")
+}
+
+func TestSessionTotalHasNoDateFilter(t *testing.T) {
+	// The session total (sessionUSD) must include every billable row in
+	// transcriptPath regardless of date -- only dailyUSD applies the
+	// today-only filter.
+	la, err := time.LoadLocation("America/Los_Angeles")
+	if err != nil {
+		t.Fatalf("loading America/Los_Angeles: %v", err)
+	}
+	now := time.Date(2026, time.July, 5, 23, 0, 0, 0, la)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+
+	today := buildRow(rowOpts{
+		msgID: "msg_bdrk_today", model: "claude-fable-5",
+		timestamp: "2026-07-06T02:00:00.000Z",
+		input:     10, output: 5, cacheRead: 1, cacheWrite: 2,
+	})
+	yesterday := buildRow(rowOpts{
+		msgID: "msg_bdrk_yesterday", model: "claude-fable-5",
+		timestamp: "2026-07-04T10:00:00.000Z",
+		input:     20, output: 10, cacheRead: 2, cacheWrite: 4,
+	})
+	writeJSONL(t, path, []string{today, yesterday})
+
+	sessionUSD, _, err := cost.Costs(path, dir, now, false)
+	if err != nil {
+		t.Fatalf("Costs: unexpected error: %v", err)
+	}
+	want := fableBedrockCost(10, 5, 1, 2) + fableBedrockCost(20, 10, 2, 4)
+	assertWithinTolerance(t, sessionUSD, want, "session total must include rows from every date")
 }
 
 // --- mtime skip ---
@@ -367,10 +485,17 @@ func TestDailyLocalDateBucketing(t *testing.T) {
 func TestDailyMtimeSkip(t *testing.T) {
 	now := time.Now()
 	dir := t.TempDir()
-	path := filepath.Join(dir, "old.jsonl")
 
+	// transcriptPath is a separate, empty session file -- the mtime skip
+	// under test applies only to the projectsDir walk, not to the
+	// unconditionally-scanned session file.
+	transcriptPath := filepath.Join(dir, "current.jsonl")
+	writeJSONL(t, transcriptPath, nil)
+
+	path := filepath.Join(dir, "old.jsonl")
 	// Content, if scanned, would count -- but the file's mtime predates
-	// local midnight of now, so Daily must skip it without ever opening it.
+	// local midnight of now, so the walk must skip it without ever
+	// opening it.
 	row := buildRow(rowOpts{
 		msgID: "msg_bdrk_old", model: "claude-fable-5",
 		timestamp: now.UTC().Format(time.RFC3339),
@@ -384,16 +509,16 @@ func TestDailyMtimeSkip(t *testing.T) {
 		t.Fatalf("Chtimes: %v", err)
 	}
 
-	got, err := cost.Daily(dir, now, false)
+	_, dailyUSD, err := cost.Costs(transcriptPath, dir, now, false)
 	if err != nil {
-		t.Fatalf("Daily: unexpected error: %v", err)
+		t.Fatalf("Costs: unexpected error: %v", err)
 	}
-	assertWithinTolerance(t, got, 0, "a file with mtime before local midnight must be skipped")
+	assertWithinTolerance(t, dailyUSD, 0, "a file with mtime before local midnight must be skipped")
 }
 
 // --- Malformed lines / empty files ---
 
-func TestSessionMalformedLinesSkipped(t *testing.T) {
+func TestMalformedLinesSkipped(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "session.jsonl")
 
@@ -410,22 +535,22 @@ func TestSessionMalformedLinesSkipped(t *testing.T) {
 		`{"type":"assistant","message":`, // truncated/partial line
 	})
 
-	got, err := cost.Session(path, false)
+	got, err := sessionOnly(t, path, false)
 	if err != nil {
-		t.Fatalf("Session: unexpected error on malformed lines: %v", err)
+		t.Fatalf("Costs: unexpected error on malformed lines: %v", err)
 	}
 	want := fableBedrockCost(10, 5, 1, 2)
 	assertWithinTolerance(t, got, want, "malformed lines must be skipped silently")
 }
 
-func TestSessionEmptyFile(t *testing.T) {
+func TestEmptyFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "empty.jsonl")
 	writeJSONL(t, path, nil)
 
-	got, err := cost.Session(path, false)
+	got, err := sessionOnly(t, path, false)
 	if err != nil {
-		t.Fatalf("Session: unexpected error on empty file: %v", err)
+		t.Fatalf("Costs: unexpected error on empty file: %v", err)
 	}
 	assertWithinTolerance(t, got, 0, "empty file must cost 0")
 }
@@ -434,29 +559,36 @@ func TestDailyEmptyDir(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Now()
 
-	got, err := cost.Daily(dir, now, false)
+	transcriptPath := filepath.Join(dir, "session.jsonl")
+	writeJSONL(t, transcriptPath, nil)
+
+	_, dailyUSD, err := cost.Costs(transcriptPath, dir, now, false)
 	if err != nil {
-		t.Fatalf("Daily: unexpected error on empty dir: %v", err)
+		t.Fatalf("Costs: unexpected error on empty projects dir: %v", err)
 	}
-	assertWithinTolerance(t, got, 0, "empty projects dir must cost 0")
+	assertWithinTolerance(t, dailyUSD, 0, "empty projects dir must cost 0")
 }
 
 // --- Missing / unreadable paths ---
 
-func TestSessionMissingFile(t *testing.T) {
+func TestMissingTranscriptFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "does-not-exist.jsonl")
 
-	if _, err := cost.Session(path, false); err == nil {
-		t.Fatal("Session: expected error for missing file, got nil")
+	if _, _, err := cost.Costs(path, dir, time.Now(), false); err == nil {
+		t.Fatal("Costs: expected error for missing transcript file, got nil")
 	}
 }
 
-func TestDailyMissingDir(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "does-not-exist")
+func TestMissingProjectsDir(t *testing.T) {
+	dir := t.TempDir()
+	transcriptPath := filepath.Join(dir, "session.jsonl")
+	writeJSONL(t, transcriptPath, nil)
 
-	if _, err := cost.Daily(dir, time.Now(), false); err == nil {
-		t.Fatal("Daily: expected error for missing dir, got nil")
+	missingDir := filepath.Join(dir, "does-not-exist")
+
+	if _, _, err := cost.Costs(transcriptPath, missingDir, time.Now(), false); err == nil {
+		t.Fatal("Costs: expected error for missing projects dir, got nil")
 	}
 }
 
@@ -489,12 +621,12 @@ func TestDailyUnreadableFileAmongReadableOnes(t *testing.T) {
 	}
 	defer func() { _ = os.Chmod(badPath, 0o600) }()
 
-	got, err := cost.Daily(dir, now, false)
+	_, dailyUSD, err := cost.Costs(goodPath, dir, now, false)
 	if err != nil {
-		t.Fatalf("Daily: unexpected error: %v", err)
+		t.Fatalf("Costs: unexpected error: %v", err)
 	}
 	want := fableBedrockCost(10, 5, 1, 2)
-	assertWithinTolerance(t, got, want, "an unreadable file must be skipped, not fatal, among readable ones")
+	assertWithinTolerance(t, dailyUSD, want, "an unreadable file must be skipped, not fatal, among readable ones")
 }
 
 // --- End-to-end fixture ---
@@ -524,14 +656,78 @@ func TestDailyEndToEndFixture(t *testing.T) {
 	path := filepath.Join(dir, "e2e.jsonl")
 	writeJSONL(t, path, []string{bedrockRow1, bedrockRow2, bedrockRow3, subscribedAnthropicRow})
 
-	got, err := cost.Daily(dir, now, true)
+	// path is itself the session (transcriptPath); dir contains nothing
+	// else, so dailyUSD comes entirely from path's own today-matching
+	// rows, and sessionUSD (no date filter) must equal the same total
+	// since every row's timestamp is "today".
+	sessionUSD, dailyUSD, err := cost.Costs(path, dir, now, true)
 	if err != nil {
-		t.Fatalf("Daily: unexpected error: %v", err)
+		t.Fatalf("Costs: unexpected error: %v", err)
 	}
 
 	want := fableBedrockCost(100, 50, 10, 20) +
 		fableBedrockCost(200, 60, 0, 5) +
 		fableBedrockCost(50, 25, 2, 0)
 	// subscribedAnthropicRow costs $0 (subscribed=true, anthropic backend).
-	assertWithinTolerance(t, got, want, "end-to-end fixture: 3 bedrock rows + 1 free subscribed row")
+	assertWithinTolerance(t, dailyUSD, want, "end-to-end fixture: 3 bedrock rows + 1 free subscribed row")
+	assertWithinTolerance(t, sessionUSD, want, "session total must match daily when every row is from today")
+}
+
+// --- Non-circular pricing validation (conf-3) ---
+//
+// TestRealShapeFixtureMatchesIndependentTotal validates cost.Costs against
+// testdata/real_shape.jsonl using dollar totals computed independently of
+// this package: by hand, from decimal arithmetic against pricing.go's
+// documented per-token rates, NOT by calling any of pricing.go's own
+// functions or constants (fableBedrockCost/fableListCost above are
+// deliberately not used here — those helpers duplicate pricing.go's own
+// constants and so can't catch a bug shared between pricing.go and the
+// helper). If pricing.go's rate tables ever drift from the documented
+// rates, this is the test that notices.
+func TestRealShapeFixtureMatchesIndependentTotal(t *testing.T) {
+	// Row 1: bedrock claude-fable-5, msg_bdrk_fixture1,
+	// input=7546 output=22 cache_read=0 cache_creation=43994.
+	//   7546*0.000011 + 22*0.000055 + 0*0.0000011 + 43994*0.00001375
+	// = 0.083006 + 0.001210 + 0 + 0.60491750 = 0.68913350
+	//
+	// Row 2: bedrock claude-sonnet-5, msg_bdrk_fixture2,
+	// input=1000 output=500 cache_read=20000 cache_creation=3000.
+	//   1000*0.0000022 + 500*0.000011 + 20000*0.00000022 + 3000*0.00000275
+	// = 0.0022 + 0.0055 + 0.0044 + 0.00825 = 0.02035
+	//
+	// Row 3: anthropic claude-opus-4-8 (list rates, subscribed=false),
+	// msg_01fixture3, input=2000 output=100 cache_read=50000
+	// cache_creation=0.
+	//   2000*0.000005 + 100*0.000025 + 50000*0.0000005 + 0
+	// = 0.01 + 0.0025 + 0.025 = 0.0375
+	//
+	// TOTAL (subscribed=false) = 0.68913350 + 0.02035 + 0.0375 = 0.74698350
+	// TOTAL (subscribed=true), row 3 (anthropic) is free:
+	//   0.68913350 + 0.02035 = 0.70948350
+	const (
+		wantUnsubscribed = 0.74698350
+		wantSubscribed   = 0.70948350
+	)
+
+	got, err := sessionOnly(t, "testdata/real_shape.jsonl", false)
+	if err != nil {
+		t.Fatalf("Costs (unsubscribed): unexpected error: %v", err)
+	}
+	assertWithinTolerance(
+		t,
+		got,
+		wantUnsubscribed,
+		"real_shape.jsonl total (subscribed=false) must match the independently computed literal",
+	)
+
+	got, err = sessionOnly(t, "testdata/real_shape.jsonl", true)
+	if err != nil {
+		t.Fatalf("Costs (subscribed): unexpected error: %v", err)
+	}
+	assertWithinTolerance(
+		t,
+		got,
+		wantSubscribed,
+		"real_shape.jsonl total (subscribed=true) must match the independently computed literal",
+	)
 }

@@ -20,13 +20,33 @@ const credentialsFileName = ".credentials.json"
 
 // costCacheKeyPrefix distinguishes transcript-cost cache entries from
 // the git-status cache entries sharing the same cache root/subdir.
-const costCacheKeyPrefix = "cost-"
+// costSessionCacheKeyPrefix and costDailyCacheKeyPrefix further split
+// the session and daily entries under two different keys — session
+// keyed by transcriptPath, daily keyed by projectsDir — so that
+// concurrent sessions in the same project share one daily-scan cache
+// entry instead of each paying for their own.
+const (
+	costSessionCacheKeyPrefix = "cost-session-"
+	costDailyCacheKeyPrefix   = "cost-daily-"
+)
 
-// costState is the cached session+daily result for one transcript
-// path.
+// costState is the combined session+daily result returned to
+// statusline.go's caller.
 type costState struct {
 	SessionUSD float64 `json:"session_usd"`
 	DailyUSD   float64 `json:"daily_usd"`
+}
+
+// sessionCacheEntry is the on-disk shape of the session-keyed cache
+// entry.
+type sessionCacheEntry struct {
+	SessionUSD float64 `json:"session_usd"`
+}
+
+// dailyCacheEntry is the on-disk shape of the projectsDir-keyed cache
+// entry.
+type dailyCacheEntry struct {
+	DailyUSD float64 `json:"daily_usd"`
 }
 
 // transcriptCosts returns transcript-derived costs for transcriptPath,
@@ -37,46 +57,58 @@ type costState struct {
 // "<profile>/projects/<slug>/<session>.jsonl": projectsDir is its
 // grandparent directory, and profileDir (projectsDir's parent) is
 // where the OAuth credentials file lives.
+//
+// The session and daily figures are cached under two separate keys —
+// session by transcriptPath, daily by projectsDir — rather than one
+// combined entry: a hit on both skips the scan entirely, but a miss on
+// either recomputes both together through cost.Costs' single-pass scan
+// (there is no cheaper way to refresh just one side, since the
+// session-file scan feeds the daily total too) and (re)writes both
+// entries.
 func transcriptCosts(cacheDir string, ttl time.Duration, transcriptPath string, now time.Time) (costState, bool) {
+	projectsDir := filepath.Dir(filepath.Dir(transcriptPath))
+
 	if cacheDir == "" {
-		return computeTranscriptCosts(transcriptPath, now)
+		return computeTranscriptCosts(transcriptPath, projectsDir, now)
 	}
 
 	root, trusted := openCacheRoot(cacheDir)
 	if !trusted {
-		return computeTranscriptCosts(transcriptPath, now)
+		return computeTranscriptCosts(transcriptPath, projectsDir, now)
 	}
 	defer func() { _ = root.Close() }()
 
-	name := costCacheName(transcriptPath)
-	var cached costState
-	if readFreshCache(root, name, ttl, now, &cached) {
-		return cached, true
+	sessionName := costSessionCacheName(transcriptPath)
+	dailyName := costDailyCacheName(projectsDir)
+
+	var cachedSession sessionCacheEntry
+	var cachedDaily dailyCacheEntry
+	sessionHit := readFreshCache(root, sessionName, ttl, now, &cachedSession)
+	dailyHit := readFreshCache(root, dailyName, ttl, now, &cachedDaily)
+	if sessionHit && dailyHit {
+		return costState{SessionUSD: cachedSession.SessionUSD, DailyUSD: cachedDaily.DailyUSD}, true
 	}
 
-	state, ok := computeTranscriptCosts(transcriptPath, now)
+	state, ok := computeTranscriptCosts(transcriptPath, projectsDir, now)
 	if ok {
-		writeCache(root, name, state)
+		writeCache(root, sessionName, sessionCacheEntry{SessionUSD: state.SessionUSD})
+		writeCache(root, dailyName, dailyCacheEntry{DailyUSD: state.DailyUSD})
 	}
 	return state, ok
 }
 
 // computeTranscriptCosts computes costState fresh (no cache) from
-// transcriptPath: subscription status is read from the profile's
-// credentials file, then cost.Session and cost.Daily are both
-// computed under that subscribed flag. Either failing is treated as a
+// transcriptPath and its already-derived projectsDir: subscription
+// status is read from the profile's credentials file, then
+// cost.Costs computes both the session and daily totals in a single
+// pass under that subscribed flag. A scan failure is treated as a
 // total failure (ok=false) — a partial session-only or daily-only
 // result would be confusing on a status bar.
-func computeTranscriptCosts(transcriptPath string, now time.Time) (costState, bool) {
-	projectsDir := filepath.Dir(filepath.Dir(transcriptPath))
+func computeTranscriptCosts(transcriptPath, projectsDir string, now time.Time) (costState, bool) {
 	profileDir := filepath.Dir(projectsDir)
 	subscribed := readSubscribed(profileDir)
 
-	sessionUSD, err := cost.Session(transcriptPath, subscribed)
-	if err != nil {
-		return costState{}, false
-	}
-	dailyUSD, err := cost.Daily(projectsDir, now, subscribed)
+	sessionUSD, dailyUSD, err := cost.Costs(transcriptPath, projectsDir, now, subscribed)
 	if err != nil {
 		return costState{}, false
 	}
@@ -120,11 +152,18 @@ func readSubscribed(profileDir string) bool {
 	return creds.ClaudeAiOauth.SubscriptionType != ""
 }
 
-// costCacheName returns the cache file name for transcriptPath:
-// "cost-<hex sha256 prefix of transcriptPath>.json". The costCacheKeyPrefix
-// keeps this entry's name distinct from gitStatusCacheName's entries,
-// which share the same cache root/subdirectory.
-func costCacheName(transcriptPath string) string {
+// costSessionCacheName returns the cache file name for transcriptPath's
+// session entry: "cost-session-<hex sha256 prefix of transcriptPath>.json".
+func costSessionCacheName(transcriptPath string) string {
 	sum := sha256.Sum256([]byte(transcriptPath))
-	return costCacheKeyPrefix + hex.EncodeToString(sum[:cacheHashBytes]) + ".json"
+	return costSessionCacheKeyPrefix + hex.EncodeToString(sum[:cacheHashBytes]) + ".json"
+}
+
+// costDailyCacheName returns the cache file name for projectsDir's daily
+// entry: "cost-daily-<hex sha256 prefix of projectsDir>.json". Keying by
+// projectsDir (rather than transcriptPath) is what lets concurrent
+// sessions within the same project share one daily-scan cache entry.
+func costDailyCacheName(projectsDir string) string {
+	sum := sha256.Sum256([]byte(projectsDir))
+	return costDailyCacheKeyPrefix + hex.EncodeToString(sum[:cacheHashBytes]) + ".json"
 }

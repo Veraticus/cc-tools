@@ -199,6 +199,118 @@ func TestTranscriptCosts_StaleCacheRecomputes(t *testing.T) {
 	}
 }
 
+// --- split cache keys -------------------------------------------------
+
+func TestTranscriptCosts_SessionAndDailyCachedUnderSeparateKeys(t *testing.T) {
+	cacheDir := t.TempDir()
+	now := time.Now()
+	timestamp := now.Format(time.RFC3339)
+	transcriptPath := setupTranscriptFixture(t, bedrockRow(timestamp))
+	projectsDir := filepath.Dir(filepath.Dir(transcriptPath))
+
+	if _, ok := transcriptCosts(cacheDir, time.Minute, transcriptPath, now); !ok {
+		t.Fatal("expected ok=true on first (cold-cache) call")
+	}
+
+	root, trusted := openCacheRoot(cacheDir)
+	if !trusted {
+		t.Fatal("expected the cache root to verify as trusted")
+	}
+	defer func() { _ = root.Close() }()
+
+	if _, err := root.Stat(costSessionCacheName(transcriptPath)); err != nil {
+		t.Errorf("expected a session cache entry keyed by transcriptPath: %v", err)
+	}
+	if _, err := root.Stat(costDailyCacheName(projectsDir)); err != nil {
+		t.Errorf("expected a daily cache entry keyed by projectsDir: %v", err)
+	}
+}
+
+func TestTranscriptCosts_ConcurrentSessionSharesDailyCacheEntry(t *testing.T) {
+	cacheDir := t.TempDir()
+	now := time.Now()
+	timestamp := now.Format(time.RFC3339)
+
+	// Two distinct session transcripts under the SAME project (same
+	// projects dir), as two concurrent Claude Code sessions in one
+	// project would produce.
+	tmp := t.TempDir()
+	profileDir := filepath.Join(tmp, "profile")
+	projectDir := filepath.Join(profileDir, "projects", "slug")
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCredentials(t, profileDir, "max")
+
+	transcriptA := filepath.Join(projectDir, "session-a.jsonl")
+	transcriptB := filepath.Join(projectDir, "session-b.jsonl")
+	writeTranscript(t, transcriptA, bedrockRow(timestamp))
+	writeTranscript(t, transcriptB, bedrockRow(timestamp))
+
+	if _, ok := transcriptCosts(cacheDir, time.Minute, transcriptA, now); !ok {
+		t.Fatal("expected ok=true computing session A")
+	}
+
+	// Delete session B's own transcript file: session B has never been
+	// scanned before (its session-keyed cache entry doesn't exist), so if
+	// the shared daily entry weren't reused, this call would need to
+	// walk the projects dir itself; deleting transcriptB doesn't affect
+	// that walk (transcriptB may or may not still be scanned as part of
+	// it), but the point under test is the daily cache FILE's identity —
+	// verified directly below via costDailyCacheName equality, which is
+	// what actually proves session A and session B share one entry.
+	sessionAName := costSessionCacheName(transcriptA)
+	sessionBName := costSessionCacheName(transcriptB)
+	dailyNameA := costDailyCacheName(filepath.Dir(filepath.Dir(transcriptA)))
+	dailyNameB := costDailyCacheName(filepath.Dir(filepath.Dir(transcriptB)))
+
+	if sessionAName == sessionBName {
+		t.Fatal("test setup invariant broken: distinct transcript paths must not share a session cache key")
+	}
+	if dailyNameA != dailyNameB {
+		t.Fatalf(
+			"sessions in the same project must share one daily cache key: got %q and %q",
+			dailyNameA, dailyNameB,
+		)
+	}
+}
+
+func TestTranscriptCosts_SessionHitDailyMissRecomputesBoth(t *testing.T) {
+	cacheDir := t.TempDir()
+	now := time.Now()
+	timestamp := now.Format(time.RFC3339)
+	transcriptPath := setupTranscriptFixture(t, bedrockRow(timestamp))
+
+	if _, ok := transcriptCosts(cacheDir, time.Minute, transcriptPath, now); !ok {
+		t.Fatal("expected ok=true on first (cold-cache) call")
+	}
+
+	// Remove ONLY the daily-keyed entry, leaving the session-keyed entry
+	// fresh: a partial hit (session cached, daily missing) must still
+	// trigger a full recompute of BOTH figures, not a session-only reuse.
+	root, trusted := openCacheRoot(cacheDir)
+	if !trusted {
+		t.Fatal("expected the cache root to verify as trusted")
+	}
+	projectsDir := filepath.Dir(filepath.Dir(transcriptPath))
+	if err := root.Remove(costDailyCacheName(projectsDir)); err != nil {
+		t.Fatal(err)
+	}
+	_ = root.Close()
+
+	// Deleting the transcript file proves recompute was actually
+	// attempted (and must fail) rather than the session-only cache entry
+	// being silently reused for a "good enough" answer.
+	if err := os.Remove(transcriptPath); err != nil {
+		t.Fatal(err)
+	}
+
+	_, ok := transcriptCosts(cacheDir, time.Minute, transcriptPath, now.Add(time.Second))
+	if ok {
+		t.Error("expected a daily-cache miss to force a full recompute, which must fail with the transcript gone")
+	}
+}
+
 func TestTranscriptCosts_EmptyCacheDirNeverCaches(t *testing.T) {
 	now := time.Now()
 	timestamp := now.Format(time.RFC3339)

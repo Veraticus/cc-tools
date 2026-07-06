@@ -80,6 +80,32 @@ func TestMiddleChipKind_NoneWhenCostZero(t *testing.T) {
 	}
 }
 
+// A subscribed user with a pure-anthropic session (SessionCostUSD == 0)
+// but nonzero bedrock spend earlier today (DailyCostUSD > 0) must still
+// show the cost chip: the daily figure alone is a real, nonzero signal
+// worth displaying even though the session figure is $0.
+func TestMiddleChipKind_CostFromTranscriptSessionZeroDailyNonzero(t *testing.T) {
+	data := &CachedData{
+		CostFromTranscript: true,
+		SessionCostUSD:     0,
+		DailyCostUSD:       48.27,
+	}
+	if got := middleChipKind(data); got != chipCost {
+		t.Errorf("middleChipKind() = %v, want chipCost", got)
+	}
+}
+
+func TestMiddleChipKind_CostFromTranscriptBothZeroIsNone(t *testing.T) {
+	data := &CachedData{
+		CostFromTranscript: true,
+		SessionCostUSD:     0,
+		DailyCostUSD:       0,
+	}
+	if got := middleChipKind(data); got != chipNone {
+		t.Errorf("middleChipKind() = %v, want chipNone", got)
+	}
+}
+
 // --- Rendering: rate-limit chip ---
 
 func TestBuildRateLimitChip_ContainsBothWindowsAndSapphireBg(t *testing.T) {
