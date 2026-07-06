@@ -112,7 +112,7 @@ contexts:
 		coldTime := time.Since(start)
 
 		// Subsequent runs - warm cache
-		var warmTimes []time.Duration
+		warmTimes := make([]time.Duration, 0, 10)
 		for range 10 {
 			reader = bytes.NewReader(jsonData)
 			start = time.Now()

@@ -15,6 +15,10 @@ const (
 	minConfigArgs = 3
 	minGetArgs    = 4
 	minSetArgs    = 5
+
+	// tableColumnStatus is the shared "Status" column/row label used across
+	// the config and debug status tables.
+	tableColumnStatus = "Status"
 )
 
 func runConfigCommand() {
@@ -155,7 +159,7 @@ func handleConfigList(ctx context.Context, out *output.Terminal, manager *config
 
 	// Create table
 	table := output.NewTable(
-		[]string{"Setting", "Value", "Status"},
+		[]string{"Setting", "Value", tableColumnStatus},
 		[]int{30, 25, 10},
 	)
 

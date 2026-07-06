@@ -39,6 +39,10 @@ const scenarioHome = "/home/fixture"
 // scenario's Input. abbreviateModel turns this into "S4.5".
 const scenarioModelDisplay = "Sonnet 4.5"
 
+// scenarioStateNone is the shared "no state configured" sentinel used by
+// both the gitState and envState scenario-matrix dimensions.
+const scenarioStateNone = "none"
+
 // Scenarios returns the full statusline rendering matrix: every
 // combination of terminal width, context-window percentage, git
 // state, and env-chip state, PLUS a rate-limit dimension (see
@@ -54,10 +58,16 @@ const scenarioModelDisplay = "Sonnet 4.5"
 func Scenarios() []Scenario {
 	widths := []int{200, 120, 80, 50}
 	contexts := []float64{0, 42, 85, 97}
-	gitStates := []string{"none", "clean", "dirty"}
-	envStates := []string{"none", "awsk8s"}
+	gitStates := []string{scenarioStateNone, "clean", "dirty"}
+	envStates := []string{scenarioStateNone, "awsk8s"}
 
-	var scenarios []Scenario
+	rlWidths := []int{200, 80, 50}
+	rlStates := []string{"rl-normal", "rl-extra", "rl-cost"}
+
+	scenarios := make(
+		[]Scenario, 0,
+		len(widths)*len(contexts)*len(gitStates)*len(envStates)+len(rlWidths)*len(rlStates)+1,
+	)
 	for _, width := range widths {
 		for _, ctx := range contexts {
 			for _, gitState := range gitStates {
@@ -72,8 +82,6 @@ func Scenarios() []Scenario {
 	// held to context=42/git-none/env-none rather than crossed with
 	// every git/env combination — those axes are already covered
 	// above and are orthogonal to the middle-cluster chip logic.
-	rlWidths := []int{200, 80, 50}
-	rlStates := []string{"rl-normal", "rl-extra", "rl-cost"}
 	for _, width := range rlWidths {
 		for _, rlState := range rlStates {
 			scenarios = append(scenarios, buildRLScenario(width, rlState))
@@ -248,7 +256,7 @@ func buildScenario(width int, ctxPercent float64, gitState, envState string) Sce
 //   - "dirty": same HEAD; cr returns porcelain output with 3
 //     changed/untracked entries and 2 commits ahead of upstream.
 func applyGitState(fr *fixedFileReader, cr *fixedCommandRunner, gitState string) {
-	if gitState == "none" {
+	if gitState == scenarioStateNone {
 		return
 	}
 
@@ -270,7 +278,7 @@ func applyGitState(fr *fixedFileReader, cr *fixedCommandRunner, gitState string)
 // with a current-context, matching the cross-product's "aws+k8s" env
 // chip case; "none" leaves both absent.
 func applyEnvState(fr *fixedFileReader, env *fixedEnvReader, envState string) {
-	if envState == "none" {
+	if envState == scenarioStateNone {
 		return
 	}
 

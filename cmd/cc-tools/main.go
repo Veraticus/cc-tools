@@ -186,7 +186,8 @@ func debugLog() {
 			// Create a new reader from the data we just read
 			// This will be used by the actual commands
 			// Actually, we need to pipe it back - create a temp file
-			if tmpFile, tmpErr := os.CreateTemp("", "cc-tools-stdin-"); tmpErr == nil { //nolint:forbidigo // Debug temp file
+			//nolint:forbidigo // Debug temp file
+			if tmpFile, tmpErr := os.CreateTemp("", "cc-tools-stdin-"); tmpErr == nil {
 				_, _ = tmpFile.Write(stdinDebugData)
 				_, _ = tmpFile.Seek(0, 0)
 				os.Stdin = tmpFile //nolint:reassign // Resetting stdin for subsequent reads

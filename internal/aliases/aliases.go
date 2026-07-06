@@ -189,9 +189,9 @@ func (r *Resolver) entriesFor(kind Kind) map[string]entry {
 
 func defaultPatterns() map[string][]string {
 	return map[string][]string{
-		"prod":    {"prod", "production"},
-		"staging": {"stag", "staging"},
-		"dev":     {"dev", "sandbox", "sbx", "test"},
+		string(EnvProd):    {"prod", "production"},
+		string(EnvStaging): {"stag", "staging"},
+		string(EnvDev):     {"dev", "sandbox", "sbx", "test"},
 	}
 }
 

@@ -11,6 +11,10 @@ import "testing"
 func TestExitUsageError_IsBSDExUsageNotClaudeCodeBlockingExit(t *testing.T) {
 	const wantExitUsageError = 64
 	if exitUsageError != wantExitUsageError {
-		t.Errorf("exitUsageError = %d, want %d (BSD EX_USAGE); exit 2 is reserved for Claude Code's Stop-hook blocking-error channel", exitUsageError, wantExitUsageError)
+		t.Errorf(
+			"exitUsageError = %d, want %d (BSD EX_USAGE); exit 2 is reserved for Claude Code's Stop-hook blocking-error channel",
+			exitUsageError,
+			wantExitUsageError,
+		)
 	}
 }

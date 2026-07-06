@@ -25,6 +25,10 @@ const maxNotificationTailLen = 160
 // built-in stop-hook override cap.
 const goalBlockCap = 8
 
+// dryRunWouldArmWatchdogSuffix is appended to a decision's Reason whenever a
+// dry run reaches an arm-the-watchdog branch without actually arming it.
+const dryRunWouldArmWatchdogSuffix = " (would arm watchdog)"
+
 // Pipeline is the top-level orchestrator for a single hook invocation: it
 // scans the transcript, computes the deterministic Decide() gates, and
 // routes to a plain send, silence, or the LLM judge — then delivers,
@@ -118,7 +122,7 @@ func (p Pipeline) handleSilent(
 	reason := d.Reason + reasonSuffix
 	if d.ArmWatchdog {
 		if p.DryRun {
-			reason += " (would arm watchdog)"
+			reason += dryRunWouldArmWatchdogSuffix
 		} else {
 			p.arm(state, in, res, now, project, host)
 		}
@@ -301,7 +305,7 @@ func (p Pipeline) handleDecideVerdict(
 		// the !verdict.Notify branch above does.
 		if d.ArmWatchdog {
 			if p.DryRun {
-				reason += " (would arm watchdog)"
+				reason += dryRunWouldArmWatchdogSuffix
 			} else {
 				//nolint:contextcheck // arming spawns a detached child that must outlive this hook's ctx; see SpawnRecheck
 				p.arm(state, in, res, now, project, host)
@@ -343,12 +347,14 @@ func (p Pipeline) handleGoalJudge(
 	judgeMs := time.Since(start).Milliseconds()
 
 	if jerr != nil {
+		//nolint:contextcheck // arming spawns a detached child that must outlive this hook's ctx; see SpawnRecheck
 		p.handleGoalJudgeError(state, in, res, now, project, host, d, jerr, digest, judgeMs, reasonSuffix)
 		return
 	}
 
 	switch verdict.Tasks {
 	case "pending":
+		//nolint:contextcheck // arming spawns a detached child that must outlive this hook's ctx; see SpawnRecheck
 		p.handleGoalPending(state, in, res, now, project, host, verdict, digest, judgeMs, reasonSuffix)
 	case "parked":
 		if verdict.GoalMet {
@@ -371,7 +377,6 @@ func (p Pipeline) handleGoalJudgeError(
 	d Decision, jerr error, digest string, judgeMs int64, reasonSuffix string,
 ) {
 	if !p.DryRun {
-		//nolint:contextcheck // arming spawns a detached child that must outlive this hook's ctx; see SpawnRecheck
 		p.arm(state, in, res, now, project, host)
 		_ = state.SetGoalBlockCount(res.Goal.Condition, 0)
 	}
@@ -391,9 +396,8 @@ func (p Pipeline) handleGoalPending(
 ) {
 	reason := verdict.Reason + reasonSuffix + stopHookActiveSuffix(in.StopHookActive)
 	if p.DryRun {
-		reason += " (would arm watchdog)"
+		reason += dryRunWouldArmWatchdogSuffix
 	} else {
-		//nolint:contextcheck // arming spawns a detached child that must outlive this hook's ctx; see SpawnRecheck
 		p.arm(state, in, res, now, project, host)
 		_ = state.SetGoalBlockCount(res.Goal.Condition, 0)
 	}
@@ -552,7 +556,7 @@ func (p Pipeline) arm(state SessionState, in HookInput, res ScanResult, now time
 // failure, not the triggering hook event.
 func (p Pipeline) logArmFailed(in HookInput, now time.Time, reason string) {
 	_ = p.Log.Append(DecisionRecord{
-		Time: now, SessionID: in.SessionID, Event: "watchdog", Outcome: "arm failed", Reason: reason,
+		Time: now, SessionID: in.SessionID, Event: eventWatchdog, Outcome: "arm failed", Reason: reason,
 	})
 }
 
@@ -571,6 +575,7 @@ func SpawnRecheck(bin string, args []string) (int, error) {
 	// context.Background(), deliberately not the caller's ctx: this child
 	// must outlive the hook invocation that spawns it, so it must never be
 	// canceled when that invocation's own context expires.
+	//nolint:gosec // G204: bin is Pipeline.SelfBin (this tool's own binary), args built internally, not external input
 	cmd := exec.CommandContext(context.Background(), bin, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Stdin = devNull

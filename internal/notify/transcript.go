@@ -157,6 +157,10 @@ type contentBlock struct {
 	Text      string          `json:"text"`
 }
 
+// contentBlockTypeText is the contentBlock.Type discriminator for a plain
+// text block, as distinct from tool_use/tool_result blocks.
+const contentBlockTypeText = "text"
+
 type bashInput struct {
 	Command     string `json:"command"`
 	Description string `json:"description"`
@@ -211,6 +215,12 @@ type toolUseInfo struct {
 	name            string
 	runInBackground bool
 }
+
+// Tool names as they appear in a transcript's tool_use blocks.
+const (
+	toolNameBash  = "Bash"
+	toolNameAgent = "Agent"
+)
 
 // ScanResult is the full result of a single streaming pass over a session
 // transcript: goal state, live background tasks, the most recent
@@ -419,7 +429,7 @@ func humanTypedText(raw json.RawMessage) (string, bool) {
 		switch b.Type {
 		case "tool_result":
 			return "", false
-		case "text":
+		case contentBlockTypeText:
 			hasText = true
 			sb.WriteString(b.Text)
 		}
@@ -498,17 +508,17 @@ func (s *scanState) processAssistantMessage(raw json.RawMessage) {
 			continue
 		}
 		switch block.Name {
-		case "Bash":
+		case toolNameBash:
 			var in bashInput
 			if err := json.Unmarshal(block.Input, &in); err == nil {
 				s.toolUses[block.ID] = toolUseInfo{
 					description:     in.Description,
 					detail:          truncate(in.Command, maxDetailLen),
-					name:            "Bash",
+					name:            toolNameBash,
 					runInBackground: in.RunInBackground,
 				}
 			}
-		case "Agent":
+		case toolNameAgent:
 			var in agentInput
 			if err := json.Unmarshal(block.Input, &in); err == nil {
 				runInBackground := true
@@ -518,7 +528,7 @@ func (s *scanState) processAssistantMessage(raw json.RawMessage) {
 				s.toolUses[block.ID] = toolUseInfo{
 					description:     in.Description,
 					detail:          truncate(in.Prompt, maxDetailLen),
-					name:            "Agent",
+					name:            toolNameAgent,
 					runInBackground: runInBackground,
 				}
 			}
@@ -533,7 +543,7 @@ func (s *scanState) processAssistantMessage(raw json.RawMessage) {
 func (s *scanState) captureAssistantText(blocks []contentBlock) {
 	var sb strings.Builder
 	for _, b := range blocks {
-		if b.Type == "text" {
+		if b.Type == contentBlockTypeText {
 			sb.WriteString(b.Text)
 		}
 	}
@@ -574,13 +584,14 @@ func (s *scanState) processUserMessage(raw json.RawMessage, timestamp string) {
 		info, paired := s.toolUses[block.ToolUseID]
 		text := extractBlockText(block.Content)
 		if m := bgIDPattern.FindStringSubmatch(text); m != nil {
-			if paired && info.name == "Bash" && info.runInBackground {
+			if paired && info.name == toolNameBash && info.runInBackground {
 				s.addLiveTask(m[1], TaskBash, timestamp, info, extractOutputFile(bashOutputFilePattern, text))
 				delete(s.toolUses, block.ToolUseID)
 			}
 		}
 		if m := agentIDPattern.FindStringSubmatch(text); m != nil {
-			if paired && info.name == "Agent" && info.runInBackground && strings.Contains(text, asyncAgentAckMarker) {
+			if paired && info.name == toolNameAgent && info.runInBackground &&
+				strings.Contains(text, asyncAgentAckMarker) {
 				s.addLiveTask(m[1], TaskAgent, timestamp, info, extractOutputFile(agentOutputFilePattern, text))
 				delete(s.toolUses, block.ToolUseID)
 			}

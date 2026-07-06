@@ -40,7 +40,7 @@ func Scenarios() []Scenario {
 	chainSizes := []int{1, 3}
 	columns := []int{200, 80}
 
-	var scenarios []Scenario
+	scenarios := make([]Scenario, 0, len(columns)*len(chainSizes)*len(statuses))
 	for _, columnCount := range columns {
 		for _, chainSize := range chainSizes {
 			for _, status := range statuses {

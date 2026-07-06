@@ -49,6 +49,7 @@ func (c *DefaultCommandRunner) Run(command string, args ...string) ([]byte, erro
 // (Process.Kill, since Go 1.20) runs — so the child process is
 // guaranteed to be reaped here; no zombie process can be left behind.
 func (c *DefaultCommandRunner) RunContext(ctx context.Context, command string, args ...string) ([]byte, error) {
+	//nolint:gosec // G204: callers always pass a fixed binary name (git, hostname, ...), never external input
 	cmd := exec.CommandContext(ctx, command, args...)
 	output, err := cmd.Output()
 	if err != nil {

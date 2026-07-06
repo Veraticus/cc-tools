@@ -85,6 +85,7 @@ func RunCommand(name string, args ...string) (string, error) {
 	// context.Background(): this is a quick, bounded tmux query with no
 	// ambient context to propagate from — UserPresent's own contract takes
 	// no context either.
+	//nolint:gosec // G204: only caller is UserPresent, which always passes literal "tmux" + fixed subcommand args
 	out, err := exec.CommandContext(context.Background(), name, args...).Output()
 	return string(out), err
 }

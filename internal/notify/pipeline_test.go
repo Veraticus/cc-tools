@@ -554,8 +554,8 @@ func TestPipeline_Stop_GoalJudge_ParkedUnmet_UnderCap_EmitsBlockAndIncrements(t 
 	}
 
 	state := SessionState{Dir: filepath.Join(p.StateBase, sessionID)}
-	if _, err := os.Stat(filepath.Join(state.Dir, "watchdog.lock")); !os.IsNotExist(err) {
-		t.Errorf("watchdog.lock exists (err=%v), want not armed", err)
+	if _, statErr := os.Stat(filepath.Join(state.Dir, "watchdog.lock")); !os.IsNotExist(statErr) {
+		t.Errorf("watchdog.lock exists (err=%v), want not armed", statErr)
 	}
 	if got := state.GoalBlockCount(goalJudgeTestCondition); got != 1 {
 		t.Errorf("GoalBlockCount() = %d, want 1", got)
@@ -980,8 +980,8 @@ func TestPipeline_Stop_GoalJudge_IncidentDaemon_ParkedUnmet_EmitsBlock(t *testin
 	}
 
 	state := SessionState{Dir: filepath.Join(p.StateBase, sessionID)}
-	if _, err := os.Stat(filepath.Join(state.Dir, "watchdog.lock")); !os.IsNotExist(err) {
-		t.Errorf("watchdog.lock exists (err=%v), want not armed", err)
+	if _, statErr := os.Stat(filepath.Join(state.Dir, "watchdog.lock")); !os.IsNotExist(statErr) {
+		t.Errorf("watchdog.lock exists (err=%v), want not armed", statErr)
 	}
 	if got := state.GoalBlockCount(goalIncidentDaemonCondition); got != 1 {
 		t.Errorf("GoalBlockCount() = %d, want 1", got)

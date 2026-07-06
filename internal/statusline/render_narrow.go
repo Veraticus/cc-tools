@@ -283,7 +283,6 @@ func (s *Statusline) composeNarrowChain(chips []narrowChip) string {
 
 	// Leading LeftCurve in the first chip's FG, terminal-default bg.
 	// chips[0] is safe — guarded by `len(chips) == 0` early-return.
-	//nolint:gosec // G602 false positive: length-checked above
 	first := chips[0]
 	sb.WriteString(s.getColorFG(first.Color))
 	sb.WriteString(LeftCurve)

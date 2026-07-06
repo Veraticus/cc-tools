@@ -569,10 +569,15 @@ func finishSend(
 	return logWatchdogExit(deps, sessionID, exitReason)
 }
 
+// eventWatchdog is the DecisionRecord.Event value for any record logged by
+// the watchdog path (RunWatchdog exits and sends, and the arm-failed record
+// logged when arming fails synchronously).
+const eventWatchdog = "watchdog"
+
 // logWatchdogExit logs the terminal outcome of a RunWatchdog invocation and
 // returns reason, so callers can write "return logWatchdogExit(...)".
 func logWatchdogExit(deps WatchdogDeps, sessionID, reason string) string {
-	deps.Log(DecisionRecord{Time: deps.Now(), SessionID: sessionID, Event: "watchdog", Outcome: reason})
+	deps.Log(DecisionRecord{Time: deps.Now(), SessionID: sessionID, Event: eventWatchdog, Outcome: reason})
 	return reason
 }
 
@@ -585,7 +590,7 @@ func logWatchdogSend(
 	rec := DecisionRecord{
 		Time:      deps.Now(),
 		SessionID: sessionID,
-		Event:     "watchdog",
+		Event:     eventWatchdog,
 		Outcome:   OutcomeSend.String(),
 		Urgency:   n.Urgency,
 		Title:     n.Title,

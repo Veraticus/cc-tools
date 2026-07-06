@@ -127,10 +127,10 @@ func showDebugStatus(ctx context.Context, out *output.Terminal, manager *debug.M
 
 	if enabled {
 		logFile := debug.GetLogFilePath(dir)
-		table.AddRow([]string{"Status", "ENABLED"})
+		table.AddRow([]string{tableColumnStatus, "ENABLED"})
 		table.AddRow([]string{"Log file", logFile})
 	} else {
-		table.AddRow([]string{"Status", "DISABLED"})
+		table.AddRow([]string{tableColumnStatus, "DISABLED"})
 	}
 
 	out.Infof("Debug status for %s:", dir)

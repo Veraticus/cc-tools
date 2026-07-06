@@ -36,6 +36,7 @@ type RealCommandExecutor struct{}
 
 // CommandContext creates a new command using exec.CommandContext.
 func (r *RealCommandExecutor) CommandContext(ctx context.Context, name string, arg ...string) *exec.Cmd {
+	//nolint:gosec // G204: callers pass "claude" plus args built from this tool's own trusted settings.json
 	return exec.CommandContext(ctx, name, arg...)
 }
 
@@ -137,11 +138,10 @@ func (m *Manager) Enable(ctx context.Context, name string) error {
 		return err
 	}
 
-	// Build the claude mcp add command
-	args := []string{"mcp", "add"}
-
-	// Add the name
-	args = append(args, actualName)
+	// Build the claude mcp add command with the server name
+	const argsPrefixCount = 4 // "mcp", "add", actualName, command
+	args := make([]string, 0, argsPrefixCount+len(server.Args))
+	args = append(args, "mcp", "add", actualName)
 
 	// Add the command (expand ~ to home directory)
 	command := server.Command
