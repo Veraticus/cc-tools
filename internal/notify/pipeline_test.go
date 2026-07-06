@@ -68,6 +68,17 @@ const goalJudgeTestCondition = "Continue using gambit:executing-plans until we r
 	"you need my input on. Do not pose false choices; take the next task and iterate on it unless there is " +
 	"a meaningful blockage."
 
+// goalIncidentDaemonCondition is the exact goal condition text baked into the
+// goal_incident_daemon.jsonl fixture's goal_status attachment: it reproduces
+// the July 5 grailquest incident, where a live background-Bash daemon parked
+// under an armed goal caused Claude Code's built-in /goal evaluator to skip
+// re-evaluating the goal forever (it defers whenever a Stop finds a live
+// background task). At 235 bytes it exceeds maxGoalConditionLen, so tests
+// keying off it also exercise the block-reason truncation path.
+const goalIncidentDaemonCondition = "Get the grailquest content daemon (grailquestd-play) running stably on " +
+	"127.0.0.1:8080 serving real content, with the health check passing three times in a row before you stop; " +
+	"if it crashes, restart it and keep going without asking me."
+
 // newGoalTestPipeline builds a Pipeline pointed at a fresh temp state base,
 // with the given dryRun setting (unlike newTestPipeline, which fixes
 // DryRun:true) — goal-judge disposition tests need to exercise the real,
@@ -887,5 +898,155 @@ func TestPipeline_Regression_ComposePath_NonDryRun_StdoutEmpty(t *testing.T) {
 	}
 	if len(sent) != 1 {
 		t.Fatalf("sent = %+v, want exactly one notification (compose path still delivers normally)", sent)
+	}
+}
+
+// TestScanTranscript_GoalIncidentDaemon_LiveBackgroundBashTask is the direct
+// ScanTranscript-level assertion for the grailquest-incident fixture: a goal
+// armed via a sentinel goal_status record, with exactly one live task and no
+// non-sentinel goal_status verdict anywhere in the transcript, registered as
+// a background Bash launch (not an Agent) — the shape that Claude Code's
+// built-in /goal evaluator defers on, which is what stalled the goal in the
+// real incident this fixture reproduces.
+func TestScanTranscript_GoalIncidentDaemon_LiveBackgroundBashTask(t *testing.T) {
+	f := openFixture(t, "goal_incident_daemon.jsonl")
+	res, err := ScanTranscript(f)
+	if err != nil {
+		t.Fatalf("ScanTranscript returned error: %v", err)
+	}
+
+	if res.Goal.Status != GoalActive {
+		t.Errorf("Status = %v, want GoalActive", res.Goal.Status)
+	}
+	if res.Goal.Condition != goalIncidentDaemonCondition {
+		t.Errorf("Condition = %q, want %q", res.Goal.Condition, goalIncidentDaemonCondition)
+	}
+
+	if len(res.LiveTasks) != 1 {
+		t.Fatalf("len(tasks) = %d, want 1 (the parked daemon): %+v", len(res.LiveTasks), res.LiveTasks)
+	}
+	task := res.LiveTasks[0]
+	if task.Kind != TaskBash {
+		t.Errorf("Kind = %v, want TaskBash (a background daemon, not an Agent)", task.Kind)
+	}
+	if task.ID != "bgtaskid001" {
+		t.Errorf("ID = %q, want bgtaskid001", task.ID)
+	}
+	wantDetail := "exec /tmp/grailquestd-play --addr 127.0.0.1:8080 --content content"
+	if task.Detail != wantDetail {
+		t.Errorf("Detail = %q, want %q", task.Detail, wantDetail)
+	}
+}
+
+// TestPipeline_Stop_GoalJudge_IncidentDaemon_ParkedUnmet_EmitsBlock is the
+// e2e half of the grailquest-incident reproduction: ScanTranscript -> Decide
+// -> Pipeline over the real daemon-shaped fixture, asserting the exact
+// Stop-hook block control message a stub judge's "parked, unmet" verdict
+// must produce, byte for byte, exactly as
+// TestPipeline_Stop_GoalJudge_ParkedUnmet_UnderCap_EmitsBlockAndIncrements
+// does for the Agent-task fixture.
+func TestPipeline_Stop_GoalJudge_IncidentDaemon_ParkedUnmet_EmitsBlock(t *testing.T) {
+	stubBin := writeStubClaude(t)
+	const judgeReason = "the daemon is still starting up; health check hasn't passed yet"
+	t.Setenv("STUB_STDOUT", `{"tasks":"parked","goal_met":false,"reason":"`+judgeReason+`"}`)
+
+	var stdout bytes.Buffer
+	var sent []capturedRequest
+	p, logPath := newGoalTestPipeline(t, &stdout, stubBin, neverPresent, false)
+	p.Sender = stubSenderRecording(&sent)
+	transcript := copyFixture(t, "goal_incident_daemon.jsonl")
+
+	sessionID := "sess-incident-daemon-block"
+	in := HookInput{
+		SessionID: sessionID, CWD: "/home/user/project", TranscriptPath: transcript, HookEventName: "Stop",
+	}
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	wantLine, err := json.Marshal(struct {
+		Decision string `json:"decision"`
+		Reason   string `json:"reason"`
+	}{Decision: "block", Reason: truncate(goalIncidentDaemonCondition, maxGoalConditionLen) + " — " + judgeReason})
+	if err != nil {
+		t.Fatalf("marshaling expected line: %v", err)
+	}
+	wantStdout := string(wantLine) + "\n"
+	if stdout.String() != wantStdout {
+		t.Errorf("stdout = %q, want %q", stdout.String(), wantStdout)
+	}
+	if len(sent) != 0 {
+		t.Errorf("sent = %+v, want no notification", sent)
+	}
+
+	state := SessionState{Dir: filepath.Join(p.StateBase, sessionID)}
+	if _, err := os.Stat(filepath.Join(state.Dir, "watchdog.lock")); !os.IsNotExist(err) {
+		t.Errorf("watchdog.lock exists (err=%v), want not armed", err)
+	}
+	if got := state.GoalBlockCount(goalIncidentDaemonCondition); got != 1 {
+		t.Errorf("GoalBlockCount() = %d, want 1", got)
+	}
+
+	recs := readDecisionLog(t, logPath)
+	if len(recs) != 1 || recs[0].Outcome != "block" {
+		t.Fatalf("records = %+v, want one block record", recs)
+	}
+	if !strings.Contains(recs[0].Reason, judgeReason) {
+		t.Errorf("Reason = %q, want judge reason", recs[0].Reason)
+	}
+}
+
+// TestPipeline_Stop_GoalJudge_IncidentDaemon_Pending_SilentAndArms is the
+// pending-disposition variant over the same daemon fixture: tasks=="pending"
+// must stay silent and arm the watchdog instead of blocking, exactly as
+// TestPipeline_Stop_GoalJudge_Pending_SilentAndArms does for the Agent-task
+// fixture.
+func TestPipeline_Stop_GoalJudge_IncidentDaemon_Pending_SilentAndArms(t *testing.T) {
+	stubBin := writeStubClaude(t)
+	const judgeReason = "still waiting for the daemon's startup log line"
+	t.Setenv("STUB_STDOUT", `{"tasks":"pending","goal_met":false,"reason":"`+judgeReason+`"}`)
+
+	var stdout bytes.Buffer
+	var sent []capturedRequest
+	p, logPath := newGoalTestPipeline(t, &stdout, stubBin, neverPresent, false)
+	p.Sender = stubSenderRecording(&sent)
+	transcript := copyFixture(t, "goal_incident_daemon.jsonl")
+
+	sessionID := "sess-incident-daemon-pending"
+	in := HookInput{
+		SessionID: sessionID, CWD: "/home/user/project", TranscriptPath: transcript,
+		HookEventName: "Stop", StopHookActive: true,
+	}
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if stdout.String() != "" {
+		t.Errorf("stdout = %q, want empty (silent, no stdout write)", stdout.String())
+	}
+	if len(sent) != 0 {
+		t.Errorf("sent = %+v, want no notification", sent)
+	}
+
+	state := SessionState{Dir: filepath.Join(p.StateBase, sessionID)}
+	if _, err := os.Stat(filepath.Join(state.Dir, "watchdog.lock")); err != nil {
+		t.Errorf("watchdog.lock missing, want armed: %v", err)
+	}
+	if got := state.GoalBlockCount(goalIncidentDaemonCondition); got != 0 {
+		t.Errorf("GoalBlockCount() = %d, want 0", got)
+	}
+
+	recs := readDecisionLog(t, logPath)
+	if len(recs) != 1 {
+		t.Fatalf("log records = %d, want 1: %+v", len(recs), recs)
+	}
+	if recs[0].Outcome != OutcomeSilent.String() {
+		t.Errorf("Outcome = %q, want silent", recs[0].Outcome)
+	}
+	if !strings.Contains(recs[0].Reason, judgeReason) {
+		t.Errorf("Reason = %q, want it to contain the judge's reason", recs[0].Reason)
+	}
+	if !strings.Contains(recs[0].Reason, "stop_hook_active=true") {
+		t.Errorf("Reason = %q, want it to mention stop_hook_active=true", recs[0].Reason)
 	}
 }

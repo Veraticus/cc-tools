@@ -24,3 +24,13 @@ Two records could not be sourced from any real transcript on this machine
   line is a real `met:false` verdict (halmasuit session
   `3fd16976-f607-4ca9-8de0-a758d44f0b60`) with `"iterations":2` added so the
   scanner's generic iteration-capture path has a fixture to exercise.
+- `goal_incident_daemon.jsonl`: constructed (not sourced from a real
+  transcript) to reproduce the July 5 grailquest incident — a live
+  background-Bash daemon parked under an armed goal, which Claude Code's
+  built-in `/goal` evaluator silently skips re-evaluating whenever a Stop
+  finds a live background task, stalling the goal forever. The Bash
+  `tool_use`/`tool_result` pair mirrors the real background-launch shape
+  from `tasks_live.jsonl` with a daemon-shaped command substituted in place
+  of the original build command; the leading `goal_status` sentinel record
+  mirrors `goal_active_live_tasks.jsonl`'s shape with a condition rewritten
+  to describe the daemon.
