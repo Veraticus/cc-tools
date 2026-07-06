@@ -174,9 +174,9 @@ func TestGitStatus_CorruptCacheReRuns(t *testing.T) {
 
 	// Pre-seed a corrupt cache file at the exact path gitStatus computes
 	// (inside the per-uid subdirectory).
-	root, ok := openGitCacheRoot(cacheDir)
+	root, ok := openCacheRoot(cacheDir)
 	if !ok {
-		t.Fatal("openGitCacheRoot failed in a fresh temp dir")
+		t.Fatal("openCacheRoot failed in a fresh temp dir")
 	}
 	if closeErr := root.Close(); closeErr != nil {
 		t.Fatal(closeErr)
@@ -240,17 +240,17 @@ func TestGitStatus_EmptyCacheDirSkipsDiskEntirely(t *testing.T) {
 
 // --- per-uid cache-dir hardening ------------------------------------------
 
-// gitCacheSubdir mirrors openGitCacheRoot's per-uid path construction
-// for tests that need to inspect or manipulate the directory from
-// outside the root handle.
+// gitCacheSubdir mirrors openCacheRoot's per-uid path construction for
+// tests that need to inspect or manipulate the directory from outside
+// the root handle.
 func gitCacheSubdir(cacheDir string) string {
 	return filepath.Join(cacheDir, "cc-tools-"+strconv.Itoa(os.Getuid()))
 }
 
-func TestOpenGitCacheRoot_CreatesOwnedPrivateSubdir(t *testing.T) {
+func TestOpenCacheRoot_CreatesOwnedPrivateSubdir(t *testing.T) {
 	cacheDir := t.TempDir()
 
-	root, ok := openGitCacheRoot(cacheDir)
+	root, ok := openCacheRoot(cacheDir)
 	if !ok {
 		t.Fatal("expected ok=true in a fresh temp dir")
 	}
@@ -268,7 +268,7 @@ func TestOpenGitCacheRoot_CreatesOwnedPrivateSubdir(t *testing.T) {
 	}
 }
 
-func TestOpenGitCacheRoot_RejectsPlantedSymlink(t *testing.T) {
+func TestOpenCacheRoot_RejectsPlantedSymlink(t *testing.T) {
 	cacheDir := t.TempDir()
 	target := t.TempDir()
 
@@ -278,12 +278,12 @@ func TestOpenGitCacheRoot_RejectsPlantedSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, ok := openGitCacheRoot(cacheDir); ok {
+	if _, ok := openCacheRoot(cacheDir); ok {
 		t.Error("a symlink at the per-uid path must disable caching, got ok=true")
 	}
 }
 
-func TestOpenGitCacheRoot_RejectsWrongMode(t *testing.T) {
+func TestOpenCacheRoot_RejectsWrongMode(t *testing.T) {
 	cacheDir := t.TempDir()
 
 	// A pre-existing per-uid dir with loose permissions (e.g. created
@@ -293,7 +293,7 @@ func TestOpenGitCacheRoot_RejectsWrongMode(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, ok := openGitCacheRoot(cacheDir); ok {
+	if _, ok := openCacheRoot(cacheDir); ok {
 		t.Error("a per-uid dir that isn't mode 0700 must disable caching, got ok=true")
 	}
 }
@@ -301,9 +301,9 @@ func TestOpenGitCacheRoot_RejectsWrongMode(t *testing.T) {
 func TestWriteGitStatusCache_DirSwapCannotRedirectWrite(t *testing.T) {
 	cacheDir := t.TempDir()
 
-	root, ok := openGitCacheRoot(cacheDir)
+	root, ok := openCacheRoot(cacheDir)
 	if !ok {
-		t.Fatal("openGitCacheRoot failed in a fresh temp dir")
+		t.Fatal("openCacheRoot failed in a fresh temp dir")
 	}
 	defer func() { _ = root.Close() }()
 
@@ -322,7 +322,7 @@ func TestWriteGitStatusCache_DirSwapCannotRedirectWrite(t *testing.T) {
 	}
 
 	name := gitStatusCacheName("/some/project")
-	writeGitStatusCache(root, name, gitState{OK: true, Branch: "main"})
+	writeCache(root, name, gitState{OK: true, Branch: "main"})
 
 	if _, err := os.Stat(filepath.Join(target, name)); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("write followed the swapped-in symlink into the attacker-chosen dir (stat err=%v)", err)

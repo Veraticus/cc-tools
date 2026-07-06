@@ -64,9 +64,13 @@ func Scenarios() []Scenario {
 	rlWidths := []int{200, 80, 50}
 	rlStates := []string{"rl-normal", "rl-extra", "rl-cost"}
 
+	// squeezeScenarioCount is the number of squeeze scenarios appended
+	// below: rl-extra's alarm squeeze and rl-cost-squeeze's session-only
+	// degradation.
+	const squeezeScenarioCount = 2
 	scenarios := make(
 		[]Scenario, 0,
-		len(widths)*len(contexts)*len(gitStates)*len(envStates)+len(rlWidths)*len(rlStates)+1,
+		len(widths)*len(contexts)*len(gitStates)*len(envStates)+len(rlWidths)*len(rlStates)+squeezeScenarioCount,
 	)
 	for _, width := range widths {
 		for _, ctx := range contexts {
@@ -88,11 +92,17 @@ func Scenarios() []Scenario {
 		}
 	}
 
-	// Squeeze scenario: just above the narrow threshold, the wide
-	// middle region is too small for the context-element + alarm-chip
-	// cluster, exercising the drop-context/keep-alarm path — the alarm
-	// must survive width pressure that would blank a lesser chip.
-	scenarios = append(scenarios, buildRLScenario(rlSqueezeScenarioWidth, "rl-extra"))
+	// Squeeze scenarios: just above the narrow threshold, the wide
+	// middle region is too small for the context-element + chip
+	// cluster. "rl-extra" exercises the drop-context/keep-alarm path —
+	// the alarm must survive width pressure that would blank a lesser
+	// chip. "rl-cost-squeeze" exercises the transcript-derived cost
+	// chip's session-only degradation step in buildMiddleSection,
+	// rather than the alarm's truncate-in-place path.
+	scenarios = append(scenarios,
+		buildRLScenario(rlSqueezeScenarioWidth, "rl-extra"),
+		buildRLScenario(rlSqueezeScenarioWidth, "rl-cost-squeeze"),
+	)
 
 	return scenarios
 }
@@ -125,6 +135,18 @@ const (
 	rlNormalFiveHourResetIn = 3*time.Hour + 47*time.Minute
 	rlNormalSevenDayResetIn = 2 * 24 * time.Hour
 	rlExtraFiveHourResetIn  = 1 * time.Hour
+
+	// rlCostSessionUSD and rlCostDailyUSD are the fixed transcript-cost
+	// figures the "rl-cost"/"rl-cost-squeeze" scenarios inject via
+	// Dependencies.CostSource.
+	rlCostSessionUSD = 8.89
+	rlCostDailyUSD   = 48.27
+
+	// rlCostFixtureTranscriptPath is a non-empty stub transcript path:
+	// its only purpose is to trigger computeData's transcript-cost
+	// lookup (Input.TranscriptPath != ""). The fixed CostSource never
+	// touches the filesystem, so the value itself is never resolved.
+	rlCostFixtureTranscriptPath = "/home/fixture/.claude/projects/demo/session.jsonl"
 )
 
 // buildRLScenario constructs one Scenario for the rate-limit
@@ -135,8 +157,10 @@ const (
 //   - "rl-extra": five_hour at the alarm threshold (100%, resets in
 //     1h) with a nonzero cost, so both the alarm decision and its
 //     dollar amount are exercised.
-//   - "rl-cost": no rate_limits at all, cost-only, exercising the
-//     cost chip.
+//   - "rl-cost" / "rl-cost-squeeze": no rate_limits at all,
+//     transcript-derived cost-only (a fixed Dependencies.CostSource
+//     plus a non-empty Input.TranscriptPath — see
+//     rlCostFixtureTranscriptPath), exercising the two-part cost chip.
 func buildRLScenario(width int, rlState string) Scenario {
 	name := fmt.Sprintf("w%d_ctx%d_%s", width, rlScenarioCtx, rlState)
 
@@ -146,6 +170,7 @@ func buildRLScenario(width int, rlState string) Scenario {
 	input.Workspace.ProjectDir = scenarioProjectDir
 
 	now := scenarioFixedNow()
+	var costSource func(string) (float64, float64, bool)
 	switch rlState {
 	case "rl-normal":
 		input.RateLimits = &RateLimitsInput{
@@ -166,8 +191,11 @@ func buildRLScenario(width int, rlState string) Scenario {
 			},
 		}
 		input.Cost = CostInput{TotalCostUSD: rlExtraCostUSD}
-	case "rl-cost":
-		input.Cost = CostInput{TotalCostUSD: rlExtraCostUSD}
+	case "rl-cost", "rl-cost-squeeze":
+		input.TranscriptPath = rlCostFixtureTranscriptPath
+		costSource = func(string) (float64, float64, bool) {
+			return rlCostSessionUSD, rlCostDailyUSD, true
+		}
 	}
 
 	fr := newFixedFileReader()
@@ -182,6 +210,7 @@ func buildRLScenario(width int, rlState string) Scenario {
 		CacheDuration: 0,
 		IconIndex:     func(int) int { return 0 },
 		Now:           scenarioFixedNow,
+		CostSource:    costSource,
 	}
 
 	return Scenario{Name: name, Width: width, Input: input, Deps: deps}

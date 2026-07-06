@@ -126,7 +126,7 @@ func TestBuildRateLimitChip_FiveHourOnly(t *testing.T) {
 func TestBuildCostChip_ContainsDollarAmount(t *testing.T) {
 	s := CreateStatusline(&Dependencies{})
 	s.colors = CatppuccinMocha{}
-	chip := s.buildCostChip(CostInput{TotalCostUSD: 4.12})
+	chip := s.buildCostChip(&CachedData{Cost: CostInput{TotalCostUSD: 4.12}})
 	if !strings.Contains(chip, "$4.12") {
 		t.Errorf("chip should contain '$4.12'; got %q", chip)
 	}
@@ -138,9 +138,25 @@ func TestBuildCostChip_ContainsDollarAmount(t *testing.T) {
 func TestBuildCostChip_AlwaysTwoDecimals(t *testing.T) {
 	s := CreateStatusline(&Dependencies{})
 	s.colors = CatppuccinMocha{}
-	chip := s.buildCostChip(CostInput{TotalCostUSD: 4})
+	chip := s.buildCostChip(&CachedData{Cost: CostInput{TotalCostUSD: 4}})
 	if !strings.Contains(chip, "$4.00") {
 		t.Errorf("chip should contain '$4.00'; got %q", chip)
+	}
+}
+
+func TestBuildCostChip_TranscriptTwoPartBody(t *testing.T) {
+	s := CreateStatusline(&Dependencies{})
+	s.colors = CatppuccinMocha{}
+	data := &CachedData{
+		CostFromTranscript: true,
+		SessionCostUSD:     8.89,
+		DailyCostUSD:       48.27,
+	}
+	chip := s.buildCostChip(data)
+	stripped := stripAnsi(chip)
+	want := CostIcon + "$8.89 ∙ $48.27 day"
+	if !strings.Contains(stripped, want) {
+		t.Errorf("chip should contain %q; got %q", want, stripped)
 	}
 }
 
@@ -327,7 +343,7 @@ func TestBuildMiddleSection_DropsContextBeforeChipWhenTight(t *testing.T) {
 	}
 
 	// Wide enough for the chip alone, too narrow for context+chip together.
-	chipOnly := s.buildCostChip(data.Cost)
+	chipOnly := s.buildCostChip(data)
 	chipWidth := runewidth.StringWidth(stripAnsi(chipOnly))
 	tightWidth := chipWidth + 2
 

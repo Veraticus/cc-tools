@@ -107,6 +107,20 @@ type CachedData struct {
 	Cost           CostInput
 	Effort         *EffortInput
 	PR             *PRInput
+
+	// SessionCostUSD and DailyCostUSD are transcript-derived costs
+	// (internal/cost, via a TTL cache) for the current session and for
+	// today respectively. Only meaningful when CostFromTranscript is
+	// true; otherwise the cost chip falls back to Cost.TotalCostUSD.
+	SessionCostUSD float64
+	DailyCostUSD   float64
+	// CostFromTranscript is true when SessionCostUSD/DailyCostUSD were
+	// successfully computed from the transcript (cache hit or a fresh
+	// compute that succeeded). False means transcript-derived cost is
+	// unavailable — TranscriptPath was empty, or the compute/cache path
+	// failed — and the cost chip renders CostInput.TotalCostUSD
+	// instead.
+	CostFromTranscript bool
 }
 
 // Dependencies contains all external dependencies.
@@ -132,6 +146,13 @@ type Dependencies struct {
 	// point of use; scenarios/golden tests inject a fixed function so
 	// rendered output never depends on wall-clock time.
 	Now func() time.Time
+
+	// CostSource returns transcript-derived (session, daily) USD for
+	// the given transcript path. nil (the production default) computes
+	// from the real filesystem through the TTL cache; scenarios/golden
+	// tests inject a fixed function so rendered output never touches
+	// disk.
+	CostSource func(transcriptPath string) (sessionUSD, dailyUSD float64, ok bool)
 }
 
 // FileReader interface for reading files.
@@ -303,7 +324,32 @@ func (s *Statusline) computeData(currentDir string) *CachedData {
 	data.Effort = s.input.Effort
 	data.PR = s.input.PR
 
+	// Transcript-derived session+daily cost. Only attempted when stdin
+	// reported a transcript path; a failure (or no path) leaves
+	// CostFromTranscript false so the cost chip falls back to
+	// data.Cost.TotalCostUSD.
+	if s.input.TranscriptPath != "" {
+		sessionUSD, dailyUSD, ok := s.costSource()(s.input.TranscriptPath)
+		if ok {
+			data.SessionCostUSD = sessionUSD
+			data.DailyCostUSD = dailyUSD
+			data.CostFromTranscript = true
+		}
+	}
+
 	return data
+}
+
+// costSource returns deps.CostSource when injected (scenarios/tests),
+// else the production transcriptCosts path through the TTL cache.
+func (s *Statusline) costSource() func(transcriptPath string) (float64, float64, bool) {
+	if s.deps != nil && s.deps.CostSource != nil {
+		return s.deps.CostSource
+	}
+	return func(transcriptPath string) (float64, float64, bool) {
+		state, ok := transcriptCosts(s.deps.CacheDir, s.deps.CacheDuration, transcriptPath, s.now())
+		return state.SessionUSD, state.DailyUSD, ok
+	}
 }
 
 func (s *Statusline) getGitInfo(dir string) GitInfo {

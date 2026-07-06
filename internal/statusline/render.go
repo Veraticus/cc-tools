@@ -476,7 +476,8 @@ func (s *Statusline) buildMiddleSection(data *CachedData, width int) string {
 		contextEl = s.buildContextElement(data.UsedPercentage)
 	}
 
-	chip := s.buildMiddleChip(middleChipKind(data), data)
+	kind := middleChipKind(data)
+	chip := s.buildMiddleChip(kind, data)
 
 	cluster, clusterWidth := assembleMiddleCluster(contextEl, chip, width)
 	if clusterWidth == 0 {
@@ -486,8 +487,19 @@ func (s *Statusline) buildMiddleSection(data *CachedData, width int) string {
 		// assembleMiddleCluster already dropped the context element, so
 		// the chip alone doesn't fit. The rate-limit/cost chips blank
 		// under this pressure; the alarm never does — it degrades.
-		if middleChipKind(data) == chipAlarm {
+		if kind == chipAlarm {
 			return s.buildSqueezedAlarmChip(data.Cost, width)
+		}
+		if kind == chipCost && data.CostFromTranscript {
+			// The full two-part body doesn't fit — retry with the
+			// session-only single-figure body before giving up and
+			// blanking, still through assembleMiddleCluster so the
+			// context element can also drop.
+			sessionOnlyChip := s.buildSessionOnlyCostChip(data)
+			sessionCluster, sessionClusterWidth := assembleMiddleCluster(contextEl, sessionOnlyChip, width)
+			if sessionClusterWidth > 0 && width >= sessionClusterWidth {
+				return s.centerElement(sessionCluster, sessionClusterWidth, width)
+			}
 		}
 		return strings.Repeat(" ", width)
 	}
@@ -544,7 +556,9 @@ const (
 // rate-limit chip; rate-limits, when reported at all, always win over
 // the cost-only chip (RateLimits is nil precisely when the session
 // isn't a subscription session, per statusline.go's Input.RateLimits
-// doc comment).
+// doc comment). The cost chip renders on either a nonzero stdin
+// TotalCostUSD or a successfully computed transcript-derived session
+// cost — whichever is available.
 func middleChipKind(data *CachedData) chipKind {
 	if data.RateLimits != nil {
 		if data.RateLimits.FiveHour != nil && data.RateLimits.FiveHour.UsedPercentage >= 100 {
@@ -552,7 +566,7 @@ func middleChipKind(data *CachedData) chipKind {
 		}
 		return chipRateLimit
 	}
-	if data.Cost.TotalCostUSD > 0 {
+	if data.Cost.TotalCostUSD > 0 || (data.CostFromTranscript && data.SessionCostUSD > 0) {
 		return chipCost
 	}
 	return chipNone
@@ -567,7 +581,7 @@ func (s *Statusline) buildMiddleChip(kind chipKind, data *CachedData) string {
 	case chipRateLimit:
 		return s.buildRateLimitChip(data.RateLimits, s.now())
 	case chipCost:
-		return s.buildCostChip(data.Cost)
+		return s.buildCostChip(data)
 	case chipNone:
 		return ""
 	default:
@@ -698,11 +712,38 @@ func (s *Statusline) buildRateLimitChip(rl *RateLimitsInput, now time.Time) stri
 	return s.buildPowerlineChip(buildRateLimitBody(rl, now), colorSapphire)
 }
 
-// buildCostChip renders the cost powerline chip (`CostIcon $X.XX`, two
-// decimals always) on a sapphire background.
-func (s *Statusline) buildCostChip(cost CostInput) string {
-	body := fmt.Sprintf("%s$%.2f", CostIcon, cost.TotalCostUSD)
+// legacyCostChipBody renders the single-figure cost chip body
+// (`CostIcon $X.XX`, two decimals always) used both as the
+// stdin-cost fallback and as the session-only degraded body when the
+// full two-part transcript body doesn't fit.
+func legacyCostChipBody(amountUSD float64) string {
+	return fmt.Sprintf("%s$%.2f", CostIcon, amountUSD)
+}
+
+// transcriptCostChipBody renders the two-part transcript-derived cost
+// chip body: `CostIcon $<session> ∙ $<day> day`.
+func transcriptCostChipBody(sessionUSD, dailyUSD float64) string {
+	return fmt.Sprintf("%s$%.2f ∙ $%.2f day", CostIcon, sessionUSD, dailyUSD)
+}
+
+// buildCostChip renders the cost powerline chip on a sapphire
+// background. When data.CostFromTranscript, the body is the two-part
+// `$<session> ∙ $<day> day` figure; otherwise it's the legacy
+// single-figure stdin-cost body.
+func (s *Statusline) buildCostChip(data *CachedData) string {
+	body := legacyCostChipBody(data.Cost.TotalCostUSD)
+	if data.CostFromTranscript {
+		body = transcriptCostChipBody(data.SessionCostUSD, data.DailyCostUSD)
+	}
 	return s.buildPowerlineChip(body, colorSapphire)
+}
+
+// buildSessionOnlyCostChip renders the session-only degraded cost chip
+// body (`CostIcon $<session>`) used when the full two-part transcript
+// body doesn't fit the available width — see buildMiddleSection's
+// width-degradation step.
+func (s *Statusline) buildSessionOnlyCostChip(data *CachedData) string {
+	return s.buildPowerlineChip(legacyCostChipBody(data.SessionCostUSD), colorSapphire)
 }
 
 // alarmChipBody is the alarm chip's text content, shared by the
