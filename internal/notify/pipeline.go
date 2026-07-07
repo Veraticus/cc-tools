@@ -116,9 +116,10 @@ func (p Pipeline) Run(ctx context.Context, in HookInput) error {
 	}
 
 	env := Env{
-		UserPresent:     p.Present(p.Environ, now),
-		SinceLastNotify: state.SinceLastNotify(now),
-		Broadcast:       p.broadcastFacts(in, now),
+		UserPresent:         p.Present(p.Environ, now),
+		SinceLastNotify:     state.SinceLastNotify(now),
+		SinceLastNotifySame: state.SinceLastNotifySame(now, in.Message),
+		Broadcast:           p.broadcastFacts(in, now),
 	}
 	d := Decide(in, res, env)
 
@@ -204,7 +205,7 @@ func (p Pipeline) handleSend(
 
 	sendSuffix := p.deliver(ctx, n)
 	if !p.DryRun {
-		_ = state.MarkNotified(now)
+		_ = state.MarkNotified(now, n.Body)
 	}
 	p.logRecord(in, now, DecisionRecord{
 		Outcome: OutcomeSend.String(), Reason: d.Reason + reasonSuffix + sendSuffix,
@@ -302,7 +303,7 @@ func (p Pipeline) handleComposeVerdict(
 
 	sendSuffix := p.deliver(ctx, n)
 	if !p.DryRun {
-		_ = state.MarkNotified(now)
+		_ = state.MarkNotified(now, n.Body)
 	}
 	p.logJudged(
 		in, now, OutcomeSend.String(),
@@ -385,7 +386,7 @@ func (p Pipeline) handleDecideVerdict(
 		n := Notification{Title: project + " · " + locus, Body: body, Urgency: UrgencyInfo}
 		sendSuffix := p.deliver(ctx, n)
 		if !p.DryRun {
-			_ = state.MarkNotified(now)
+			_ = state.MarkNotified(now, n.Body)
 		}
 		p.logJudged(
 			in, now, OutcomeSend.String(), d.Reason+reasonSuffix+sendSuffix, n, JudgeModeDecide, jerr, digest, judgeMs,
@@ -435,7 +436,7 @@ func (p Pipeline) handleDecideVerdict(
 	n := Notification{Title: project + " · " + verdict.Task, Body: verdict.Body, Urgency: verdict.Urgency}
 	sendSuffix := p.deliver(ctx, n)
 	if !p.DryRun {
-		_ = state.MarkNotified(now)
+		_ = state.MarkNotified(now, n.Body)
 	}
 	p.logJudged(
 		in, now, OutcomeSend.String(),
@@ -548,7 +549,7 @@ func (p Pipeline) handleGoalParkedUnmet(
 		n := Notification{Title: project + " · goal stalled", Body: verdict.Reason, Urgency: UrgencyBlocked}
 		sendSuffix := p.deliver(ctx, n)
 		if !p.DryRun {
-			_ = state.MarkNotified(now)
+			_ = state.MarkNotified(now, n.Body)
 			_ = state.SetGoalBlockCount(goal.Condition, 0)
 		}
 		p.logGoalJudged(in, now, OutcomeSend.String(), reason+sendSuffix, n, nil, digest, judgeMs)
@@ -592,7 +593,7 @@ func (p Pipeline) handleGoalParkedMet(
 	n := Notification{Title: project + " · goal complete", Body: verdict.Reason, Urgency: UrgencyDone}
 	sendSuffix := p.deliver(ctx, n)
 	if !p.DryRun {
-		_ = state.MarkNotified(now)
+		_ = state.MarkNotified(now, n.Body)
 		_ = state.SetGoalBlockCount(goal.Condition, 0)
 	}
 	reason := verdict.Reason + reasonSuffix + stopHookActiveSuffix(in.StopHookActive) + sendSuffix +

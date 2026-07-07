@@ -13,6 +13,15 @@ import (
 // would get pinged twice for one idle turn.
 const dedupeWindow = 90 * time.Second
 
+// blockedRepeatWindow suppresses a second permission_prompt or
+// agent_needs_input notification within this long of an identical previous
+// one for the same session. Blocked-tier events are otherwise presence-blind
+// and dedupe-blind by design (a blocked session needs attention regardless
+// of pane focus), so this is scoped to content identity only: a session
+// asking the exact same thing every poll cycle gets pinged once, but a
+// DIFFERENT message always sends immediately.
+const blockedRepeatWindow = 5 * time.Minute
+
 // Outcome is what Decide resolved to do with a hook event.
 type Outcome int
 
@@ -113,7 +122,13 @@ type Decision struct {
 type Env struct {
 	UserPresent     bool
 	SinceLastNotify time.Duration
-	Broadcast       *BroadcastFacts
+	// SinceLastNotifySame is how long ago this session last sent the
+	// current Notification event's message verbatim (negative when never,
+	// or the last send differed) — computed by the pipeline via
+	// SessionState.SinceLastNotifySame against the raw incoming message.
+	// Consumed by the blocked-tier identical-repeat gates.
+	SinceLastNotifySame time.Duration
+	Broadcast           *BroadcastFacts
 }
 
 // Decide is the pure decision core for the notification hook: given the raw
@@ -177,12 +192,17 @@ func decideStop(scan ScanResult, env Env) Decision {
 
 // decideNotification handles the Notification event's gates, branching on
 // NotificationType. permission_prompt and agent_needs_input are
-// blocked-tier: they skip presence and dedupe suppression entirely, because
-// a blocked session needs the user's attention regardless of which tmux
-// pane (if any) currently has focus.
+// blocked-tier: they skip presence and idle-dedupe suppression entirely,
+// because a blocked session needs the user's attention regardless of which
+// tmux pane (if any) currently has focus. They do still gate on
+// blockedRepeatWindow — an identical repeat of the exact same blocked ping —
+// since that is a content-identity check, not a presence or staleness one.
 func decideNotification(in HookInput, scan ScanResult, env Env) Decision {
 	switch in.NotificationType {
 	case "permission_prompt":
+		if s := suppressBlockedRepeat(env); s != nil {
+			return *s
+		}
 		return Decision{
 			Outcome: OutcomeSend, Urgency: UrgencyBlocked,
 			Message: in.Message, Reason: "permission prompt",
@@ -205,6 +225,9 @@ func decideNotification(in HookInput, scan ScanResult, env Env) Decision {
 
 	case notifTypeAgentNeedsInput:
 		if s := suppressBroadcast(env); s != nil {
+			return *s
+		}
+		if s := suppressBlockedRepeat(env); s != nil {
 			return *s
 		}
 		return Decision{
@@ -232,6 +255,22 @@ func decideNotification(in HookInput, scan ScanResult, env Env) Decision {
 			Reason:  fmt.Sprintf("unhandled notification type: %s", in.NotificationType),
 		}
 	}
+}
+
+// suppressBlockedRepeat returns the silent Decision a blocked-tier
+// notification (permission_prompt, agent_needs_input) resolves to when this
+// session already sent this exact message within blockedRepeatWindow — nil
+// when the event should proceed to its own send gate. Checked after
+// suppressBroadcast for agent_needs_input, so a broadcast-claim suppression
+// always wins first.
+func suppressBlockedRepeat(env Env) *Decision {
+	if env.SinceLastNotifySame >= 0 && env.SinceLastNotifySame < blockedRepeatWindow {
+		return &Decision{
+			Outcome: OutcomeSilent,
+			Reason:  fmt.Sprintf("dedupe: identical ping %s ago", humanDuration(env.SinceLastNotifySame)),
+		}
+	}
+	return nil
 }
 
 // suppressBroadcast returns the silent Decision a broadcast event resolves

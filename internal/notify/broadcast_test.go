@@ -39,10 +39,10 @@ func TestClaimBroadcast_FirstClaimWinsSecondLoses(t *testing.T) {
 	base := t.TempDir()
 	now := time.Now()
 
-	if !claimBroadcast(base, "agent_needs_input\nmsg", now, false) {
+	if !claimBroadcast(base, "agent_needs_input\nmsg", broadcastClaimWindow, now, false) {
 		t.Fatal("first claim = false, want true")
 	}
-	if claimBroadcast(base, "agent_needs_input\nmsg", now.Add(time.Second), false) {
+	if claimBroadcast(base, "agent_needs_input\nmsg", broadcastClaimWindow, now.Add(time.Second), false) {
 		t.Fatal("second claim within window = true, want false")
 	}
 }
@@ -51,10 +51,10 @@ func TestClaimBroadcast_DistinctKeysBothWin(t *testing.T) {
 	base := t.TempDir()
 	now := time.Now()
 
-	if !claimBroadcast(base, "agent_needs_input\njob A asks", now, false) {
+	if !claimBroadcast(base, "agent_needs_input\njob A asks", broadcastClaimWindow, now, false) {
 		t.Fatal("claim A = false, want true")
 	}
-	if !claimBroadcast(base, "agent_needs_input\njob B asks", now, false) {
+	if !claimBroadcast(base, "agent_needs_input\njob B asks", broadcastClaimWindow, now, false) {
 		t.Fatal("claim B = false, want true")
 	}
 }
@@ -63,10 +63,10 @@ func TestClaimBroadcast_StaleClaimIsReclaimed(t *testing.T) {
 	base := t.TempDir()
 	now := time.Now()
 
-	if !claimBroadcast(base, "k", now, false) {
+	if !claimBroadcast(base, "k", broadcastClaimWindow, now, false) {
 		t.Fatal("initial claim = false, want true")
 	}
-	if !claimBroadcast(base, "k", now.Add(broadcastClaimWindow+time.Second), false) {
+	if !claimBroadcast(base, "k", broadcastClaimWindow, now.Add(broadcastClaimWindow+time.Second), false) {
 		t.Fatal("claim after window = false, want true (stale claim should be reclaimed)")
 	}
 }
@@ -75,17 +75,75 @@ func TestClaimBroadcast_DryRunObservesWithoutWriting(t *testing.T) {
 	base := t.TempDir()
 	now := time.Now()
 
-	if !claimBroadcast(base, "k", now, true) {
+	if !claimBroadcast(base, "k", broadcastClaimWindow, now, true) {
 		t.Fatal("dry-run claim with no live claim = false, want true")
 	}
 	// The dry run must not have written anything: a subsequent real claim
 	// still wins.
-	if !claimBroadcast(base, "k", now, false) {
+	if !claimBroadcast(base, "k", broadcastClaimWindow, now, false) {
 		t.Fatal("real claim after dry run = false, want true (dry run must not write)")
 	}
 	// And a dry run against a live real claim reports the dedupe.
-	if claimBroadcast(base, "k", now.Add(time.Second), true) {
+	if claimBroadcast(base, "k", broadcastClaimWindow, now.Add(time.Second), true) {
 		t.Fatal("dry-run claim against live claim = true, want false")
+	}
+}
+
+func TestClaimBroadcast_AgentCompletedWindowOutlivesAgentNeedsInputWindow(t *testing.T) {
+	base := t.TempDir()
+	now := time.Now()
+
+	if !claimBroadcast(base, "agent_completed\nfinished", claimWindowFor(notifTypeAgentCompleted), now, false) {
+		t.Fatal("initial claim = false, want true")
+	}
+	// Past the agent_needs_input window (2m) but still well inside the
+	// agent_completed window (30m): a re-broadcast of the same "job
+	// finished" message must still be suppressed.
+	past := now.Add(broadcastClaimWindow + time.Minute)
+	if claimBroadcast(base, "agent_completed\nfinished", claimWindowFor(notifTypeAgentCompleted), past, false) {
+		t.Fatal("reclaim at 3m = true, want false (agent_completed window is 30m)")
+	}
+	// Past the agent_completed window: the claim is stale and reclaimed.
+	stale := now.Add(broadcastClaimWindowCompleted + time.Minute)
+	if !claimBroadcast(base, "agent_completed\nfinished", claimWindowFor(notifTypeAgentCompleted), stale, false) {
+		t.Fatal("reclaim past 30m = false, want true (stale claim should be reclaimed)")
+	}
+}
+
+func TestClaimWindowFor_PerNotificationType(t *testing.T) {
+	if got := claimWindowFor(notifTypeAgentCompleted); got != broadcastClaimWindowCompleted {
+		t.Errorf("claimWindowFor(agent_completed) = %v, want %v", got, broadcastClaimWindowCompleted)
+	}
+	if got := claimWindowFor(notifTypeAgentNeedsInput); got != broadcastClaimWindow {
+		t.Errorf("claimWindowFor(agent_needs_input) = %v, want %v", got, broadcastClaimWindow)
+	}
+}
+
+func TestSweepBroadcastClaims_NeverRemovesLiveAgentCompletedClaim(t *testing.T) {
+	base := t.TempDir()
+	now := time.Now()
+
+	if !claimBroadcast(base, "agent_completed\nfinished", claimWindowFor(notifTypeAgentCompleted), now, false) {
+		t.Fatal("claiming: want true")
+	}
+	dir := filepath.Join(base, broadcastClaimsDirName)
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("claims dir entries = %d (%v), want 1", len(entries), err)
+	}
+	claim := filepath.Join(dir, entries[0].Name())
+	// Backdate the claim to 20 minutes old: within the 30m agent_completed
+	// window but past a naive TTL, to prove the sweep TTL itself (not just
+	// the claim-window check) respects the longer window.
+	past := now.Add(-20 * time.Minute)
+	if chErr := os.Chtimes(claim, past, past); chErr != nil {
+		t.Fatalf("backdating claim: %v", chErr)
+	}
+
+	sweepBroadcastClaims(dir, now)
+
+	if _, statErr := os.Stat(claim); statErr != nil {
+		t.Fatalf("live agent_completed claim was swept early: %v", statErr)
 	}
 }
 
@@ -93,7 +151,7 @@ func TestSweepBroadcastClaims_RemovesOnlyExpired(t *testing.T) {
 	base := t.TempDir()
 	now := time.Now()
 
-	if !claimBroadcast(base, "old", now, false) {
+	if !claimBroadcast(base, "old", broadcastClaimWindow, now, false) {
 		t.Fatal("claiming old: want true")
 	}
 	dir := filepath.Join(base, broadcastClaimsDirName)
@@ -108,7 +166,7 @@ func TestSweepBroadcastClaims_RemovesOnlyExpired(t *testing.T) {
 	}
 
 	// A fresh claim's sweep removes the expired one and keeps itself.
-	if !claimBroadcast(base, "new", now, false) {
+	if !claimBroadcast(base, "new", broadcastClaimWindow, now, false) {
 		t.Fatal("claiming new: want true")
 	}
 	entries, err = os.ReadDir(dir)
@@ -189,7 +247,7 @@ func TestBroadcastFacts_CoveredBySourceJobSend(t *testing.T) {
 	writeJobState(t, cfg, "job00001", "deploy the widget", "job-session-id", "/projects/widget")
 
 	source := SessionState{Dir: filepath.Join(base, "job-session-id")}
-	if err := source.MarkNotified(now.Add(-2 * time.Second)); err != nil {
+	if err := source.MarkNotified(now.Add(-2*time.Second), "deploying now"); err != nil {
 		t.Fatalf("marking source session notified: %v", err)
 	}
 

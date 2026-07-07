@@ -154,7 +154,7 @@ func TestPipeline_SessionEnd_ReapsExistingStateDir(t *testing.T) {
 
 	sessionID := "sess-end-1"
 	state := SessionState{Dir: filepath.Join(p.StateBase, sessionID)}
-	if err := state.MarkNotified(time.Now()); err != nil {
+	if err := state.MarkNotified(time.Now(), "prior"); err != nil {
 		t.Fatalf("MarkNotified: %v", err)
 	}
 	if _, err := os.Stat(state.Dir); err != nil {
@@ -437,7 +437,7 @@ func TestPipeline_IdlePrompt_DedupeWindow_Silent(t *testing.T) {
 
 	sessionID := "sess-7"
 	state := SessionState{Dir: filepath.Join(p.StateBase, sessionID)}
-	if err := state.MarkNotified(time.Now().Add(-30 * time.Second)); err != nil {
+	if err := state.MarkNotified(time.Now().Add(-30*time.Second), "prior"); err != nil {
 		t.Fatalf("MarkNotified: %v", err)
 	}
 
@@ -458,6 +458,61 @@ func TestPipeline_IdlePrompt_DedupeWindow_Silent(t *testing.T) {
 	}
 	if !strings.Contains(recs[0].Reason, "dedupe") {
 		t.Errorf("Reason = %q, want dedupe reason", recs[0].Reason)
+	}
+}
+
+// TestPipeline_PermissionPrompt_IdenticalRepeat_SecondIsSilent is the
+// end-to-end version of the blockedRepeatWindow gate: two identical
+// permission_prompt events for the same session, roughly a minute apart,
+// must produce exactly one send followed by one silent (dedupe) record —
+// the real-world storm being fixed is "Claude needs your permission" firing
+// 3x in 9 minutes with identical text.
+func TestPipeline_PermissionPrompt_IdenticalRepeat_SecondIsSilent(t *testing.T) {
+	stubBin := writeStubClaude(t)
+	var stdout bytes.Buffer
+	var sent []capturedRequest
+	p, logPath := newGoalTestPipeline(t, &stdout, stubBin, neverPresent, false)
+	p.Sender = stubSenderRecording(&sent)
+
+	sessionID := "sess-perm-repeat"
+	in := HookInput{
+		SessionID: sessionID, CWD: "/home/user/project", TranscriptPath: "/nonexistent",
+		HookEventName: "Notification", NotificationType: "permission_prompt",
+		Message: "Claude needs permission to run rm",
+	}
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if len(sent) != 1 {
+		t.Fatalf("sent = %+v, want exactly one notification on first ping", sent)
+	}
+
+	// Backdate the recorded send to simulate the second identical ping
+	// arriving roughly a minute later — well inside blockedRepeatWindow.
+	state := SessionState{Dir: filepath.Join(p.StateBase, sessionID)}
+	if err := state.MarkNotified(time.Now().Add(-1*time.Minute), in.Message); err != nil {
+		t.Fatalf("backdating MarkNotified: %v", err)
+	}
+
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if len(sent) != 1 {
+		t.Errorf("sent = %+v, want still exactly one notification (second identical ping suppressed)", sent)
+	}
+	recs := readDecisionLog(t, logPath)
+	if len(recs) != 2 {
+		t.Fatalf("log records = %d, want 2 (one send, one silent)", len(recs))
+	}
+	if recs[0].Outcome != OutcomeSend.String() {
+		t.Errorf("first record Outcome = %q, want send", recs[0].Outcome)
+	}
+	if recs[1].Outcome != OutcomeSilent.String() {
+		t.Errorf("second record Outcome = %q, want silent", recs[1].Outcome)
+	}
+	if !strings.Contains(recs[1].Reason, "dedupe: identical ping") {
+		t.Errorf("second record Reason = %q, want identical-ping dedupe reason", recs[1].Reason)
 	}
 }
 
@@ -1130,7 +1185,7 @@ func TestPipeline_Stop_ComposeJudgeError_SuppressedWithinFailOpenWindow(t *testi
 
 	sessionID := "sess-compose-suppressed"
 	state := SessionState{Dir: filepath.Join(p.StateBase, sessionID)}
-	if err := state.MarkNotified(time.Now().Add(-2 * time.Minute)); err != nil {
+	if err := state.MarkNotified(time.Now().Add(-2*time.Minute), "prior"); err != nil {
 		t.Fatalf("MarkNotified: %v", err)
 	}
 
@@ -1211,7 +1266,7 @@ func TestPipeline_Stop_DecideJudgeError_SuppressedWithinFailOpenWindow_NoSend(t 
 	sessionID := "sess-decide-suppressed"
 	state := SessionState{Dir: filepath.Join(p.StateBase, sessionID)}
 	notifiedAt := time.Now().Add(-3 * time.Minute)
-	if err := state.MarkNotified(notifiedAt); err != nil {
+	if err := state.MarkNotified(notifiedAt, "prior"); err != nil {
 		t.Fatalf("MarkNotified: %v", err)
 	}
 
@@ -1260,7 +1315,7 @@ func TestPipeline_Stop_DecideJudgeError_AfterFailOpenWindow_SendsAgain(t *testin
 
 	sessionID := "sess-decide-after-window"
 	state := SessionState{Dir: filepath.Join(p.StateBase, sessionID)}
-	if err := state.MarkNotified(time.Now().Add(-11 * time.Minute)); err != nil {
+	if err := state.MarkNotified(time.Now().Add(-11*time.Minute), "prior"); err != nil {
 		t.Fatalf("MarkNotified: %v", err)
 	}
 

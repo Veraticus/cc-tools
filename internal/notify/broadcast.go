@@ -22,11 +22,18 @@ import (
 
 const (
 	// broadcastClaimWindow is how long a claim suppresses identical
-	// broadcasts from other sessions. Duplicates of one event land within
-	// ~seconds of each other; a genuinely new event with identical text
-	// (the same job asking the same generic question again) is minutes
-	// away at the earliest.
+	// agent_needs_input broadcasts from other sessions. Duplicates of one
+	// event land within ~seconds of each other; a genuinely new event with
+	// identical text (the same job asking the same generic question again)
+	// is minutes away at the earliest.
 	broadcastClaimWindow = 2 * time.Minute
+
+	// broadcastClaimWindowCompleted is broadcastClaimWindow's agent_completed
+	// counterpart: a finished background job's harness-emitted "job
+	// finished" broadcast has been observed re-firing for tens of minutes
+	// after the job actually stopped, so its claim window is far wider than
+	// agent_needs_input's.
+	broadcastClaimWindowCompleted = 30 * time.Minute
 
 	// broadcastCoveredWindow is how recently the source job's own session
 	// must have sent for the broadcast to be considered covered. The job's
@@ -36,14 +43,27 @@ const (
 	broadcastCoveredWindow = 60 * time.Second
 
 	// broadcastClaimTTL is when an old claim file becomes garbage to
-	// opportunistically sweep.
-	broadcastClaimTTL = 15 * time.Minute
+	// opportunistically sweep. It must stay >= the largest claim window
+	// (broadcastClaimWindowCompleted) — sweeping a claim before its own
+	// window elapses would let a still-live agent_completed claim get swept
+	// and re-claimed, defeating the dedupe it exists to provide.
+	broadcastClaimTTL = broadcastClaimWindowCompleted
 
 	// maxJobStateBytes bounds the read of a job's state.json — the fields
 	// wanted here are near the front of a small file; anything bigger is
 	// not a job state file.
 	maxJobStateBytes = 256 * 1024
 )
+
+// claimWindowFor returns how long a claim suppresses identical broadcasts
+// for notificationType: see broadcastClaimWindow and
+// broadcastClaimWindowCompleted.
+func claimWindowFor(notificationType string) time.Duration {
+	if notificationType == notifTypeAgentCompleted {
+		return broadcastClaimWindowCompleted
+	}
+	return broadcastClaimWindow
+}
 
 // broadcastClaimsDirName is the ledger directory inside StateBase, a
 // sibling of the per-session state directories.
@@ -99,7 +119,7 @@ func (p Pipeline) broadcastFacts(in HookInput, now time.Time) *BroadcastFacts {
 
 	facts := &BroadcastFacts{}
 	key := in.NotificationType + "\n" + in.Message
-	facts.Duplicate = !claimBroadcast(p.StateBase, key, now, p.DryRun)
+	facts.Duplicate = !claimBroadcast(p.StateBase, key, claimWindowFor(in.NotificationType), now, p.DryRun)
 
 	job, ok := resolveBroadcastSource(jobsDir(p.Environ), in.Message)
 	if !ok {
@@ -117,17 +137,17 @@ func (p Pipeline) broadcastFacts(in HookInput, now time.Time) *BroadcastFacts {
 // claimBroadcast atomically claims the broadcast identified by key and
 // reports whether this process won. The claim is a content-hash-named file
 // created with O_EXCL, so exactly one of N concurrent hook processes
-// succeeds; a claim older than broadcastClaimWindow is stale (a previous,
-// distinct event) and is removed and re-claimed. dryRun observes without
-// writing and wins whenever no live claim exists.
-func claimBroadcast(stateBase, key string, now time.Time, dryRun bool) bool {
+// succeeds; a claim older than window is stale (a previous, distinct event)
+// and is removed and re-claimed. dryRun observes without writing and wins
+// whenever no live claim exists.
+func claimBroadcast(stateBase, key string, window time.Duration, now time.Time, dryRun bool) bool {
 	sum := sha256.Sum256([]byte(key))
 	dir := filepath.Join(stateBase, broadcastClaimsDirName)
 	path := filepath.Join(dir, hex.EncodeToString(sum[:12]))
 
 	if dryRun {
 		fi, err := os.Stat(path)
-		return err != nil || now.Sub(fi.ModTime()) >= broadcastClaimWindow
+		return err != nil || now.Sub(fi.ModTime()) >= window
 	}
 
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -150,7 +170,7 @@ func claimBroadcast(stateBase, key string, now time.Time, dryRun bool) bool {
 			// removed by a peer); retry the create.
 			continue
 		}
-		if now.Sub(fi.ModTime()) < broadcastClaimWindow {
+		if now.Sub(fi.ModTime()) < window {
 			return false
 		}
 		// Stale claim from an earlier event: remove and retry. If a peer

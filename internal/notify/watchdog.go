@@ -564,7 +564,7 @@ func finishSend(
 ) string {
 	_ = deps.Send(ctx, n)
 	logWatchdogSend(deps, sessionID, n, mode, judgeErr, digest)
-	_ = st.MarkNotified(now)
+	_ = st.MarkNotified(now, n.Body)
 	removeLock(lockPath)
 	return logWatchdogExit(deps, sessionID, exitReason)
 }

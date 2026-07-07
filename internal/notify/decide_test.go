@@ -88,7 +88,7 @@ func TestDecide(t *testing.T) {
 				Message: "allow this?",
 			},
 			scan: ScanResult{},
-			env:  Env{},
+			env:  Env{SinceLastNotifySame: neverNotified},
 			want: Decision{
 				Outcome: OutcomeSend, Urgency: UrgencyBlocked,
 				Message: "allow this?", Reason: "permission prompt",
@@ -129,7 +129,7 @@ func TestDecide(t *testing.T) {
 				Message: "need a decision",
 			},
 			scan: ScanResult{},
-			env:  Env{UserPresent: true, SinceLastNotify: 1 * time.Second},
+			env:  Env{UserPresent: true, SinceLastNotify: 1 * time.Second, SinceLastNotifySame: neverNotified},
 			want: Decision{
 				Outcome: OutcomeSend, Urgency: UrgencyBlocked,
 				Message: "need a decision", Reason: "background session needs input",
@@ -185,7 +185,7 @@ func TestDecide(t *testing.T) {
 				Message: "need a decision",
 			},
 			scan: ScanResult{},
-			env:  Env{Broadcast: &BroadcastFacts{JobProject: "widget"}},
+			env:  Env{Broadcast: &BroadcastFacts{JobProject: "widget"}, SinceLastNotifySame: neverNotified},
 			want: Decision{
 				Outcome: OutcomeSend, Urgency: UrgencyBlocked,
 				Message: "need a decision", Reason: "background session needs input",
@@ -200,6 +200,93 @@ func TestDecide(t *testing.T) {
 			},
 			scan: ScanResult{},
 			env:  Env{Broadcast: &BroadcastFacts{Duplicate: true}},
+			want: Decision{Outcome: OutcomeSilent, Reason: "dedupe: broadcast claimed by another session"},
+		},
+
+		// --- blocked-tier identical-repeat dedupe (blockedRepeatWindow) ---
+		{
+			name: "permission prompt identical repeat within window is silent",
+			in: HookInput{
+				HookEventName: "Notification", NotificationType: "permission_prompt",
+				Message: "allow this?",
+			},
+			scan: ScanResult{},
+			env:  Env{SinceLastNotifySame: 3 * time.Minute},
+			want: Decision{Outcome: OutcomeSilent, Reason: "dedupe: identical ping 3m0s ago"},
+		},
+		{
+			name: "permission prompt different message sends despite recent identical elsewhere",
+			in: HookInput{
+				HookEventName: "Notification", NotificationType: "permission_prompt",
+				Message: "allow this other thing?",
+			},
+			scan: ScanResult{},
+			env:  Env{SinceLastNotifySame: neverNotified},
+			want: Decision{
+				Outcome: OutcomeSend, Urgency: UrgencyBlocked,
+				Message: "allow this other thing?", Reason: "permission prompt",
+			},
+		},
+		{
+			name: "permission prompt identical repeat past window sends",
+			in: HookInput{
+				HookEventName: "Notification", NotificationType: "permission_prompt",
+				Message: "allow this?",
+			},
+			scan: ScanResult{},
+			env:  Env{SinceLastNotifySame: blockedRepeatWindow},
+			want: Decision{
+				Outcome: OutcomeSend, Urgency: UrgencyBlocked,
+				Message: "allow this?", Reason: "permission prompt",
+			},
+		},
+		{
+			name: "agent needs input identical repeat within window is silent",
+			in: HookInput{
+				HookEventName: "Notification", NotificationType: "agent_needs_input",
+				Message: "need a decision",
+			},
+			scan: ScanResult{},
+			env:  Env{SinceLastNotifySame: 2 * time.Minute},
+			want: Decision{Outcome: OutcomeSilent, Reason: "dedupe: identical ping 2m0s ago"},
+		},
+		{
+			name: "agent needs input different message sends",
+			in: HookInput{
+				HookEventName: "Notification", NotificationType: "agent_needs_input",
+				Message: "need a different decision",
+			},
+			scan: ScanResult{},
+			env:  Env{SinceLastNotifySame: neverNotified},
+			want: Decision{
+				Outcome: OutcomeSend, Urgency: UrgencyBlocked,
+				Message: "need a different decision", Reason: "background session needs input",
+			},
+		},
+		{
+			name: "agent needs input identical repeat past window sends",
+			in: HookInput{
+				HookEventName: "Notification", NotificationType: "agent_needs_input",
+				Message: "need a decision",
+			},
+			scan: ScanResult{},
+			env:  Env{SinceLastNotifySame: blockedRepeatWindow},
+			want: Decision{
+				Outcome: OutcomeSend, Urgency: UrgencyBlocked,
+				Message: "need a decision", Reason: "background session needs input",
+			},
+		},
+		{
+			name: "agent needs input broadcast claim takes precedence over identical-repeat window",
+			in: HookInput{
+				HookEventName: "Notification", NotificationType: "agent_needs_input",
+				Message: "need a decision",
+			},
+			scan: ScanResult{},
+			env: Env{
+				Broadcast:           &BroadcastFacts{Duplicate: true},
+				SinceLastNotifySame: 1 * time.Minute,
+			},
 			want: Decision{Outcome: OutcomeSilent, Reason: "dedupe: broadcast claimed by another session"},
 		},
 		{
@@ -241,7 +328,7 @@ func TestDecide(t *testing.T) {
 				Message: "allow this?",
 			},
 			scan: ScanResult{},
-			env:  Env{UserPresent: true, SinceLastNotify: 1 * time.Second},
+			env:  Env{UserPresent: true, SinceLastNotify: 1 * time.Second, SinceLastNotifySame: neverNotified},
 			want: Decision{
 				Outcome: OutcomeSend, Urgency: UrgencyBlocked,
 				Message: "allow this?", Reason: "permission prompt",
