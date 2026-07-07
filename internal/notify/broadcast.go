@@ -110,7 +110,7 @@ type broadcastJob struct {
 // a dry run only observes it, so rehearsals never suppress a real
 // session's send.
 func (p Pipeline) broadcastFacts(in HookInput, now time.Time) *BroadcastFacts {
-	if in.HookEventName != "Notification" || in.AgentID != "" {
+	if in.HookEventName != eventNotification || in.AgentID != "" {
 		return nil
 	}
 	if in.NotificationType != notifTypeAgentNeedsInput && in.NotificationType != notifTypeAgentCompleted {

@@ -148,7 +148,7 @@ func Decide(in HookInput, scan ScanResult, env Env) Decision {
 		return Decision{Outcome: OutcomeSilent, Reason: "session end", ReapWatchdog: true}
 	case "Stop":
 		return decideStop(scan, env)
-	case "Notification":
+	case eventNotification:
 		return decideNotification(in, scan, env)
 	default:
 		return Decision{Outcome: OutcomeSilent, Reason: fmt.Sprintf("unhandled event: %s", in.HookEventName)}

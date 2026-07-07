@@ -178,7 +178,10 @@ func buildTeammatesSection(teammates []TeammateActivity, now time.Time) string {
 	}
 	lines := []string{"TEAMMATES"}
 	for _, tm := range teammates {
-		lines = append(lines, fmt.Sprintf("- %s spawned %s ago", tm.Name, humanDuration(now.Sub(tm.SpawnedAt))))
+		// %q like LastSummary below: Name comes from the constrained
+		// teammate_spawned structured field today, but quoting keeps the
+		// section uniformly newline-safe against any future source change.
+		lines = append(lines, fmt.Sprintf("- %q spawned %s ago", tm.Name, humanDuration(now.Sub(tm.SpawnedAt))))
 		if !tm.LastMessageAt.IsZero() {
 			lines = append(lines, fmt.Sprintf("  last message %s ago: %q",
 				humanDuration(now.Sub(tm.LastMessageAt)), truncate(tm.LastSummary, maxTeammateSummaryLen)))

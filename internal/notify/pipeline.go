@@ -115,10 +115,18 @@ func (p Pipeline) Run(ctx context.Context, in HookInput) error {
 		reasonSuffix = fmt.Sprintf(" (transcript error: %s)", scanErr)
 	}
 
+	// SinceLastNotifySame costs a state-file read plus a sha256 of the
+	// message, and only the blocked-tier Notification gates ever read it —
+	// so the dominant Stop path (every assistant-turn end) skips it, keeping
+	// the sentinel that means "never/differs" instead.
+	sinceSame := neverNotifiedDuration
+	if in.HookEventName == eventNotification {
+		sinceSame = state.SinceLastNotifySame(now, in.Message)
+	}
 	env := Env{
 		UserPresent:         p.Present(p.Environ, now),
 		SinceLastNotify:     state.SinceLastNotify(now),
-		SinceLastNotifySame: state.SinceLastNotifySame(now, in.Message),
+		SinceLastNotifySame: sinceSame,
 		Broadcast:           p.broadcastFacts(in, now),
 	}
 	d := Decide(in, res, env)

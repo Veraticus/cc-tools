@@ -9,6 +9,13 @@ import (
 	"strings"
 )
 
+// eventNotification is the HookEventName of a Notification event, named
+// because three call sites branch on it (Decide's event switch, the
+// broadcast-facts gate, and the pipeline's lazy SinceLastNotifySame
+// computation). Stop and SessionEnd appear at most twice each and stay
+// inline literals in Decide's switch.
+const eventNotification = "Notification"
+
 // HookInput is the JSON payload Claude Code writes to a hook's stdin. Field
 // meaning varies by HookEventName: NotificationType/Message apply to
 // Notification events, LastAssistantMessage to Stop events, and

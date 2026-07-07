@@ -172,9 +172,9 @@ STILL RUNNING
   (nothing)
 
 TEAMMATES
-- worker-wire spawned 20m ago
+- "worker-wire" spawned 20m ago
   last message 5m0s ago: "DONE: TagGranted/Revoked/Transformed wired"
-- worker-cli spawned 10m ago
+- "worker-cli" spawned 10m ago
 
 GOAL
 none

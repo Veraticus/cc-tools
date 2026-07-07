@@ -454,8 +454,15 @@ func (s *scanState) processLine(line []byte) {
 		s.processAssistantMessage(rec.Message.Content)
 	case "user":
 		s.processUserMessage(rec.Message.Content, rec.ToolUseResult, rec.Timestamp)
-		s.processPlainUserText(rec.Message.Content, rec.Timestamp)
-		s.captureUserText(rec.Message.Content, rec.IsMeta)
+		// message.content decodes as a plain string for human-typed text,
+		// task-notifications, and teammate relays alike — decode it exactly
+		// once here and share the result, rather than letting each consumer
+		// re-unmarshal the same bytes on every user record of the scan.
+		text, isPlain := plainStringContent(rec.Message.Content)
+		if isPlain {
+			s.processPlainUserText(text, rec.Timestamp)
+		}
+		s.captureUserText(rec.Message.Content, text, isPlain, rec.IsMeta)
 	}
 }
 
@@ -485,13 +492,15 @@ func (s *scanState) recordTimestamp(ts string) {
 //     record (which strips down to nothing) does not count at all.
 //   - text whose trimmed, stripped form starts with "<" (task-notification
 //     and local-command wrappers) is excluded.
-func (s *scanState) captureUserText(raw json.RawMessage, isMeta bool) {
+func (s *scanState) captureUserText(raw json.RawMessage, text string, isPlain, isMeta bool) {
 	if isMeta {
 		return
 	}
-	text, ok := humanTypedText(raw)
-	if !ok {
-		return
+	if !isPlain {
+		var ok bool
+		if text, ok = humanTypedBlockText(raw); !ok {
+			return
+		}
 	}
 	text = systemReminderPattern.ReplaceAllString(text, "")
 	text = strings.TrimSpace(text)
@@ -506,19 +515,27 @@ func (s *scanState) captureUserText(raw json.RawMessage, isMeta bool) {
 	}
 }
 
-// humanTypedText extracts the candidate human-typed text from a user
-// message.content payload. ok is false when the payload is structurally not
-// human-typed text: an array containing a tool_result block, or neither a
-// plain string nor an array of blocks at all. A plain string is always
-// human-typed (ok); an array of blocks is human-typed only if it contains at
-// least one text block and no tool_result block, with all text blocks
-// concatenated.
-func humanTypedText(raw json.RawMessage) (string, bool) {
-	var s string
-	if err := json.Unmarshal(raw, &s); err == nil {
-		return s, true
+// plainStringContent decodes a user message.content payload as a plain JSON
+// string. processLine calls it exactly once per user record and shares the
+// result with processPlainUserText and captureUserText — the two consumers
+// that would otherwise each re-unmarshal the same bytes. A plain string is
+// always human-typed; array-of-blocks payloads return ok=false and go
+// through humanTypedBlockText instead.
+func plainStringContent(raw json.RawMessage) (string, bool) {
+	var text string
+	if err := json.Unmarshal(raw, &text); err != nil {
+		return "", false
 	}
+	return text, true
+}
 
+// humanTypedBlockText extracts the candidate human-typed text from an
+// array-of-blocks user message.content payload (the non-plain-string shape).
+// ok is false when the payload is structurally not human-typed text: an
+// array containing a tool_result block, or not an array of blocks at all.
+// An array is human-typed only if it contains at least one text block and
+// no tool_result block, with all text blocks concatenated.
+func humanTypedBlockText(raw json.RawMessage) (string, bool) {
 	var blocks []contentBlock
 	if err := json.Unmarshal(raw, &blocks); err != nil {
 		return "", false
@@ -540,9 +557,10 @@ func humanTypedText(raw json.RawMessage) (string, bool) {
 	return sb.String(), true
 }
 
-// processPlainUserText handles a user message.content payload that decodes
-// as a plain string, checking it against the two structural shapes that
-// matter beyond ordinary human-typed text:
+// processPlainUserText handles a user message.content payload that decoded
+// as a plain string (see plainStringContent in processLine), checking it
+// against the two structural shapes that matter beyond ordinary human-typed
+// text:
 //   - a task-notification delivered inline as the message's entire content
 //     (rather than via a queue-operation record or a queued_command
 //     attachment, the two shapes extractCompletions's callers already cover)
@@ -551,29 +569,28 @@ func humanTypedText(raw json.RawMessage) (string, bool) {
 //     on the embedded tag text alone) updates that teammate's last-message
 //     time and summary.
 //
-// A payload that isn't a plain string, or matches neither shape, is a no-op
-// here; captureUserText separately decides whether the same payload counts
-// as human-typed text.
-func (s *scanState) processPlainUserText(raw json.RawMessage, timestamp string) {
-	var text string
-	if err := json.Unmarshal(raw, &text); err != nil {
-		return
-	}
+// Text matching neither shape is a no-op here; captureUserText separately
+// decides whether the same payload counts as human-typed text.
+func (s *scanState) processPlainUserText(text, timestamp string) {
 	if strings.HasPrefix(text, "<task-notification>") {
 		s.extractCompletions(text)
 		return
 	}
-	if id, summary, ok := extractTeammateMessage(text); ok {
-		s.updateTeammateMessage(id, summary, timestamp)
+	if name, summary, ok := extractTeammateMessage(text); ok {
+		s.updateTeammateMessage(name, summary, timestamp)
 	}
 }
 
-// extractTeammateMessage pulls the teammate_id and summary attributes out of
-// a relayed teammate SendMessage's <teammate-message ...> tag. ok is false
-// unless text is structurally gated by teammateMessagePrefix AND carries a
-// well-formed tag with a teammate_id attribute — ordinary prose can never be
-// mistaken for a real relay. summary is "" (still ok) when the tag carries no
-// summary attribute.
+// extractTeammateMessage pulls the teammate's short name and the summary
+// attribute out of a relayed teammate SendMessage's <teammate-message ...>
+// tag. The tag's teammate_id attribute carries the SHORT name in relay
+// format ("worker-wire", not "worker-wire@session-id") — the same key
+// registerTeammate stores under, which is what lets updateTeammateMessage
+// index the teammates map with it directly. ok is false unless text is
+// structurally gated by teammateMessagePrefix AND carries a well-formed tag
+// with a teammate_id attribute — ordinary prose can never be mistaken for a
+// real relay. summary is "" (still ok) when the tag carries no summary
+// attribute.
 func extractTeammateMessage(text string) (string, string, bool) {
 	if !strings.HasPrefix(text, teammateMessagePrefix) {
 		return "", "", false
@@ -583,15 +600,15 @@ func extractTeammateMessage(text string) (string, string, bool) {
 		return "", "", false
 	}
 	attrs := tag[1]
-	idMatch := teammateIDAttrPattern.FindStringSubmatch(attrs)
-	if idMatch == nil {
+	nameMatch := teammateIDAttrPattern.FindStringSubmatch(attrs)
+	if nameMatch == nil {
 		return "", "", false
 	}
 	var summary string
 	if summaryMatch := summaryAttrPattern.FindStringSubmatch(attrs); summaryMatch != nil {
 		summary = summaryMatch[1]
 	}
-	return idMatch[1], summary, true
+	return nameMatch[1], summary, true
 }
 
 // processAttachment handles the top-level "attachment" field, which carries
@@ -824,11 +841,13 @@ func (s *scanState) registerTeammate(teammateID, name, timestamp string) {
 }
 
 // updateTeammateMessage records the timing and summary of a teammate's most
-// recent relayed SendMessage. A message from a teammate_id with no matching
-// spawn in this scan (e.g. the spawn record fell outside the scanned range)
-// is a no-op: there is nowhere to attach the update.
-func (s *scanState) updateTeammateMessage(teammateID, summary, timestamp string) {
-	tm, ok := s.teammates[teammateID]
+// recent relayed SendMessage, keyed by the same short name registerTeammate
+// stores under (a relay's teammate_id attribute IS that short name — see
+// extractTeammateMessage). A message from a name with no matching spawn in
+// this scan (e.g. the spawn record fell outside the scanned range) is a
+// no-op: there is nowhere to attach the update.
+func (s *scanState) updateTeammateMessage(name, summary, timestamp string) {
+	tm, ok := s.teammates[name]
 	if !ok {
 		return
 	}

@@ -416,6 +416,48 @@ func TestScanTranscriptTeammates(t *testing.T) {
 	}
 }
 
+// TestScanTranscriptTeammateMessageWithoutSummary exercises a relayed
+// teammate message whose <teammate-message> tag carries no summary attribute
+// (e.g. an idle notification): the relay must still update LastMessageAt,
+// with LastSummary left empty.
+func TestScanTranscriptTeammateMessageWithoutSummary(t *testing.T) {
+	f := openFixture(t, "teammates_no_summary.jsonl")
+	res, err := ScanTranscript(f)
+	if err != nil {
+		t.Fatalf("ScanTranscript returned error: %v", err)
+	}
+	if len(res.Teammates) != 1 {
+		t.Fatalf("len(Teammates) = %d, want 1: %+v", len(res.Teammates), res.Teammates)
+	}
+	tm := res.Teammates[0]
+	wantLastMessageAt := parseTestTimestamp(t, "2026-07-06T06:20:00.000Z")
+	if !tm.LastMessageAt.Equal(wantLastMessageAt) {
+		t.Errorf("LastMessageAt = %v, want %v (summary-less relay must still update timing)",
+			tm.LastMessageAt, wantLastMessageAt)
+	}
+	if tm.LastSummary != "" {
+		t.Errorf("LastSummary = %q, want empty for a tag with no summary attribute", tm.LastSummary)
+	}
+}
+
+// TestScanTranscriptTeammateMessageWithoutSpawn exercises a relayed teammate
+// message whose sender has no matching spawn in the scanned range: the
+// update has nowhere to attach and must be a clean no-op — no teammate
+// invented, no live task, no panic.
+func TestScanTranscriptTeammateMessageWithoutSpawn(t *testing.T) {
+	f := openFixture(t, "teammates_no_spawn.jsonl")
+	res, err := ScanTranscript(f)
+	if err != nil {
+		t.Fatalf("ScanTranscript returned error: %v", err)
+	}
+	if len(res.Teammates) != 0 {
+		t.Errorf("Teammates = %+v, want none (a relay without a spawn has nowhere to attach)", res.Teammates)
+	}
+	if len(res.LiveTasks) != 0 {
+		t.Errorf("LiveTasks = %+v, want none", res.LiveTasks)
+	}
+}
+
 // TestScanTranscriptDuplicateCompletionNoDoubleSubtract exercises the case
 // spelled out in the notify package brief: a single task-notification event
 // materializes as two separate transcript lines (a queue-operation record
