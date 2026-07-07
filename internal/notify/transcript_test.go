@@ -270,6 +270,150 @@ func TestScanTranscriptLiveTasks(t *testing.T) {
 			t.Errorf("tasks = %+v, want none (completed task must not be re-added or duplicated)", res.LiveTasks)
 		}
 	})
+
+	// tasks_taskstop_removes_live.jsonl reproduces a real leak: a TaskStop of
+	// a background-bash launch never emits a <task-id> completion
+	// notification, so the old regex scanner (which only ever removed a live
+	// task on that notification) held it live indefinitely. The structured
+	// TaskStop toolUseResult (task_id) must remove it directly.
+	t.Run("tasks_taskstop_removes_live.jsonl", func(t *testing.T) {
+		f := openFixture(t, "tasks_taskstop_removes_live.jsonl")
+		res, err := ScanTranscript(f)
+		if err != nil {
+			t.Fatalf("ScanTranscript returned error: %v", err)
+		}
+		if len(res.LiveTasks) != 0 {
+			t.Errorf("tasks = %+v, want none (TaskStop must remove the launch)", res.LiveTasks)
+		}
+	})
+
+	// tasks_agent_stopped_by_user.jsonl reproduces the other half of the same
+	// leak class: a user-stopped async agent never emits a <task-id>
+	// notification either. Its toolUseResult carries success:false with the
+	// agent ID embedded only in message text.
+	t.Run("tasks_agent_stopped_by_user.jsonl", func(t *testing.T) {
+		f := openFixture(t, "tasks_agent_stopped_by_user.jsonl")
+		res, err := ScanTranscript(f)
+		if err != nil {
+			t.Fatalf("ScanTranscript returned error: %v", err)
+		}
+		if len(res.LiveTasks) != 0 {
+			t.Errorf("tasks = %+v, want none (user-stopped agent must remove the launch)", res.LiveTasks)
+		}
+	})
+
+	// tasks_no_task_found.jsonl is a TaskStop attempt on an ID that was never
+	// live. Its toolUseResult is a plain STRING ("Error: No task found with
+	// ID: ..."), not an object — this must not panic and must leave no live
+	// tasks behind.
+	t.Run("tasks_no_task_found.jsonl", func(t *testing.T) {
+		f := openFixture(t, "tasks_no_task_found.jsonl")
+		res, err := ScanTranscript(f)
+		if err != nil {
+			t.Fatalf("ScanTranscript returned error: %v", err)
+		}
+		if len(res.LiveTasks) != 0 {
+			t.Errorf("tasks = %+v, want none", res.LiveTasks)
+		}
+	})
+
+	// tasks_sync_completion_removes_live.jsonl launches an agent and later
+	// delivers a synchronous/delivered completion record for the SAME agent
+	// ID (status:"completed" + agentId, distinct from the async-launch
+	// status). That shape must remove the live task, not just fail to
+	// register one.
+	t.Run("tasks_sync_completion_removes_live.jsonl", func(t *testing.T) {
+		f := openFixture(t, "tasks_sync_completion_removes_live.jsonl")
+		res, err := ScanTranscript(f)
+		if err != nil {
+			t.Fatalf("ScanTranscript returned error: %v", err)
+		}
+		if len(res.LiveTasks) != 0 {
+			t.Errorf("tasks = %+v, want none (delivered completion must remove the launch)", res.LiveTasks)
+		}
+	})
+
+	// task_notification_plain_string.jsonl completes a live bash launch via a
+	// <task-notification> delivered as the ENTIRE plain-string content of a
+	// user message, rather than via a queue-operation record or a
+	// queued_command attachment (the two shapes extractCompletions's other
+	// callers already cover).
+	t.Run("task_notification_plain_string.jsonl", func(t *testing.T) {
+		f := openFixture(t, "task_notification_plain_string.jsonl")
+		res, err := ScanTranscript(f)
+		if err != nil {
+			t.Fatalf("ScanTranscript returned error: %v", err)
+		}
+		if len(res.LiveTasks) != 0 {
+			t.Errorf(
+				"tasks = %+v, want none (plain-string task-notification must remove the launch)",
+				res.LiveTasks,
+			)
+		}
+	})
+}
+
+// TestScanTranscriptResumeReregisters exercises a SendMessage resume of an
+// agent with no prior launch pairing in this scan (e.g. it was launched,
+// completed, and is now being resumed later): resumedAgentId must
+// re-register it as live, with Description/Detail empty (no toolUseInfo
+// pairing exists for a resume — it fires from a SendMessage tool_use, not a
+// Bash/Agent one) and OutputFile pulled from the resume message's
+// "Output: ..." text.
+func TestScanTranscriptResumeReregisters(t *testing.T) {
+	f := openFixture(t, "tasks_resume_reregisters.jsonl")
+	res, err := ScanTranscript(f)
+	if err != nil {
+		t.Fatalf("ScanTranscript returned error: %v", err)
+	}
+	if len(res.LiveTasks) != 1 {
+		t.Fatalf("len(LiveTasks) = %d, want 1: %+v", len(res.LiveTasks), res.LiveTasks)
+	}
+	assertLiveTask(
+		t, res.LiveTasks[0],
+		"agenttestid03", TaskAgent, "", "",
+		parseTestTimestamp(t, "2026-07-06T04:00:00.100Z"),
+		"/tmp/claude-1000/-home-user-project/anon-session-0100/tasks/agenttestid03.output",
+	)
+}
+
+// TestScanTranscriptTeammates exercises a teammate spawn (via the Agent
+// tool, distinguished from an async launch by toolUseResult.status ==
+// "teammate_spawned") followed by a relayed SendMessage from that teammate.
+// The teammate must appear in ScanResult.Teammates with its spawn/
+// last-message timing and summary, and must NOT appear in LiveTasks —
+// teammates are never part of the liveness gate.
+func TestScanTranscriptTeammates(t *testing.T) {
+	f := openFixture(t, "teammates.jsonl")
+	res, err := ScanTranscript(f)
+	if err != nil {
+		t.Fatalf("ScanTranscript returned error: %v", err)
+	}
+	if len(res.LiveTasks) != 0 {
+		t.Errorf("LiveTasks = %+v, want none (a teammate spawn is never a live task)", res.LiveTasks)
+	}
+	if len(res.Teammates) != 1 {
+		t.Fatalf("len(Teammates) = %d, want 1: %+v", len(res.Teammates), res.Teammates)
+	}
+	tm := res.Teammates[0]
+	if tm.Name != "worker-wire" {
+		t.Errorf("Name = %q, want %q", tm.Name, "worker-wire")
+	}
+	if tm.ID != "worker-wire@anon-session-0100" {
+		t.Errorf("ID = %q, want %q", tm.ID, "worker-wire@anon-session-0100")
+	}
+	wantSpawnedAt := parseTestTimestamp(t, "2026-07-06T06:00:00.100Z")
+	if !tm.SpawnedAt.Equal(wantSpawnedAt) {
+		t.Errorf("SpawnedAt = %v, want %v", tm.SpawnedAt, wantSpawnedAt)
+	}
+	wantLastMessageAt := parseTestTimestamp(t, "2026-07-06T06:20:00.000Z")
+	if !tm.LastMessageAt.Equal(wantLastMessageAt) {
+		t.Errorf("LastMessageAt = %v, want %v", tm.LastMessageAt, wantLastMessageAt)
+	}
+	wantSummary := "DONE: TagGranted/Revoked/Transformed wired"
+	if tm.LastSummary != wantSummary {
+		t.Errorf("LastSummary = %q, want %q", tm.LastSummary, wantSummary)
+	}
 }
 
 // TestScanTranscriptDuplicateCompletionNoDoubleSubtract exercises the case
@@ -466,7 +610,9 @@ func TestScanTranscriptLiveTaskDetailTruncated(t *testing.T) {
 		`{"type":"user","timestamp":"2026-07-05T00:00:01.000Z","message":{"role":"user","content":[` +
 		`{"tool_use_id":"toolu_longcmd001","type":"tool_result","content":"Command running in background with ID: ` +
 		`longcmdtask01. Output is being written to: /tmp/claude-1000/proj/sess/tasks/longcmdtask01.output. ` +
-		`You will be notified when it completes."}]}}` + "\n"
+		`You will be notified when it completes."}]},` +
+		`"toolUseResult":{"stdout":"","stderr":"","interrupted":false,"isImage":false,"noOutputExpected":false,` +
+		`"backgroundTaskId":"longcmdtask01"}}` + "\n"
 
 	res, err := ScanTranscript(strings.NewReader(transcript))
 	if err != nil {

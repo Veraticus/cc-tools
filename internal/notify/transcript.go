@@ -37,9 +37,7 @@ const (
 )
 
 var (
-	bgIDPattern    = regexp.MustCompile(`Command running in background with ID: ([a-z0-9]+)`)
-	agentIDPattern = regexp.MustCompile(`agentId: ([a-z0-9]{6,20})`)
-	taskIDPattern  = regexp.MustCompile(`<task-id>([^<]+)</task-id>`)
+	taskIDPattern = regexp.MustCompile(`<task-id>([^<]+)</task-id>`)
 
 	// systemReminderPattern matches an embedded <system-reminder>...</system-reminder>
 	// span so it can be stripped from a user message before the human-typed-text
@@ -48,30 +46,49 @@ var (
 	// and dot-matches-newline since reminders are frequently multiline.
 	systemReminderPattern = regexp.MustCompile(`(?s)<system-reminder>.*?</system-reminder>`)
 
-	// bashOutputFilePattern and agentOutputFilePattern extract the on-disk
-	// output path from a launch acknowledgment. Real transcript text (not
-	// the pattern name) is ground truth for these shapes: a bg-bash ack
-	// reads "...Output is being written to: /tmp/claude-1000/<proj>/<session>/
-	// tasks/<id>.output. You will be notified..." and an async-agent ack
-	// carries a standalone "output_file: /tmp/claude-1000/<proj>/<session>/
-	// tasks/<id>.output" line. \S+ is deliberate over a charset like
-	// [^\s.]+: real paths contain dots (session UUIDs, the .output suffix)
-	// and dashes (anonymized project segments), so excluding "." would
-	// truncate the match. The only punctuation to strip is the sentence-
-	// final period the bash form appends after ".output" — see
-	// extractOutputFile.
-	bashOutputFilePattern  = regexp.MustCompile(`Output is being written to: (\S+)`)
-	agentOutputFilePattern = regexp.MustCompile(`output_file: (\S+)`)
+	// bashOutputFilePattern extracts the on-disk output path out of a
+	// background-bash launch's tool_result content text: the structured
+	// toolUseResult for that launch (backgroundTaskId) carries no path, but
+	// the human-readable ack alongside it reads "...Output is being written
+	// to: /tmp/claude-1000/<proj>/<session>/tasks/<id>.output. You will be
+	// notified...". \S+ is deliberate over a charset like [^\s.]+: real
+	// paths contain dots (session UUIDs, the .output suffix) and dashes
+	// (anonymized project segments), so excluding "." would truncate the
+	// match. The only punctuation to strip is the sentence-final period the
+	// ack appends after ".output" — see extractOutputFile. An async-agent
+	// launch needs no such extraction: its toolUseResult carries the path
+	// directly as the structured outputFile field.
+	bashOutputFilePattern = regexp.MustCompile(`Output is being written to: (\S+)`)
+
+	// resumeOutputFilePattern extracts the on-disk output path out of an
+	// agent-resume toolUseResult's message text, which reads "...You'll be
+	// notified when it finishes. Output: /tmp/claude-1000/<proj>/<session>/
+	// tasks/<id>.output" — the resume shape carries no separate structured
+	// path field the way an async launch's outputFile does.
+	resumeOutputFilePattern = regexp.MustCompile(`Output: (\S+)`)
+
+	// agentStoppedByUserPattern extracts the agent ID out of a user-stopped
+	// agent's toolUseResult message text ("Agent <id> was stopped by the
+	// user and won't be resumed..."). The ID is not a separate structured
+	// field on this shape, unlike a launch or resume — text extraction is
+	// unavoidable here, but it is only ever attempted on a message already
+	// gated by toolUseResult.success == false (see processToolUseResult),
+	// never on raw line bytes.
+	agentStoppedByUserPattern = regexp.MustCompile(`^Agent (\S+) was stopped by the user`)
+
+	// teammateMessageTagPattern isolates a <teammate-message ...> tag's
+	// attribute text so teammateIDAttrPattern and summaryAttrPattern can
+	// pull specific attributes out of it regardless of attribute order.
+	teammateMessageTagPattern = regexp.MustCompile(`<teammate-message([^>]*)>`)
+	teammateIDAttrPattern     = regexp.MustCompile(`teammate_id="([^"]*)"`)
+	summaryAttrPattern        = regexp.MustCompile(`summary="([^"]*)"`)
 )
 
-// asyncAgentAckMarker is the first sentence of every genuine background-agent
-// launch acknowledgment. It is the decisive gate for a TaskAgent launch: a
-// synchronous Agent call's final report also embeds "agentId: ..." (as part
-// of its SendMessage-to-continue text), so the agentId pattern and kind/
-// run_in_background pairing alone are not enough to distinguish a real async
-// launch from an already-finished synchronous report. Only the ack text
-// marks a launch.
-const asyncAgentAckMarker = "Async agent launched successfully"
+// teammateMessagePrefix is the literal prefix the CLI puts on a plain-string
+// user message that relays another session's SendMessage — the structural
+// gate that must hold before teammateMessageTagPattern is trusted to mean
+// anything (ordinary prose could otherwise mention the tag by coincidence).
+const teammateMessagePrefix = "Another Claude session sent a message:"
 
 // GoalStatus represents the current state of a /goal condition as recorded
 // in a session transcript.
@@ -128,12 +145,34 @@ type LiveTask struct {
 // transcriptRecord is the subset of a transcript JSONL line's shape that
 // ScanTranscript cares about. Unknown fields are ignored by encoding/json.
 type transcriptRecord struct {
-	Type       string          `json:"type"`
-	Timestamp  string          `json:"timestamp"`
-	Content    string          `json:"content"`
-	IsMeta     bool            `json:"isMeta"`
-	Message    *rawMessage     `json:"message"`
-	Attachment json.RawMessage `json:"attachment"`
+	Type      string      `json:"type"`
+	Timestamp string      `json:"timestamp"`
+	Content   string      `json:"content"`
+	IsMeta    bool        `json:"isMeta"`
+	Message   *rawMessage `json:"message"`
+	// ToolUseResult is the harness's own typed record of what a tool call
+	// did, attached to a user record alongside its tool_result content
+	// block. It is authoritative over ack prose for task liveness: a
+	// backgroundTaskId/agentId/task_id field means exactly what it says,
+	// unlike text a session could coincidentally quote (e.g. a grep whose
+	// own output mentions a launch pattern). It is a plain string rather
+	// than an object for some tool errors (e.g. "Error: No task found with
+	// ID: ..."), so processToolUseResult tries a string decode first.
+	ToolUseResult json.RawMessage `json:"toolUseResult"`
+	Attachment    json.RawMessage `json:"attachment"`
+}
+
+// TeammateActivity describes a teammate agent spawned during the session:
+// when it was spawned, and — once it has sent one — the timing and summary
+// of its most recent SendMessage back to this session. Teammates are never
+// part of LiveTasks or any liveness gate; they are surfaced in the digest
+// purely as context for the judge.
+type TeammateActivity struct {
+	Name          string
+	ID            string
+	SpawnedAt     time.Time
+	LastMessageAt time.Time
+	LastSummary   string
 }
 
 // rawMessage defers decoding of Content: it is a plain string for
@@ -223,6 +262,54 @@ const (
 	toolNameAgent = "Agent"
 )
 
+// toolUseResult status values that route processToolUseResult. asyncLaunched
+// marks a genuine background-agent launch; completed marks a delivered or
+// synchronous agent result (which removes a live task if its agentId happens
+// to be one — otherwise a no-op); teammateSpawned marks a teammate agent
+// launch, which registers a TeammateActivity rather than a LiveTask.
+const (
+	toolUseStatusAsyncLaunched = "async_launched"
+	toolUseStatusCompleted     = "completed"
+	toolUseStatusTeammateSpawn = "teammate_spawned"
+)
+
+// toolUseResultEnvelope decodes the fields processToolUseResult needs out of
+// a user record's structured toolUseResult, across every shape it can take:
+// a background-bash launch, an async-agent launch, a delivered/synchronous
+// agent completion, a TaskStop terminal, an agent resume, a user-stopped
+// agent, or a teammate spawn. Only one group of fields is populated on any
+// given real record; which group decides which case in the switch fires.
+// toolUseResult can also be a plain string for some tool errors (e.g. "Error:
+// No task found with ID: ..."), which fails to decode into this struct
+// entirely — see processToolUseResult's string-decode attempt first.
+type toolUseResultEnvelope struct {
+	// BackgroundTaskID marks a background-bash launch.
+	BackgroundTaskID string `json:"backgroundTaskId"`
+
+	// Status, AgentID, and OutputFile are shared by an async-agent launch
+	// (Status == toolUseStatusAsyncLaunched) and a delivered/synchronous
+	// agent completion (Status == toolUseStatusCompleted); OutputFile is
+	// only populated on the launch shape.
+	Status     string `json:"status"`
+	AgentID    string `json:"agentId"`
+	OutputFile string `json:"outputFile"`
+
+	// TaskID marks a TaskStop terminal for a background-bash task.
+	TaskID string `json:"task_id"`
+
+	// Success and Message are shared by an agent resume (Success == true,
+	// ResumedAgentID != "") and a user-stopped agent (Success == false, ID
+	// embedded in Message text — see agentStoppedByUserPattern).
+	Success        bool   `json:"success"`
+	Message        string `json:"message"`
+	ResumedAgentID string `json:"resumedAgentId"`
+
+	// TeammateID and Name mark a teammate spawn (Status ==
+	// toolUseStatusTeammateSpawn).
+	TeammateID string `json:"teammate_id"`
+	Name       string `json:"name"`
+}
+
 // ScanResult is the full result of a single streaming pass over a session
 // transcript: goal state, live background tasks, the most recent
 // conversation turns, session timing, and how many bytes were consumed.
@@ -231,6 +318,12 @@ const (
 type ScanResult struct {
 	Goal      GoalState
 	LiveTasks []LiveTask
+
+	// Teammates lists every teammate agent spawned during the session, in
+	// spawn order. It is informational only — never consulted by any
+	// liveness gate — so a teammate that never sent a message back still
+	// appears here with a zero LastMessageAt.
+	Teammates []TeammateActivity
 
 	// LastUserMessage is the most recently human-typed user text found in
 	// the transcript, of any length (e.g. a bare "yes").
@@ -274,6 +367,9 @@ type scanState struct {
 	live     map[string]*LiveTask
 	order    []string
 
+	teammates     map[string]*TeammateActivity
+	teammateOrder []string
+
 	lastUserMessage     string
 	lastSubstantiveUser string
 	lastAssistantText   string
@@ -287,9 +383,10 @@ type scanState struct {
 
 func newScanState() *scanState {
 	return &scanState{
-		goal:     GoalState{Status: GoalNone},
-		toolUses: make(map[string]toolUseInfo),
-		live:     make(map[string]*LiveTask),
+		goal:      GoalState{Status: GoalNone},
+		toolUses:  make(map[string]toolUseInfo),
+		live:      make(map[string]*LiveTask),
+		teammates: make(map[string]*TeammateActivity),
 	}
 }
 
@@ -323,6 +420,7 @@ func (s *scanState) result() ScanResult {
 	return ScanResult{
 		Goal:                s.goal,
 		LiveTasks:           s.tasks(),
+		Teammates:           s.teammateActivities(),
 		LastUserMessage:     s.lastUserMessage,
 		LastSubstantiveUser: s.lastSubstantiveUser,
 		LastAssistantText:   s.lastAssistantText,
@@ -355,7 +453,8 @@ func (s *scanState) processLine(line []byte) {
 	case "assistant":
 		s.processAssistantMessage(rec.Message.Content)
 	case "user":
-		s.processUserMessage(rec.Message.Content, rec.Timestamp)
+		s.processUserMessage(rec.Message.Content, rec.ToolUseResult, rec.Timestamp)
+		s.processPlainUserText(rec.Message.Content, rec.Timestamp)
 		s.captureUserText(rec.Message.Content, rec.IsMeta)
 	}
 }
@@ -441,6 +540,60 @@ func humanTypedText(raw json.RawMessage) (string, bool) {
 	return sb.String(), true
 }
 
+// processPlainUserText handles a user message.content payload that decodes
+// as a plain string, checking it against the two structural shapes that
+// matter beyond ordinary human-typed text:
+//   - a task-notification delivered inline as the message's entire content
+//     (rather than via a queue-operation record or a queued_command
+//     attachment, the two shapes extractCompletions's callers already cover)
+//     removes the notified task from live.
+//   - a relayed teammate SendMessage (gated on teammateMessagePrefix, never
+//     on the embedded tag text alone) updates that teammate's last-message
+//     time and summary.
+//
+// A payload that isn't a plain string, or matches neither shape, is a no-op
+// here; captureUserText separately decides whether the same payload counts
+// as human-typed text.
+func (s *scanState) processPlainUserText(raw json.RawMessage, timestamp string) {
+	var text string
+	if err := json.Unmarshal(raw, &text); err != nil {
+		return
+	}
+	if strings.HasPrefix(text, "<task-notification>") {
+		s.extractCompletions(text)
+		return
+	}
+	if id, summary, ok := extractTeammateMessage(text); ok {
+		s.updateTeammateMessage(id, summary, timestamp)
+	}
+}
+
+// extractTeammateMessage pulls the teammate_id and summary attributes out of
+// a relayed teammate SendMessage's <teammate-message ...> tag. ok is false
+// unless text is structurally gated by teammateMessagePrefix AND carries a
+// well-formed tag with a teammate_id attribute — ordinary prose can never be
+// mistaken for a real relay. summary is "" (still ok) when the tag carries no
+// summary attribute.
+func extractTeammateMessage(text string) (string, string, bool) {
+	if !strings.HasPrefix(text, teammateMessagePrefix) {
+		return "", "", false
+	}
+	tag := teammateMessageTagPattern.FindStringSubmatch(text)
+	if tag == nil {
+		return "", "", false
+	}
+	attrs := tag[1]
+	idMatch := teammateIDAttrPattern.FindStringSubmatch(attrs)
+	if idMatch == nil {
+		return "", "", false
+	}
+	var summary string
+	if summaryMatch := summaryAttrPattern.FindStringSubmatch(attrs); summaryMatch != nil {
+		summary = summaryMatch[1]
+	}
+	return idMatch[1], summary, true
+}
+
 // processAttachment handles the top-level "attachment" field, which carries
 // either a goal_status verdict or a queued_command task-notification.
 func (s *scanState) processAttachment(raw json.RawMessage) {
@@ -488,10 +641,11 @@ func (s *scanState) applyGoalStatus(att goalAttachment) {
 // extractCompletions removes any live task whose ID appears in a
 // <task-id>...</task-id> wrapper within text. text must come from a record
 // already known structurally to be a task-notification (a queue-operation's
-// content, or a queued_command attachment's prompt) — never from raw line
-// bytes — so that ordinary prose mentioning "<task-id>" (e.g. a transcript
-// where the assistant is discussing this very format) can never be mistaken
-// for a real completion.
+// content, a queued_command attachment's prompt, or a plain-string user
+// message whose content itself starts with "<task-notification>") — never
+// from raw line bytes — so that ordinary prose mentioning "<task-id>" (e.g. a
+// transcript where the assistant is discussing this very format) can never be
+// mistaken for a real completion.
 func (s *scanState) extractCompletions(text string) {
 	for _, m := range taskIDPattern.FindAllStringSubmatch(text, -1) {
 		delete(s.live, m[1])
@@ -555,25 +709,15 @@ func (s *scanState) captureAssistantText(blocks []contentBlock) {
 	s.lastAssistantText = truncateHead(text, maxAssistantTextLen)
 }
 
-// processUserMessage looks for tool_result blocks announcing a background
-// bash or agent launch. Registration requires the block's tool_use_id to
-// pair to a remembered tool_use of the matching kind with the right
-// run_in_background resolution — see the rationale on addLiveTask. An Agent
-// pairing additionally requires the async launch-acknowledgment marker (see
-// asyncAgentAckMarker): a synchronous Agent call's tool_result also embeds
-// "agentId: ..." as part of its own SendMessage-to-continue text, and with
-// run_in_background absent (nil resolves to true, Agent's own default) the
-// pairing and run_in_background checks alone would misclassify that
-// already-finished report as a live launch. The Bash pairing needs no such
-// extra gate — a background Bash launch's tool_result text is exactly the
-// "Command running in background with ID: ..." announcement.
-//
-// A tool_use_id is deleted from s.toolUses immediately once it successfully
-// pairs to a launch: a given tool_use_id is produced once by the assistant
-// and consumed at most once by its own matching tool_result (IDs never
-// repeat), so the entry has no further use and holding onto it would just
-// grow this map for the rest of the scan.
-func (s *scanState) processUserMessage(raw json.RawMessage, timestamp string) {
+// processUserMessage looks for a tool_result block paired with a structured
+// toolUseResult (see transcriptRecord.ToolUseResult) and routes it to
+// processToolUseResult. A record with no toolUseResult (an ordinary
+// human-typed message, a goal_status/queue-operation record, etc.) is a
+// no-op — most user records never carry one.
+func (s *scanState) processUserMessage(raw json.RawMessage, toolUseResult json.RawMessage, timestamp string) {
+	if len(toolUseResult) == 0 {
+		return
+	}
 	var blocks []contentBlock
 	if err := json.Unmarshal(raw, &blocks); err != nil {
 		return
@@ -582,38 +726,121 @@ func (s *scanState) processUserMessage(raw json.RawMessage, timestamp string) {
 		if block.Type != "tool_result" {
 			continue
 		}
-		info, paired := s.toolUses[block.ToolUseID]
-		text := extractBlockText(block.Content)
-		if m := bgIDPattern.FindStringSubmatch(text); m != nil {
-			if paired && info.name == toolNameBash && info.runInBackground {
-				s.addLiveTask(m[1], TaskBash, timestamp, info, extractOutputFile(bashOutputFilePattern, text))
-				delete(s.toolUses, block.ToolUseID)
-			}
-		}
-		if m := agentIDPattern.FindStringSubmatch(text); m != nil {
-			if paired && info.name == toolNameAgent && info.runInBackground &&
-				strings.Contains(text, asyncAgentAckMarker) {
-				s.addLiveTask(m[1], TaskAgent, timestamp, info, extractOutputFile(agentOutputFilePattern, text))
-				delete(s.toolUses, block.ToolUseID)
-			}
+		s.processToolUseResult(block.ToolUseID, extractBlockText(block.Content), toolUseResult, timestamp)
+		return
+	}
+}
+
+// processToolUseResult decodes a user record's structured toolUseResult and
+// routes it by shape — a background-bash launch, an async-agent launch, a
+// delivered/synchronous agent completion, a TaskStop terminal, an agent
+// resume, a user-stopped agent, or a teammate spawn — updating live tasks or
+// teammates accordingly. toolUseResult is authoritative over ack prose: a
+// backgroundTaskId/agentId/task_id field means exactly what it says, unlike
+// text a session could coincidentally quote (e.g. a grep whose own stdout
+// mentions a launch pattern, which carries none of these structured fields
+// and therefore matches no case below).
+//
+// toolUseResult is a plain string rather than an object for some tool errors
+// (e.g. "Error: No task found with ID: ..."); such a record decodes into
+// none of toolUseResultEnvelope's fields as a live JSON object, so the
+// string-decode attempt below returns immediately — a "no task found" is
+// already a no-op (the task was never live to begin with, or is already
+// gone) and requires no further handling.
+//
+// Launch registration pairs blockText (a bash launch's tool_result content,
+// which carries the human-readable output-file sentence the structured
+// record itself omits) and the toolUses entry for tool_use_id, deleting that
+// entry once consumed: a given tool_use_id is produced once by the assistant
+// and consumed at most once by its own matching tool_result, so the entry
+// has no further use.
+func (s *scanState) processToolUseResult(toolUseID, blockText string, raw json.RawMessage, timestamp string) {
+	var opaque string
+	if err := json.Unmarshal(raw, &opaque); err == nil {
+		return
+	}
+
+	var res toolUseResultEnvelope
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return
+	}
+
+	switch {
+	case res.BackgroundTaskID != "":
+		s.registerLaunch(toolUseID, toolNameBash, res.BackgroundTaskID, TaskBash, timestamp,
+			extractOutputFile(bashOutputFilePattern, blockText))
+	case res.Status == toolUseStatusAsyncLaunched && res.AgentID != "":
+		s.registerLaunch(toolUseID, toolNameAgent, res.AgentID, TaskAgent, timestamp, res.OutputFile)
+	case res.Status == toolUseStatusTeammateSpawn:
+		s.registerTeammate(res.TeammateID, res.Name, timestamp)
+		delete(s.toolUses, toolUseID)
+	case res.TaskID != "":
+		delete(s.live, res.TaskID)
+	case res.Status == toolUseStatusCompleted && res.AgentID != "":
+		delete(s.live, res.AgentID)
+	case res.ResumedAgentID != "":
+		s.addLiveTask(res.ResumedAgentID, TaskAgent, timestamp, toolUseInfo{},
+			extractOutputFile(resumeOutputFilePattern, res.Message))
+	case !res.Success && res.Message != "":
+		if m := agentStoppedByUserPattern.FindStringSubmatch(res.Message); m != nil {
+			delete(s.live, m[1])
 		}
 	}
 }
 
-// addLiveTask records a newly-launched task. Callers only reach here after
-// structurally confirming the tool_result's tool_use_id pairs to a
-// remembered tool_use of the matching kind (Bash/Agent) with
-// run_in_background resolving true — never from the bgID/agentID pattern
-// text alone. That text can appear in a tool_result for reasons that are
-// not a real launch: a plain Bash command whose own output happens to quote
-// the pattern (e.g. a grep investigating this very format), or a
-// synchronous Agent call's final report, which embeds "agentId: ..." (as
-// its SendMessage-to-continue text) but has already returned inline with
-// the task over. Requiring the pairing and kind check is what keeps those
-// cases from registering a false launch; for Agent specifically, the
-// caller also requires the asyncAgentAckMarker text, since a sync report's
-// embedded "agentId: ..." alone survives the pairing and kind check
-// whenever run_in_background was left absent.
+// registerLaunch registers a background-bash or async-agent launch after
+// confirming the tool_result's tool_use_id pairs to a remembered tool_use of
+// the matching kind (wantName) with run_in_background resolving true —
+// never from the launch ID alone. See addLiveTask and toolUseInfo for the
+// rationale; a tool_use_id that fails to pair (or pairs to the wrong kind)
+// is left in s.toolUses untouched, matching the pre-structured behavior.
+func (s *scanState) registerLaunch(toolUseID, wantName, id string, kind TaskKind, timestamp, outputFile string) {
+	info, paired := s.toolUses[toolUseID]
+	if !paired || info.name != wantName || !info.runInBackground {
+		return
+	}
+	s.addLiveTask(id, kind, timestamp, info, outputFile)
+	delete(s.toolUses, toolUseID)
+}
+
+// registerTeammate records a newly-spawned teammate, keyed by name: a later
+// relayed SendMessage (see extractTeammateMessage) addresses the teammate by
+// this same short name, not the fuller "name@session-id" teammate_id the
+// spawn record itself carries in TeammateID. A duplicate spawn of the same
+// name is a no-op, mirroring addLiveTask's idempotency.
+func (s *scanState) registerTeammate(teammateID, name, timestamp string) {
+	if name == "" {
+		return
+	}
+	if _, exists := s.teammates[name]; exists {
+		return
+	}
+	s.teammates[name] = &TeammateActivity{
+		Name:      name,
+		ID:        teammateID,
+		SpawnedAt: parseTimestamp(timestamp),
+	}
+	s.teammateOrder = append(s.teammateOrder, name)
+}
+
+// updateTeammateMessage records the timing and summary of a teammate's most
+// recent relayed SendMessage. A message from a teammate_id with no matching
+// spawn in this scan (e.g. the spawn record fell outside the scanned range)
+// is a no-op: there is nowhere to attach the update.
+func (s *scanState) updateTeammateMessage(teammateID, summary, timestamp string) {
+	tm, ok := s.teammates[teammateID]
+	if !ok {
+		return
+	}
+	tm.LastMessageAt = parseTimestamp(timestamp)
+	tm.LastSummary = summary
+}
+
+// addLiveTask records a newly-launched task, keyed by the ID a launch's
+// structured toolUseResult carries (backgroundTaskId, agentId, or
+// resumedAgentId) — never from ack prose alone. A duplicate ID (e.g. a
+// completed task's ID later reappearing) is a no-op; tasks returns only the
+// first registration per ID.
 func (s *scanState) addLiveTask(id string, kind TaskKind, timestamp string, info toolUseInfo, outputFile string) {
 	if _, exists := s.live[id]; exists {
 		return
@@ -629,13 +856,14 @@ func (s *scanState) addLiveTask(id string, kind TaskKind, timestamp string, info
 	s.order = append(s.order, id)
 }
 
-// extractOutputFile pulls the on-disk output path out of a launch
-// acknowledgment using pattern (bashOutputFilePattern or
-// agentOutputFilePattern), returning "" when the ack carries no path. The
-// bash sentence form's match includes a trailing "." (the path is
-// immediately followed by ". You will be notified..." with no space before
-// the period), which TrimSuffix strips; the agent line form has no such
-// trailing punctuation, so the trim is a no-op there.
+// extractOutputFile pulls the on-disk output path out of ack/resume text
+// using pattern (bashOutputFilePattern for a bash launch's tool_result
+// content, or resumeOutputFilePattern for an agent-resume toolUseResult's
+// message), returning "" when the text carries no path. The bash sentence
+// form's match includes a trailing "." (the path is immediately followed by
+// ". You will be notified..." with no space before the period), which
+// TrimSuffix strips; the resume form's path sits at the end of the message
+// with no trailing punctuation, so the trim is a no-op there.
 func extractOutputFile(pattern *regexp.Regexp, text string) string {
 	m := pattern.FindStringSubmatch(text)
 	if m == nil {
@@ -664,6 +892,20 @@ func (s *scanState) tasks() []LiveTask {
 	}
 	if len(result) == 0 {
 		return nil
+	}
+	return result
+}
+
+// teammateActivities returns every registered teammate in spawn order.
+func (s *scanState) teammateActivities() []TeammateActivity {
+	if len(s.teammateOrder) == 0 {
+		return nil
+	}
+	result := make([]TeammateActivity, 0, len(s.teammateOrder))
+	for _, name := range s.teammateOrder {
+		if tm, ok := s.teammates[name]; ok {
+			result = append(result, *tm)
+		}
 	}
 	return result
 }

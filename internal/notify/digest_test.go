@@ -159,6 +159,57 @@ func TestBuildDigest_TranscriptFallback(t *testing.T) {
 	assertDigestEqual(t, got, wantTranscriptFallbackDigest)
 }
 
+const wantTeammatesDigest = `SESSION
+project=proj3 host=host3 event=Stop
+
+WHAT THE USER LAST ASKED
+(none)
+
+HOW THE TURN ENDED
+(no assistant text)
+
+STILL RUNNING
+  (nothing)
+
+TEAMMATES
+- worker-wire spawned 20m ago
+  last message 5m0s ago: "DONE: TagGranted/Revoked/Transformed wired"
+- worker-cli spawned 10m ago
+
+GOAL
+none
+`
+
+// TestBuildDigest_Teammates exercises the TEAMMATES section: a teammate
+// that has sent a message shows its age and summary, one that hasn't shows
+// only its spawn age, and (per TestBuildDigest_Empty/TestBuildDigest_Full
+// already covering the nil case) the section is omitted entirely rather
+// than rendered empty when there are no teammates at all.
+func TestBuildDigest_Teammates(t *testing.T) {
+	now := time.Date(2026, 7, 5, 15, 0, 0, 0, time.UTC)
+
+	meta := DigestMeta{Project: "proj3", Host: "host3", Event: "Stop"}
+	scan := ScanResult{
+		Teammates: []TeammateActivity{
+			{
+				Name:          "worker-wire",
+				ID:            "worker-wire@anon-session-0100",
+				SpawnedAt:     now.Add(-20 * time.Minute),
+				LastMessageAt: now.Add(-5 * time.Minute),
+				LastSummary:   "DONE: TagGranted/Revoked/Transformed wired",
+			},
+			{
+				Name:      "worker-cli",
+				ID:        "worker-cli@anon-session-0100",
+				SpawnedAt: now.Add(-10 * time.Minute),
+			},
+		},
+	}
+
+	got := BuildDigest(meta, scan, nil, now)
+	assertDigestEqual(t, got, wantTeammatesDigest)
+}
+
 func TestHumanDuration(t *testing.T) {
 	tests := []struct {
 		name string

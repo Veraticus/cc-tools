@@ -13,11 +13,12 @@ import (
 // it ends") — matching the head/tail semantics already established for
 // LastAssistantText et al. in transcript.go.
 const (
-	maxUserAskLen       = 500
-	maxRecentReplyLen   = 120
-	maxAssistantEndLen  = 1500
-	maxTaskDetailLen    = 80
-	maxGoalConditionLen = 200
+	maxUserAskLen         = 500
+	maxRecentReplyLen     = 120
+	maxAssistantEndLen    = 1500
+	maxTaskDetailLen      = 80
+	maxGoalConditionLen   = 200
+	maxTeammateSummaryLen = 120
 
 	// hoursPerDay names the 24 used in the days+hours tier of humanDuration,
 	// which golangci-lint's mnd check otherwise flags as a bare magic number.
@@ -71,8 +72,11 @@ func BuildDigest(meta DigestMeta, scan ScanResult, tasks []TaskActivity, now tim
 		buildAskSection(scan),
 		buildEndedSection(meta, scan),
 		buildTasksSection(tasks, now),
-		buildGoalSection(scan.Goal),
 	}
+	if teammates := buildTeammatesSection(scan.Teammates, now); teammates != "" {
+		sections = append(sections, teammates)
+	}
+	sections = append(sections, buildGoalSection(scan.Goal))
 	return strings.Join(sections, "\n\n") + "\n"
 }
 
@@ -159,6 +163,28 @@ func taskFreshnessLines(t TaskActivity, now time.Time) []string {
 		lines = append(lines, fmt.Sprintf("  tail: %s", tl))
 	}
 	return lines
+}
+
+// buildTeammatesSection lists every spawned teammate with its spawn age and,
+// once it has sent one, the age and summary of its most recent message —
+// context for the judge, never a liveness signal (a teammate is never part
+// of STILL RUNNING or any liveness gate). Unlike STILL RUNNING, which always
+// renders even when empty so the judge can see the deterministic gate found
+// nothing, this section is omitted entirely when there are no teammates:
+// there is no gate here for an empty render to stand in for.
+func buildTeammatesSection(teammates []TeammateActivity, now time.Time) string {
+	if len(teammates) == 0 {
+		return ""
+	}
+	lines := []string{"TEAMMATES"}
+	for _, tm := range teammates {
+		lines = append(lines, fmt.Sprintf("- %s spawned %s ago", tm.Name, humanDuration(now.Sub(tm.SpawnedAt))))
+		if !tm.LastMessageAt.IsZero() {
+			lines = append(lines, fmt.Sprintf("  last message %s ago: %q",
+				humanDuration(now.Sub(tm.LastMessageAt)), truncate(tm.LastSummary, maxTeammateSummaryLen)))
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // buildGoalSection renders "none" outright for GoalNone rather than routing
