@@ -397,6 +397,57 @@ func TestPipeline_Stop_LiveTasks_DecideNotifyTrue_Blocked_PresentStillDelivers(t
 	}
 }
 
+// TestPipeline_Stop_Teammates_DecideNotifyFalse_SilentAndArms exercises the
+// teammates Stop gate end to end: a transcript with a teammate spawn and a
+// recent teammate reply (empty queue, no goal, no live tasks) reaches
+// OutcomeSilent through the decide-mode judge (never compose) and arms the
+// watchdog, and the digest handed to the judge carries the TEAMMATES section
+// the rubric's teammates guidance depends on.
+func TestPipeline_Stop_Teammates_DecideNotifyFalse_SilentAndArms(t *testing.T) {
+	stubBin := writeStubClaude(t)
+	dumpFile := filepath.Join(t.TempDir(), "dump.txt")
+	t.Setenv("STUB_DUMP_FILE", dumpFile)
+	const judgeReason = "teammate still working, no reply yet"
+	t.Setenv("STUB_STDOUT", `{"notify":false,"urgency":"info","task":"t","body":"b","reason":"`+judgeReason+`"}`)
+
+	var stdout bytes.Buffer
+	p, logPath := newGoalTestPipeline(t, &stdout, stubBin, neverPresent, false)
+	transcript := copyFixture(t, "teammates.jsonl")
+
+	sessionID := "sess-teammates"
+	in := HookInput{
+		SessionID: sessionID, CWD: "/home/user/project", TranscriptPath: transcript, HookEventName: "Stop",
+	}
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if stdout.String() != "" {
+		t.Errorf("stdout = %q, want empty (silent, no DRY RUN line)", stdout.String())
+	}
+
+	state := SessionState{Dir: filepath.Join(p.StateBase, sessionID)}
+	if _, err := os.Stat(filepath.Join(state.Dir, "watchdog.lock")); err != nil {
+		t.Errorf("watchdog.lock missing, want armed: %v", err)
+	}
+
+	recs := readDecisionLog(t, logPath)
+	if len(recs) != 1 || recs[0].Outcome != OutcomeSilent.String() {
+		t.Fatalf("records = %+v, want one silent record", recs)
+	}
+	if !strings.Contains(recs[0].Reason, judgeReason) {
+		t.Errorf("Reason = %q, want the judge's verdict reason", recs[0].Reason)
+	}
+
+	dump, err := os.ReadFile(dumpFile)
+	if err != nil {
+		t.Fatalf("reading dump file: %v", err)
+	}
+	if !strings.Contains(string(dump), "TEAMMATES") {
+		t.Errorf("stdin did not carry the TEAMMATES digest section: %q", dump)
+	}
+}
+
 func TestPipeline_Stop_GoalActive_ArmFails_LogsDecisionRecord(t *testing.T) {
 	var stdout bytes.Buffer
 	stateBase := t.TempDir()

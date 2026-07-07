@@ -155,10 +155,13 @@ func Decide(in HookInput, scan ScanResult, env Env) Decision {
 	}
 }
 
-// decideStop handles the Stop event's gates: an active goal or live
-// background work always wins over user presence, since a Stop's
-// implication (the assistant turn ended) is only a silence signal when
-// there is genuinely nothing left for the session to track.
+// decideStop handles the Stop event's gates: an active goal, live
+// background work, or active teammates all win over user presence, since a
+// Stop's implication (the assistant turn ended) is only a silence signal
+// when there is genuinely nothing left for the session to track. Teammates
+// are softer evidence than live tasks (a spawn with no reply yet doesn't
+// guarantee more work is coming), so they route to the decide-mode judge
+// rather than resolving silent on their own.
 func decideStop(scan ScanResult, env Env) Decision {
 	if scan.Goal.Status == GoalActive {
 		// Claude Code's built-in /goal evaluator is skipped at any Stop
@@ -182,6 +185,12 @@ func decideStop(scan ScanResult, env Env) Decision {
 		return Decision{
 			Outcome: OutcomeJudge, JudgeMode: JudgeModeDecide,
 			Reason: "live tasks: parked vs pending", ArmWatchdog: true,
+		}
+	}
+	if len(scan.Teammates) > 0 {
+		return Decision{
+			Outcome: OutcomeJudge, JudgeMode: JudgeModeDecide,
+			Reason: "teammates active: parked vs pending", ArmWatchdog: true,
 		}
 	}
 	if env.UserPresent {

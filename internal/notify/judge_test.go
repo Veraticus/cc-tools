@@ -568,6 +568,9 @@ func TestEvaluate_StdinCarriesDigestAndDecideRubric(t *testing.T) {
 	if !strings.Contains(string(dump), "choose") {
 		t.Errorf("stdin did not carry the decide-mode rubric line: %q", dump)
 	}
+	if !strings.Contains(string(dump), "Teammates") {
+		t.Errorf("stdin did not carry rubric guidance on weighing teammates: %q", dump)
+	}
 }
 
 func TestEvaluate_RetriesWithoutModelOnInvalidModelError(t *testing.T) {

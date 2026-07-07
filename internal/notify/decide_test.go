@@ -66,6 +66,16 @@ func TestDecide(t *testing.T) {
 			},
 		},
 		{
+			name: "stop with teammates judges decide mode",
+			in:   HookInput{HookEventName: "Stop"},
+			scan: ScanResult{Teammates: []TeammateActivity{{Name: "worker-wire"}}},
+			env:  Env{},
+			want: Decision{
+				Outcome: OutcomeJudge, JudgeMode: JudgeModeDecide,
+				Reason: "teammates active: parked vs pending", ArmWatchdog: true,
+			},
+		},
+		{
 			name: "stop with user present and no work is silent",
 			in:   HookInput{HookEventName: "Stop"},
 			scan: ScanResult{},
@@ -349,6 +359,16 @@ func TestDecide(t *testing.T) {
 			want: Decision{
 				Outcome: OutcomeJudge, JudgeMode: JudgeModeDecide,
 				Reason: "live tasks: parked vs pending", ArmWatchdog: true,
+			},
+		},
+		{
+			name: "stop with teammates still judges even when user present",
+			in:   HookInput{HookEventName: "Stop"},
+			scan: ScanResult{Teammates: []TeammateActivity{{Name: "worker-wire"}}},
+			env:  Env{UserPresent: true},
+			want: Decision{
+				Outcome: OutcomeJudge, JudgeMode: JudgeModeDecide,
+				Reason: "teammates active: parked vs pending", ArmWatchdog: true,
 			},
 		},
 	}

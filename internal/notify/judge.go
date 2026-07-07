@@ -39,6 +39,7 @@ Rules:
 - "blocked": the user's input gates ALL further progress right now — a direct question, a decision needed, or a failure with no path forward. A task still running elsewhere does NOT unblock a direct question; if the session is waiting on the user AND something is still running, it is still blocked.
 - "done": a deliverable is ready and nothing still running will extend it further. A parked service (a dev server, a file watcher, anything whose output loops steadily rather than converging toward a result) is not pending work — the session is done, not waiting.
 - Silence (notify=false): one or more still-running tasks (builds, tests, subagents) are genuine pending work the session is awaiting. Their completion revives the session and a later evaluation covers it — do not notify now.
+- Teammates: a TEAMMATES section shows agents spawned to work in parallel. A teammate spawned recently, or one whose last message arrived recently, means orchestration is still in flight — prefer silence. Teammates that have gone quiet for a long stretch are not pending work on their own; weigh them like any other stale signal.
 - Tie-break, done vs. silent: unsure whether the session is truly done or should stay silent and wait — choose silent, a later check will run.
 - Tie-break, blocked vs. done: unsure whether the session is blocked on the user or simply done — choose blocked, a missed question is worse than an unneeded ping.
 
