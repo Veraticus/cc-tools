@@ -13,12 +13,10 @@ package notify
 // and noise fields (thinking blocks, usage, requestId, diagnostics) trimmed
 // — the same minimal-reconstruction convention the existing testdata/goal_*
 // fixtures already use. Source sessions:
-//   - grailquest, session e8bf785e-2417-4f56-b6ce-2a98bfb4a8c1 (197
-//     historical blocks) — corpus_active_parked_grailquest.jsonl,
-//     corpus_goal_met.jsonl.
-//   - savecraft, session 8610f588-53f1-4d97-be66-86b660912769 (11
-//     historical blocks) — corpus_active_parked_savecraft.jsonl,
-//     corpus_goal_cleared.jsonl.
+//   - grailquest session (197 historical blocks) —
+//     corpus_active_parked_grailquest.jsonl, corpus_goal_met.jsonl.
+//   - savecraft session (11 historical blocks) —
+//     corpus_active_parked_savecraft.jsonl, corpus_goal_cleared.jsonl.
 //
 // The raw multi-MB originals are intentionally NOT committed; see
 // TestCorpus_FullTranscriptReplay_OptIn below for replaying them directly.
@@ -268,14 +266,10 @@ const stopHookSummaryMarker = `"subtype":"stop_hook_summary"`
 // those files are multi-MB, uncommitted, and (the grailquest one) known to
 // churn out from under a running session.
 const replayInstructions = "CCTOOLS_NOTIFY_REPLAY_TRANSCRIPT not set; skipping opt-in full-transcript replay.\n" +
-	"To run against the real originals:\n" +
-	"  CCTOOLS_NOTIFY_REPLAY_TRANSCRIPT=/home/joshsymonds/.claude/projects/" +
-	"-home-joshsymonds-Personal-grailquest/e8bf785e-2417-4f56-b6ce-2a98bfb4a8c1.jsonl \\\n" +
+	"To run it against a real session transcript, point the env var at one and re-run:\n" +
+	"  CCTOOLS_NOTIFY_REPLAY_TRANSCRIPT=~/.claude/projects/<project-dir>/<session-id>.jsonl \\\n" +
 	"    go test ./internal/notify/ -run TestCorpus_FullTranscriptReplay_OptIn -v\n" +
-	"  CCTOOLS_NOTIFY_REPLAY_TRANSCRIPT=/home/joshsymonds/.claude/projects/" +
-	"-home-joshsymonds-Personal-savecraft-gg/8610f588-53f1-4d97-be66-86b660912769.jsonl \\\n" +
-	"    go test ./internal/notify/ -run TestCorpus_FullTranscriptReplay_OptIn -v\n" +
-	"(the grailquest path is known to churn; retry if it reports missing)"
+	"(a live session can rewrite its transcript out from under the test; retry if it reports missing)"
 
 // TestCorpus_FullTranscriptReplay_OptIn is the opt-in harness for replaying
 // an entire real transcript end to end. It never runs as part of `make
@@ -286,10 +280,12 @@ const replayInstructions = "CCTOOLS_NOTIFY_REPLAY_TRANSCRIPT not set; skipping o
 // For every real Stop hook boundary found in the transcript (see
 // stopHookSummaryMarker), it replays Pipeline.Run against the transcript
 // prefix up to that point and asserts stdout never carries a block decision.
-// To avoid rescanning the (potentially tens-of-MB) source from byte zero at
-// every boundary, it builds one local prefix file that grows monotonically
-// alongside the scan and re-points TranscriptPath at that single growing
-// file, rather than re-opening the original source per boundary.
+// The replay is inherently ~O(N²) in transcript size: each boundary re-runs
+// Pipeline.Run, which re-scans the whole prefix from byte zero — exactly as
+// production re-scans the transcript on every real Stop. The single growing
+// prefix file it builds (monotonically, re-pointing TranscriptPath at it) is
+// only a constant-factor saving: it avoids re-copying the source per
+// boundary, not the per-boundary full scan.
 func TestCorpus_FullTranscriptReplay_OptIn(t *testing.T) {
 	path := os.Getenv("CCTOOLS_NOTIFY_REPLAY_TRANSCRIPT")
 	if path == "" {
