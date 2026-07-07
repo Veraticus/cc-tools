@@ -15,7 +15,6 @@ func TestParseHookInput(t *testing.T) {
 			"notification_type": "idle_prompt",
 			"message": "hello",
 			"last_assistant_message": "all done",
-			"stop_hook_active": true,
 			"agent_id": "agent-1",
 			"agent_type": "worker"
 		}`))
@@ -30,7 +29,6 @@ func TestParseHookInput(t *testing.T) {
 			NotificationType:     "idle_prompt",
 			Message:              "hello",
 			LastAssistantMessage: "all done",
-			StopHookActive:       true,
 			AgentID:              "agent-1",
 			AgentType:            "worker",
 		}

@@ -58,43 +58,6 @@ const judgeModeCompose = `Mode: compose-only — the decision to notify has alre
 // itself (e.g. distinguishing a parked dev server from pending work).
 const judgeModeDecide = `Mode: decide — choose whether to notify at all. Set notify to true or false per the rules above, and if true, write task/body/urgency/reason.`
 
-// goalRubric is the fixed instruction body for the goal-continuation judge
-// mode: given a digest with live tasks, classify those tasks and, only when
-// they are parked, judge whether the GOAL section's condition already holds.
-// It shares no output keys with judgeRubric, so it stands alone rather than
-// being appended as a mode line.
-const goalRubric = `You are judging whether a Claude Code coding session's goal condition has already been met, given a digest showing the session's current GOAL, its live (still-running) tasks, and the text of the turn that just ended.
-
-Rules:
-- "pending": at least one live task will exit on its own and produce a result — a build, a test run, a subagent. Genuine pending work is still awaited; do not judge the goal yet.
-- "parked": ALL live tasks are non-converging processes — a dev server, a file watcher, anything whose output loops steadily rather than converging toward a result. None of them will ever finish on their own, so waiting further is pointless.
-- Only when tasks is "parked", judge whether the GOAL section's condition is already satisfied by what the digest shows. When tasks is "pending", goal_met must be false — the goal cannot be judged met while genuine pending work is still awaited.
-
-Write:
-- reason: one line. For pending, name what is being awaited. For parked and not yet met, write the session's next action to meet the goal (e.g. "Run the remaining checks, then re-run the review") — this exact line is fed back to the session as its instruction to continue, so make it a directive, not a status report. For parked and met, say why it is met.
-
-Output contract: respond with a single raw JSON object and nothing else — no markdown code fences, no commentary before or after. It must have exactly these keys: tasks (one of "pending", "parked"), goal_met (bool), reason (string).`
-
-// maxGoalReasonBytes bounds the GoalVerdict.Reason field after clamping (see
-// truncate in transcript.go). Reason is decision-log-only, same as
-// JudgeVerdict.Reason, so it gets a generous but bounded cap.
-const maxGoalReasonBytes = 200
-
-// GoalVerdict is the LLM judge's validated answer for the goal-continuation
-// question. Reason is decision-log-only and never reaches the user.
-type GoalVerdict struct {
-	Tasks   string `json:"tasks"`
-	GoalMet bool   `json:"goal_met"`
-	Reason  string `json:"reason"`
-	// RetriedWithoutModel is true when the first subprocess attempt (with
-	// --model pinned) failed with the invalid-model-identifier error and a
-	// second attempt without --model recovered. It is never part of the
-	// model's JSON contract — set internally by runRetrying — so a caller
-	// (a later pipeline stage) can append a reason suffix to the decision
-	// log.
-	RetriedWithoutModel bool `json:"-"`
-}
-
 // JudgeVerdict is the LLM judge's validated answer. Task and Body are
 // already byte-clamped (maxTaskBytes/maxBodyBytes) by the time Evaluate
 // returns them. Reason is decision-log-only and never reaches the user.
@@ -188,49 +151,6 @@ func (j Judge) Evaluate(ctx context.Context, digest string, mode JudgeMode) (Jud
 	return v, nil
 }
 
-// EvaluateGoal runs the goal-continuation judge over digest and returns a
-// validated verdict or an error. Like Evaluate, it never guesses on
-// failure — timeout, nonzero exit, empty output, malformed JSON, and an
-// invalid tasks value are all returned as errors with a bounded snippet of
-// whatever the subprocess said, never papered over with a default verdict.
-func (j Judge) EvaluateGoal(ctx context.Context, digest string) (GoalVerdict, error) {
-	prompt := buildGoalPrompt(digest)
-
-	timeout := j.Timeout
-	if timeout <= 0 {
-		timeout = defaultJudgeTimeout
-	}
-	runCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	stdout, stderr, retried, runErr := j.runRetrying(runCtx, prompt)
-	if runErr != nil {
-		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
-			return GoalVerdict{}, fmt.Errorf("judge: claude -p timed out after %s: %w", timeout, runErr)
-		}
-		return GoalVerdict{}, fmt.Errorf("judge: claude -p exited with error: %w (stdout: %s, stderr: %s)",
-			runErr, snippet(stdout), snippet(stderr))
-	}
-
-	out := strings.TrimSpace(stdout)
-	if out == "" {
-		return GoalVerdict{}, errors.New("judge: claude -p returned empty stdout")
-	}
-
-	v, err := parseGoalVerdict(out)
-	if err != nil {
-		return GoalVerdict{}, err
-	}
-	v.RetriedWithoutModel = retried
-	return v, nil
-}
-
-// buildGoalPrompt joins the fixed goal rubric and the digest into the single
-// STDIN payload for `claude -p`, mirroring buildJudgePrompt.
-func buildGoalPrompt(digest string) string {
-	return fmt.Sprintf("%s\n\nDIGEST\n%s\n", goalRubric, digest)
-}
-
 // buildJudgePrompt joins the fixed rubric, the mode-specific instruction
 // line, and the digest into the single STDIN payload for `claude -p`. The
 // prompt goes on STDIN rather than argv specifically to avoid argv-length
@@ -274,8 +194,8 @@ func isInvalidModelErr(stdout, stderr string) bool {
 // gateway that rejects the pinned model id but resolves the session's own
 // default model correctly. Any other failure, and a retry that itself
 // fails, is returned after that attempt with no further retries. retried
-// reports whether the second attempt ran, so Evaluate/EvaluateGoal can
-// record it on the returned verdict.
+// reports whether the second attempt ran, so Evaluate can record it on the
+// returned verdict.
 func (j Judge) runRetrying(ctx context.Context, prompt string) (string, string, bool, error) {
 	stdout, stderr, err := j.run(ctx, prompt, true)
 	if err != nil && isInvalidModelErr(stdout, stderr) {
@@ -364,31 +284,6 @@ func parseVerdict(raw string) (JudgeVerdict, error) {
 
 	v.Task = truncateWords(v.Task, maxTaskBytes)
 	v.Body = truncateWords(v.Body, maxBodyBytes)
-	return v, nil
-}
-
-// parseGoalVerdict strips any markdown fences, unmarshals the JSON verdict,
-// validates tasks, and clamps Reason to its byte cap. It mirrors
-// parseVerdict's pattern exactly.
-func parseGoalVerdict(raw string) (GoalVerdict, error) {
-	cleaned := stripFences(raw)
-
-	var v GoalVerdict
-	if err := json.Unmarshal([]byte(cleaned), &v); err != nil {
-		return GoalVerdict{}, fmt.Errorf("judge: malformed goal verdict JSON: %w (stdout: %s)", err, snippet(raw))
-	}
-
-	switch v.Tasks {
-	case "pending", "parked":
-		// valid
-	default:
-		return GoalVerdict{}, fmt.Errorf("judge: invalid tasks %q (stdout: %s)", v.Tasks, snippet(raw))
-	}
-
-	// Reason is decision-log-first but also reaches the user verbatim as a
-	// goal-stalled/complete notification body and the Stop-hook block
-	// reason, so it gets the word-safe clamp.
-	v.Reason = truncateWords(v.Reason, maxGoalReasonBytes)
 	return v, nil
 }
 

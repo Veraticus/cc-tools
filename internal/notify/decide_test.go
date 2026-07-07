@@ -43,7 +43,9 @@ func TestDecide(t *testing.T) {
 			in:   HookInput{HookEventName: "Stop"},
 			scan: ScanResult{Goal: GoalState{Status: GoalActive}},
 			env:  Env{},
-			want: Decision{Outcome: OutcomeSilent, Reason: "goal active", ArmWatchdog: true},
+			want: Decision{
+				Outcome: OutcomeSilent, Reason: "goal active: deferring to built-in /goal", ArmWatchdog: true,
+			},
 		},
 		{
 			name: "stop with live tasks judges decide mode",
@@ -56,13 +58,12 @@ func TestDecide(t *testing.T) {
 			},
 		},
 		{
-			name: "stop with goal active and live tasks routes to goal judge",
+			name: "stop with goal active and live tasks still defers silently",
 			in:   HookInput{HookEventName: "Stop"},
 			scan: ScanResult{Goal: GoalState{Status: GoalActive}, LiveTasks: liveTasks},
 			env:  Env{},
 			want: Decision{
-				Outcome: OutcomeGoalJudge,
-				Reason:  "goal active with live tasks: goal continuation",
+				Outcome: OutcomeSilent, Reason: "goal active: deferring to built-in /goal", ArmWatchdog: true,
 			},
 		},
 		{
@@ -391,7 +392,6 @@ func TestOutcomeString(t *testing.T) {
 		{OutcomeSilent, "silent"},
 		{OutcomeSend, "send"},
 		{OutcomeJudge, "judge"},
-		{OutcomeGoalJudge, "goal-judge"},
 	}
 	for _, tt := range tests {
 		if got := tt.o.String(); got != tt.want {

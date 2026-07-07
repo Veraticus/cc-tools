@@ -31,7 +31,6 @@ type HookInput struct {
 	Message          string `json:"message"`
 	// LastAssistantMessage applies to Stop events.
 	LastAssistantMessage string `json:"last_assistant_message"`
-	StopHookActive       bool   `json:"stop_hook_active"`
 	// AgentID and AgentType are set only inside a subagent/teammate context.
 	AgentID   string `json:"agent_id"`
 	AgentType string `json:"agent_type"`
