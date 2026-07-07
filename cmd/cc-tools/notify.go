@@ -45,7 +45,8 @@ func runNotifyCommand() {
 	}
 
 	log := notify.DecisionLog{Path: filepath.Join(*stateBase, decisionLogName)}
-	judge := notify.Judge{Bin: "claude", Model: notifyJudgeModel, Timeout: notifyJudgeTimeout}
+	judgeModel := notify.ResolveJudgeModel(os.Environ(), notifyJudgeModel)
+	judge := notify.Judge{Bin: "claude", Model: judgeModel, Timeout: notifyJudgeTimeout}
 	sender, senderOK := notify.ResolveSenderEnv(os.Environ())
 	sender.Host = notify.ShortHostname()
 

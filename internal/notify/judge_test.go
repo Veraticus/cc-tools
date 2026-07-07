@@ -55,6 +55,95 @@ func writeStubClaude(t *testing.T) string {
 	return path
 }
 
+// retryStubScript stands in for the claude binary in the invalid-model
+// retry tests below. It logs each invocation's full argv (one line per
+// call) to STUB_CALL_LOG, so a test can assert both the call count and
+// whether a given invocation carried --model. STUB_RETRY_MODE selects the
+// behavior:
+//   - "invalid_then_ok": fails with the observed invalid-model-identifier
+//     stdout when --model is present, succeeds (JudgeVerdict-shaped JSON)
+//     when it is absent.
+//   - "invalid_then_ok_goal": same, but the success payload is
+//     GoalVerdict-shaped JSON, for EvaluateGoal's retry test.
+//   - "invalid_always": always fails with the invalid-model-identifier
+//     stdout, regardless of --model — proves the retry runs exactly once
+//     and does not loop.
+//   - "unrelated": always fails with an unrelated stderr message,
+//     regardless of --model — proves non-model errors never retry.
+const retryStubScript = `#!/bin/sh
+input=$(cat)
+
+argv_line=""
+for a in "$@"; do
+  argv_line="$argv_line$a "
+done
+
+if [ -n "$STUB_CALL_LOG" ]; then
+  printf '%s\n' "$argv_line" >> "$STUB_CALL_LOG"
+fi
+
+has_model=0
+case "$argv_line" in
+  *"--model"*) has_model=1 ;;
+esac
+
+case "$STUB_RETRY_MODE" in
+  invalid_then_ok)
+    if [ "$has_model" = "1" ]; then
+      printf '%s' 'API Error (claude-haiku-4-5): 400 The provided model identifier is invalid.. Run --model to pick a different model.'
+      exit 1
+    fi
+    printf '%s' '{"notify":true,"urgency":"done","task":"recovered","body":"ok without model","reason":"r"}'
+    exit 0
+    ;;
+  invalid_then_ok_goal)
+    if [ "$has_model" = "1" ]; then
+      printf '%s' 'API Error (claude-haiku-4-5): 400 The provided model identifier is invalid.. Run --model to pick a different model.'
+      exit 1
+    fi
+    printf '%s' '{"tasks":"parked","goal_met":true,"reason":"recovered"}'
+    exit 0
+    ;;
+  invalid_always)
+    printf '%s' 'API Error (claude-haiku-4-5): 400 The provided model identifier is invalid.. Run --model to pick a different model.'
+    exit 1
+    ;;
+  unrelated)
+    printf '%s' 'boom: something else broke' >&2
+    exit 1
+    ;;
+esac
+
+exit 0
+`
+
+// writeRetryStubClaude writes retryStubScript to a temp dir and returns its path.
+func writeRetryStubClaude(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(path, []byte(retryStubScript), 0o755); err != nil {
+		t.Fatalf("writing retry stub: %v", err)
+	}
+	return path
+}
+
+// readCallLog reads a STUB_CALL_LOG file and returns its non-empty lines,
+// one per subprocess invocation.
+func readCallLog(t *testing.T, path string) []string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading call log: %v", err)
+	}
+	var lines []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
 func TestEvaluate_ValidVerdictRoundTrips(t *testing.T) {
 	t.Setenv(
 		"STUB_STDOUT",
@@ -478,5 +567,128 @@ func TestEvaluate_StdinCarriesDigestAndDecideRubric(t *testing.T) {
 	}
 	if !strings.Contains(string(dump), "choose") {
 		t.Errorf("stdin did not carry the decide-mode rubric line: %q", dump)
+	}
+}
+
+func TestEvaluate_RetriesWithoutModelOnInvalidModelError(t *testing.T) {
+	callLog := filepath.Join(t.TempDir(), "calls.log")
+	t.Setenv("STUB_CALL_LOG", callLog)
+	t.Setenv("STUB_RETRY_MODE", "invalid_then_ok")
+
+	j := Judge{Bin: writeRetryStubClaude(t), Model: "claude-haiku-4-5"}
+	got, err := j.Evaluate(context.Background(), "digest", JudgeModeDecide)
+	if err != nil {
+		t.Fatalf("Evaluate() error = %v, want recovery via retry", err)
+	}
+	if !got.RetriedWithoutModel {
+		t.Errorf("Evaluate() RetriedWithoutModel = false, want true")
+	}
+	if got.Task != "recovered" {
+		t.Errorf("Evaluate() Task = %q, want the retry's recovered verdict", got.Task)
+	}
+
+	calls := readCallLog(t, callLog)
+	if len(calls) != 2 {
+		t.Fatalf("call count = %d, want 2 (initial + retry)", len(calls))
+	}
+	if !strings.Contains(calls[0], "--model") {
+		t.Errorf("first call argv = %q, want it to contain --model", calls[0])
+	}
+	if strings.Contains(calls[1], "--model") {
+		t.Errorf("second call argv = %q, want it to omit --model", calls[1])
+	}
+}
+
+func TestEvaluate_UnrelatedErrorDoesNotRetry(t *testing.T) {
+	callLog := filepath.Join(t.TempDir(), "calls.log")
+	t.Setenv("STUB_CALL_LOG", callLog)
+	t.Setenv("STUB_RETRY_MODE", "unrelated")
+
+	j := Judge{Bin: writeRetryStubClaude(t), Model: "claude-haiku-4-5"}
+	got, err := j.Evaluate(context.Background(), "digest", JudgeModeDecide)
+	if err == nil {
+		t.Fatal("Evaluate() error = nil, want unrelated error surfaced")
+	}
+	if !strings.Contains(err.Error(), "boom: something else broke") {
+		t.Errorf("Evaluate() error = %q, want it to include the stderr snippet", err.Error())
+	}
+	if got != (JudgeVerdict{}) {
+		t.Errorf("Evaluate() verdict = %+v, want zero value on error", got)
+	}
+
+	calls := readCallLog(t, callLog)
+	if len(calls) != 1 {
+		t.Fatalf("call count = %d, want 1 (no retry for a non-model error)", len(calls))
+	}
+}
+
+func TestEvaluate_DoubleInvalidModelErrorRunsExactlyTwice(t *testing.T) {
+	callLog := filepath.Join(t.TempDir(), "calls.log")
+	t.Setenv("STUB_CALL_LOG", callLog)
+	t.Setenv("STUB_RETRY_MODE", "invalid_always")
+
+	j := Judge{Bin: writeRetryStubClaude(t), Model: "claude-haiku-4-5"}
+	got, err := j.Evaluate(context.Background(), "digest", JudgeModeDecide)
+	if err == nil {
+		t.Fatal("Evaluate() error = nil, want invalid-model error after a failed retry")
+	}
+	if got != (JudgeVerdict{}) {
+		t.Errorf("Evaluate() verdict = %+v, want zero value on error", got)
+	}
+
+	calls := readCallLog(t, callLog)
+	if len(calls) != 2 {
+		t.Fatalf("call count = %d, want exactly 2 (no further retries)", len(calls))
+	}
+}
+
+func TestEvaluateGoal_RetriesWithoutModelOnInvalidModelError(t *testing.T) {
+	callLog := filepath.Join(t.TempDir(), "calls.log")
+	t.Setenv("STUB_CALL_LOG", callLog)
+	t.Setenv("STUB_RETRY_MODE", "invalid_then_ok_goal")
+
+	j := Judge{Bin: writeRetryStubClaude(t), Model: "claude-haiku-4-5"}
+	got, err := j.EvaluateGoal(context.Background(), "digest")
+	if err != nil {
+		t.Fatalf("EvaluateGoal() error = %v, want recovery via retry", err)
+	}
+	if !got.RetriedWithoutModel {
+		t.Errorf("EvaluateGoal() RetriedWithoutModel = false, want true")
+	}
+	if got.Reason != "recovered" {
+		t.Errorf("EvaluateGoal() Reason = %q, want the retry's recovered verdict", got.Reason)
+	}
+
+	calls := readCallLog(t, callLog)
+	if len(calls) != 2 {
+		t.Fatalf("call count = %d, want 2 (initial + retry)", len(calls))
+	}
+	if !strings.Contains(calls[0], "--model") {
+		t.Errorf("first call argv = %q, want it to contain --model", calls[0])
+	}
+	if strings.Contains(calls[1], "--model") {
+		t.Errorf("second call argv = %q, want it to omit --model", calls[1])
+	}
+}
+
+func TestResolveJudgeModel_PrefersSmallFastModelEnv(t *testing.T) {
+	environ := []string{"OTHER=1", "ANTHROPIC_SMALL_FAST_MODEL=claude-haiku-9000"}
+	got := ResolveJudgeModel(environ, "claude-haiku-4-5")
+	if got != "claude-haiku-9000" {
+		t.Errorf("ResolveJudgeModel() = %q, want claude-haiku-9000", got)
+	}
+}
+
+func TestResolveJudgeModel_DefaultsWhenAbsent(t *testing.T) {
+	got := ResolveJudgeModel([]string{"OTHER=1"}, "claude-haiku-4-5")
+	if got != "claude-haiku-4-5" {
+		t.Errorf("ResolveJudgeModel() = %q, want fallback default", got)
+	}
+}
+
+func TestResolveJudgeModel_DefaultsWhenEnvValueEmpty(t *testing.T) {
+	got := ResolveJudgeModel([]string{"ANTHROPIC_SMALL_FAST_MODEL="}, "claude-haiku-4-5")
+	if got != "claude-haiku-4-5" {
+		t.Errorf("ResolveJudgeModel() = %q, want fallback default when env value is empty", got)
 	}
 }

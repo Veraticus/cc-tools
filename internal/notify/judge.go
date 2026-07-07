@@ -85,6 +85,13 @@ type GoalVerdict struct {
 	Tasks   string `json:"tasks"`
 	GoalMet bool   `json:"goal_met"`
 	Reason  string `json:"reason"`
+	// RetriedWithoutModel is true when the first subprocess attempt (with
+	// --model pinned) failed with the invalid-model-identifier error and a
+	// second attempt without --model recovered. It is never part of the
+	// model's JSON contract — set internally by runRetrying — so a caller
+	// (a later pipeline stage) can append a reason suffix to the decision
+	// log.
+	RetriedWithoutModel bool `json:"-"`
 }
 
 // JudgeVerdict is the LLM judge's validated answer. Task and Body are
@@ -96,6 +103,26 @@ type JudgeVerdict struct {
 	Task    string  `json:"task"`
 	Body    string  `json:"body"`
 	Reason  string  `json:"reason"`
+	// RetriedWithoutModel is true when the first subprocess attempt (with
+	// --model pinned) failed with the invalid-model-identifier error and a
+	// second attempt without --model recovered. It is never part of the
+	// model's JSON contract — set internally by runRetrying — so a caller
+	// (a later pipeline stage) can append a reason suffix to the decision
+	// log.
+	RetriedWithoutModel bool `json:"-"`
+}
+
+// ResolveJudgeModel resolves the judge model from environ (os.Environ()
+// form, "KEY=VALUE" entries): ANTHROPIC_SMALL_FAST_MODEL wins when set to a
+// non-empty value. It is Claude Code's own convention for "the cheap model
+// valid in this environment," so it resolves correctly even behind a work
+// API gateway that rejects a hardcoded model id like claude-haiku-4-5.
+// Absent or empty, fallback is returned unchanged.
+func ResolveJudgeModel(environ []string, fallback string) string {
+	if m := parseEnviron(environ)["ANTHROPIC_SMALL_FAST_MODEL"]; m != "" {
+		return m
+	}
+	return fallback
 }
 
 // Judge runs the LLM judge over a rendered digest via a headless `claude -p`
@@ -131,7 +158,7 @@ func (j Judge) Evaluate(ctx context.Context, digest string, mode JudgeMode) (Jud
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	stdout, stderr, runErr := j.run(runCtx, prompt)
+	stdout, stderr, retried, runErr := j.runRetrying(runCtx, prompt)
 	if runErr != nil {
 		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 			return JudgeVerdict{}, fmt.Errorf("judge: claude -p timed out after %s: %w", timeout, runErr)
@@ -149,6 +176,7 @@ func (j Judge) Evaluate(ctx context.Context, digest string, mode JudgeMode) (Jud
 	if err != nil {
 		return JudgeVerdict{}, err
 	}
+	v.RetriedWithoutModel = retried
 	if mode == JudgeModeCompose && !v.Notify {
 		// Compose mode's contract is notify=true — the send is already
 		// decided. A notify=false verdict here has no usable text, so it is
@@ -174,7 +202,7 @@ func (j Judge) EvaluateGoal(ctx context.Context, digest string) (GoalVerdict, er
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	stdout, stderr, runErr := j.run(runCtx, prompt)
+	stdout, stderr, retried, runErr := j.runRetrying(runCtx, prompt)
 	if runErr != nil {
 		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 			return GoalVerdict{}, fmt.Errorf("judge: claude -p timed out after %s: %w", timeout, runErr)
@@ -188,7 +216,12 @@ func (j Judge) EvaluateGoal(ctx context.Context, digest string) (GoalVerdict, er
 		return GoalVerdict{}, errors.New("judge: claude -p returned empty stdout")
 	}
 
-	return parseGoalVerdict(out)
+	v, err := parseGoalVerdict(out)
+	if err != nil {
+		return GoalVerdict{}, err
+	}
+	v.RetriedWithoutModel = retried
+	return v, nil
 }
 
 // buildGoalPrompt joins the fixed goal rubric and the digest into the single
@@ -216,13 +249,50 @@ func buildJudgePrompt(digest string, mode JudgeMode) (string, error) {
 	return fmt.Sprintf("%s\n\n%s\n\nDIGEST\n%s\n", judgeRubric, modeLine, digest), nil
 }
 
+// invalidModelErrText is the distinguishing substring of the 400 error a
+// work API gateway emits when the pinned judge model id (e.g.
+// claude-haiku-4-5) isn't valid in that environment, observed verbatim as:
+//
+//	API Error (claude-haiku-4-5): 400 The provided model identifier is
+//	invalid.. Run --model to pick a different model.
+//
+// Only this exact failure class triggers runRetrying's no-model retry;
+// every other subprocess failure is returned to the caller after one
+// attempt, unchanged.
+const invalidModelErrText = "The provided model identifier is invalid"
+
+// isInvalidModelErr reports whether stdout or stderr carries the
+// invalid-model-identifier error text.
+func isInvalidModelErr(stdout, stderr string) bool {
+	return strings.Contains(stdout, invalidModelErrText) || strings.Contains(stderr, invalidModelErrText)
+}
+
+// runRetrying runs the claude subprocess with --model pinned, retrying
+// exactly once with --model omitted entirely if that first attempt fails
+// with the invalid-model-identifier error — the backstop for a work API
+// gateway that rejects the pinned model id but resolves the session's own
+// default model correctly. Any other failure, and a retry that itself
+// fails, is returned after that attempt with no further retries. retried
+// reports whether the second attempt ran, so Evaluate/EvaluateGoal can
+// record it on the returned verdict.
+func (j Judge) runRetrying(ctx context.Context, prompt string) (string, string, bool, error) {
+	stdout, stderr, err := j.run(ctx, prompt, true)
+	if err != nil && isInvalidModelErr(stdout, stderr) {
+		stdout, stderr, err = j.run(ctx, prompt, false)
+		return stdout, stderr, true, err
+	}
+	return stdout, stderr, false, err
+}
+
 // run execs the claude binary and returns its stdout/stderr. Flags chosen,
 // each for a specific reason confirmed against `claude -p --help` on the
 // installed version:
 //   - "-p": headless, non-interactive — required for a scripted call.
 //   - "--model <Model>": pin the judge model explicitly rather than trust
 //     whatever model the invoking user's session happens to be configured
-//     for.
+//     for. Omitted entirely when withModel is false — runRetrying's
+//     no-model retry — falling back to whatever model the session already
+//     resolves.
 //   - "--output-format text": the model's raw text reply on stdout, no JSON
 //     envelope to unwrap first — we already ask the model itself to emit
 //     JSON as that text.
@@ -242,14 +312,16 @@ func buildJudgePrompt(digest string, mode JudgeMode) (string, error) {
 // the guard, a judge call would trigger a nested judge call. The env var is
 // that notifier's kill switch, read at the top of the hook path, so the
 // judge can never recurse into itself.
-func (j Judge) run(ctx context.Context, prompt string) (string, string, error) {
-	args := []string{
-		"-p",
-		"--model", j.Model,
+func (j Judge) run(ctx context.Context, prompt string, withModel bool) (string, string, error) {
+	args := []string{"-p"}
+	if withModel {
+		args = append(args, "--model", j.Model)
+	}
+	args = append(args,
 		"--output-format", "text",
 		"--strict-mcp-config",
 		"--mcp-config", `{"mcpServers":{}}`,
-	}
+	)
 	//nolint:gosec // j.Bin is caller-controlled config ("claude" in production, a test stub path), not external input
 	cmd := exec.CommandContext(ctx, j.Bin, args...)
 	cmd.Stdin = strings.NewReader(prompt)
