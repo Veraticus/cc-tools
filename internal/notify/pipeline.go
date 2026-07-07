@@ -34,6 +34,22 @@ const goalBlockCap = 8
 // dry run reaches an arm-the-watchdog branch without actually arming it.
 const dryRunWouldArmWatchdogSuffix = " (would arm watchdog)"
 
+// failOpenWindow rate-limits a compose/decide-mode judge-error fallback send
+// to at most one per session within this long of its last notification: a
+// run of judge failures must not each re-ping — the reliability invariant
+// (an LLM failure may never lose a genuine ping) only requires that the
+// FIRST fail-open after a quiet period gets through; repeats within the
+// window are the same failure already surfaced.
+const failOpenWindow = 10 * time.Minute
+
+// goalBlockMinInterval paces consecutive Stop-hook blocks for the same goal
+// condition: a parked-unmet verdict within this long of the previous block
+// resolves silent (watchdog armed, count untouched) instead of blocking
+// again — the fix for a goal-judge block re-prodding a session every
+// evaluation cycle instead of giving it room to act on the previous block's
+// directive.
+const goalBlockMinInterval = 5 * time.Minute
+
 // Pipeline is the top-level orchestrator for a single hook invocation: it
 // scans the transcript, computes the deterministic Decide() gates, and
 // routes to a plain send, silence, or the LLM judge — then delivers,
@@ -229,7 +245,9 @@ func (p Pipeline) handleJudge(
 
 	switch d.JudgeMode {
 	case JudgeModeCompose:
-		p.handleComposeVerdict(ctx, state, in, now, project, locus, d, verdict, jerr, digest, judgeMs, reasonSuffix)
+		p.handleComposeVerdict(
+			ctx, state, in, res, env, now, project, locus, host, d, verdict, jerr, digest, judgeMs, reasonSuffix,
+		)
 	case JudgeModeDecide:
 		p.handleDecideVerdict(
 			ctx,
@@ -259,9 +277,18 @@ func (p Pipeline) handleJudge(
 // "session idle" label would waste the slot) — never silent, per the
 // reliability invariant that an LLM failure may never lose a genuine ping.
 func (p Pipeline) handleComposeVerdict(
-	ctx context.Context, state SessionState, in HookInput, now time.Time, project, locus string,
+	ctx context.Context, state SessionState, in HookInput, res ScanResult, env Env, now time.Time,
+	project, locus, host string,
 	d Decision, verdict JudgeVerdict, jerr error, digest string, judgeMs int64, reasonSuffix string,
 ) {
+	if jerr != nil && failOpenSuppressed(env) {
+		//nolint:contextcheck // arming spawns a detached child that must outlive this hook's ctx; see SpawnRecheck
+		p.suppressJudgeError(
+			state, in, res, env, now, project, host, JudgeModeCompose, jerr, digest, judgeMs, reasonSuffix,
+		)
+		return
+	}
+
 	var n Notification
 	if jerr == nil {
 		n = Notification{Title: project + " · " + verdict.Task, Body: verdict.Body, Urgency: verdict.Urgency}
@@ -278,8 +305,49 @@ func (p Pipeline) handleComposeVerdict(
 		_ = state.MarkNotified(now)
 	}
 	p.logJudged(
-		in, now, OutcomeSend.String(), d.Reason+reasonSuffix+sendSuffix, n, JudgeModeCompose, jerr, digest, judgeMs,
+		in, now, OutcomeSend.String(),
+		d.Reason+reasonSuffix+sendSuffix+retriedWithoutModelSuffix(verdict.RetriedWithoutModel),
+		n, JudgeModeCompose, jerr, digest, judgeMs,
 	)
+}
+
+// failOpenSuppressed reports whether a compose/decide-mode judge error
+// should be suppressed under failOpenWindow rather than falling back to a
+// deterministic send: true only when this session notified within the
+// window. SinceLastNotify negative means never notified, which must always
+// send — the epic's anti-pattern guard is that the FIRST judge error may
+// never fail to notify.
+func failOpenSuppressed(env Env) bool {
+	return env.SinceLastNotify >= 0 && env.SinceLastNotify < failOpenWindow
+}
+
+// suppressJudgeError implements the failOpenWindow rate limit shared by the
+// compose- and decide-mode judge-error fallbacks: silent, watchdog armed,
+// logged as the distinct "judge error" outcome (matching
+// handleGoalJudgeError's convention) so a suppressed repeat stays
+// distinguishable in the decision log from a genuine silent verdict.
+func (p Pipeline) suppressJudgeError(
+	state SessionState, in HookInput, res ScanResult, env Env, now time.Time, project, host string,
+	mode JudgeMode, jerr error, digest string, judgeMs int64, reasonSuffix string,
+) {
+	reason := fmt.Sprintf("suppressed: notified %s ago", humanDuration(env.SinceLastNotify)) + reasonSuffix
+	if p.DryRun {
+		reason += dryRunWouldArmWatchdogSuffix
+	} else {
+		p.arm(state, in, res, now, project, host)
+	}
+	p.logJudged(in, now, "judge error", reason, Notification{}, mode, jerr, digest, judgeMs)
+}
+
+// retriedWithoutModelSuffix renders whether the judge's runRetrying path
+// retried without --model, as a decision-log Reason suffix, mirroring
+// stopHookActiveSuffix's append-only shape — so an operator reading the log
+// can see when the no-model retry path ran.
+func retriedWithoutModelSuffix(retried bool) string {
+	if retried {
+		return " (judge retried without --model)"
+	}
+	return ""
 }
 
 // handleDecideVerdict implements the decide route: the judge itself chooses
@@ -303,6 +371,13 @@ func (p Pipeline) handleDecideVerdict(
 	reasonSuffix string,
 ) {
 	if jerr != nil {
+		if failOpenSuppressed(env) {
+			//nolint:contextcheck // arming spawns a detached child that must outlive this hook's ctx; see SpawnRecheck
+			p.suppressJudgeError(
+				state, in, res, env, now, project, host, JudgeModeDecide, jerr, digest, judgeMs, reasonSuffix,
+			)
+			return
+		}
 		body := truncateHeadWords(in.LastAssistantMessage, maxNotificationTailLen)
 		if body == "" {
 			body = "session has running background work"
@@ -327,7 +402,7 @@ func (p Pipeline) handleDecideVerdict(
 			in,
 			now,
 			OutcomeSilent.String(),
-			verdict.Reason+reasonSuffix,
+			verdict.Reason+reasonSuffix+retriedWithoutModelSuffix(verdict.RetriedWithoutModel),
 			Notification{},
 			JudgeModeDecide,
 			nil,
@@ -338,7 +413,8 @@ func (p Pipeline) handleDecideVerdict(
 	}
 
 	if verdict.Urgency != UrgencyBlocked && env.UserPresent {
-		reason := "suppressed: user present (post-judge)" + reasonSuffix
+		reason := "suppressed: user present (post-judge)" + reasonSuffix +
+			retriedWithoutModelSuffix(verdict.RetriedWithoutModel)
 		// This is still a silent outcome with live/pending background work
 		// (that's how JudgeModeDecide was reached at all) — the user being
 		// present right now doesn't mean they'll stay at this pane, so the
@@ -362,7 +438,9 @@ func (p Pipeline) handleDecideVerdict(
 		_ = state.MarkNotified(now)
 	}
 	p.logJudged(
-		in, now, OutcomeSend.String(), d.Reason+reasonSuffix+sendSuffix, n, JudgeModeDecide, nil, digest, judgeMs,
+		in, now, OutcomeSend.String(),
+		d.Reason+reasonSuffix+sendSuffix+retriedWithoutModelSuffix(verdict.RetriedWithoutModel),
+		n, JudgeModeDecide, nil, digest, judgeMs,
 	)
 }
 
@@ -401,7 +479,9 @@ func (p Pipeline) handleGoalJudge(
 		if verdict.GoalMet {
 			p.handleGoalParkedMet(ctx, state, in, now, project, res.Goal, verdict, digest, judgeMs, reasonSuffix)
 		} else {
-			p.handleGoalParkedUnmet(ctx, state, in, now, project, res.Goal, verdict, digest, judgeMs, reasonSuffix)
+			p.handleGoalParkedUnmet(
+				ctx, state, in, res, now, project, host, res.Goal, verdict, digest, judgeMs, reasonSuffix,
+			)
 		}
 	}
 }
@@ -438,7 +518,8 @@ func (p Pipeline) handleGoalPending(
 	state SessionState, in HookInput, res ScanResult, now time.Time, project, host string,
 	verdict GoalVerdict, digest string, judgeMs int64, reasonSuffix string,
 ) {
-	reason := verdict.Reason + reasonSuffix + stopHookActiveSuffix(in.StopHookActive)
+	reason := verdict.Reason + reasonSuffix + stopHookActiveSuffix(in.StopHookActive) +
+		retriedWithoutModelSuffix(verdict.RetriedWithoutModel)
 	if p.DryRun {
 		reason += dryRunWouldArmWatchdogSuffix
 	} else {
@@ -456,11 +537,12 @@ func (p Pipeline) handleGoalPending(
 // instead. The count is reset whenever a block is NOT emitted (cap-hit),
 // matching every other non-block disposition.
 func (p Pipeline) handleGoalParkedUnmet(
-	ctx context.Context, state SessionState, in HookInput, now time.Time, project string,
+	ctx context.Context, state SessionState, in HookInput, res ScanResult, now time.Time, project, host string,
 	goal GoalState, verdict GoalVerdict, digest string, judgeMs int64, reasonSuffix string,
 ) {
 	count := state.GoalBlockCount(goal.Condition)
-	reason := verdict.Reason + reasonSuffix + stopHookActiveSuffix(in.StopHookActive)
+	reason := verdict.Reason + reasonSuffix + stopHookActiveSuffix(in.StopHookActive) +
+		retriedWithoutModelSuffix(verdict.RetriedWithoutModel)
 
 	if count >= goalBlockCap {
 		n := Notification{Title: project + " · goal stalled", Body: verdict.Reason, Urgency: UrgencyBlocked}
@@ -470,6 +552,18 @@ func (p Pipeline) handleGoalParkedUnmet(
 			_ = state.SetGoalBlockCount(goal.Condition, 0)
 		}
 		p.logGoalJudged(in, now, OutcomeSend.String(), reason+sendSuffix, n, nil, digest, judgeMs)
+		return
+	}
+
+	if last := state.LastGoalBlockAt(goal.Condition); !last.IsZero() && now.Sub(last) < goalBlockMinInterval {
+		pacedReason := reason + fmt.Sprintf(" (paced: blocked %s ago)", humanDuration(now.Sub(last)))
+		if p.DryRun {
+			pacedReason += dryRunWouldArmWatchdogSuffix
+		} else {
+			//nolint:contextcheck // arming spawns a detached child that must outlive this hook's ctx; see SpawnRecheck
+			p.arm(state, in, res, now, project, host)
+		}
+		p.logGoalJudged(in, now, OutcomeSilent.String(), pacedReason, Notification{}, nil, digest, judgeMs)
 		return
 	}
 
@@ -483,6 +577,7 @@ func (p Pipeline) handleGoalParkedUnmet(
 	} else {
 		reason += writeBlockDecision(p.Stdout, blockReason)
 		_ = state.SetGoalBlockCount(goal.Condition, count+1)
+		_ = state.MarkGoalBlocked(goal.Condition, now)
 	}
 	p.logGoalJudged(in, now, "block", reason, Notification{}, nil, digest, judgeMs)
 }
@@ -500,7 +595,8 @@ func (p Pipeline) handleGoalParkedMet(
 		_ = state.MarkNotified(now)
 		_ = state.SetGoalBlockCount(goal.Condition, 0)
 	}
-	reason := verdict.Reason + reasonSuffix + stopHookActiveSuffix(in.StopHookActive) + sendSuffix
+	reason := verdict.Reason + reasonSuffix + stopHookActiveSuffix(in.StopHookActive) + sendSuffix +
+		retriedWithoutModelSuffix(verdict.RetriedWithoutModel)
 	p.logGoalJudged(in, now, OutcomeSend.String(), reason, n, nil, digest, judgeMs)
 }
 

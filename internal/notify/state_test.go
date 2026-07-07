@@ -110,6 +110,75 @@ func TestSessionState_GoalBlockCount_CorruptFileIsZero(t *testing.T) {
 	}
 }
 
+func TestSessionState_LastGoalBlockAt_ZeroWhenNeverSet(t *testing.T) {
+	s := SessionState{Dir: filepath.Join(t.TempDir(), "session-goal-block-at-unset")}
+	if got := s.LastGoalBlockAt("finish the epic"); !got.IsZero() {
+		t.Errorf("LastGoalBlockAt() = %v, want zero time when never set", got)
+	}
+}
+
+func TestSessionState_LastGoalBlockAt_SetThenReadRoundTrips(t *testing.T) {
+	s := SessionState{Dir: filepath.Join(t.TempDir(), "session-goal-block-at-1")}
+	condition := "finish the epic"
+	blockedAt := time.Now()
+
+	if err := s.MarkGoalBlocked(condition, blockedAt); err != nil {
+		t.Fatalf("MarkGoalBlocked() error = %v", err)
+	}
+	got := s.LastGoalBlockAt(condition)
+	if !got.Equal(blockedAt) {
+		t.Errorf("LastGoalBlockAt() = %v, want %v", got, blockedAt)
+	}
+
+	secondBlockedAt := blockedAt.Add(6 * time.Minute)
+	if err := s.MarkGoalBlocked(condition, secondBlockedAt); err != nil {
+		t.Fatalf("MarkGoalBlocked() error = %v", err)
+	}
+	got = s.LastGoalBlockAt(condition)
+	if !got.Equal(secondBlockedAt) {
+		t.Errorf("LastGoalBlockAt() = %v, want %v after overwrite", got, secondBlockedAt)
+	}
+}
+
+func TestSessionState_LastGoalBlockAt_DistinctConditionsDoNotCollide(t *testing.T) {
+	s := SessionState{Dir: filepath.Join(t.TempDir(), "session-goal-block-at-2")}
+	atA := time.Now()
+	atB := atA.Add(time.Hour)
+
+	if err := s.MarkGoalBlocked("condition A", atA); err != nil {
+		t.Fatalf("MarkGoalBlocked() error = %v", err)
+	}
+	if err := s.MarkGoalBlocked("condition B", atB); err != nil {
+		t.Fatalf("MarkGoalBlocked() error = %v", err)
+	}
+
+	if got := s.LastGoalBlockAt("condition A"); !got.Equal(atA) {
+		t.Errorf("LastGoalBlockAt(A) = %v, want %v", got, atA)
+	}
+	if got := s.LastGoalBlockAt("condition B"); !got.Equal(atB) {
+		t.Errorf("LastGoalBlockAt(B) = %v, want %v", got, atB)
+	}
+}
+
+func TestSessionState_LastGoalBlockAt_CorruptFileIsZero(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "session-goal-block-at-corrupt")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	s := SessionState{Dir: dir}
+	if err := s.MarkGoalBlocked("cond", time.Now()); err != nil {
+		t.Fatalf("MarkGoalBlocked() error = %v", err)
+	}
+	corruptPath := filepath.Join(dir, "goal-block-at-"+goalBlockKey("cond"))
+	if err := os.WriteFile(corruptPath, []byte("not-a-timestamp"), 0o644); err != nil {
+		t.Fatalf("writing corrupt goal block time file: %v", err)
+	}
+
+	if got := s.LastGoalBlockAt("cond"); !got.IsZero() {
+		t.Errorf("LastGoalBlockAt() = %v, want zero time on corrupt file", got)
+	}
+}
+
 func TestSessionState_ReapTwiceNoError(t *testing.T) {
 	s := SessionState{Dir: filepath.Join(t.TempDir(), "session-reap")}
 	if err := s.MarkNotified(time.Now()); err != nil {

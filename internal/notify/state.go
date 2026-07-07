@@ -31,6 +31,12 @@ const goalBlockFilePrefix = "goal-block-"
 // single session's goal conditions, short enough to stay a tidy filename.
 const goalBlockKeyLen = 16
 
+// goalBlockAtFilePrefix names, within SessionState.Dir, the last-block
+// timestamp file for a given goal condition: the full filename is this
+// prefix plus goalBlockKey(condition), mirroring goalBlockFilePrefix's
+// per-condition keying.
+const goalBlockAtFilePrefix = "goal-block-at-"
+
 // goalBlockKey returns the stable, deterministic filename component for a
 // goal condition's consecutive-block counter: the hex-encoded sha256 of
 // condition, truncated to goalBlockKeyLen characters. Deterministic and
@@ -106,6 +112,37 @@ func (s SessionState) SetGoalBlockCount(condition string, n int) error {
 	path := filepath.Join(s.Dir, goalBlockFilePrefix+goalBlockKey(condition))
 	if err := os.WriteFile(path, []byte(strconv.Itoa(n)), 0o600); err != nil {
 		return fmt.Errorf("notify: writing goal block count: %w", err)
+	}
+	return nil
+}
+
+// LastGoalBlockAt returns when this goal condition was last blocked. A
+// missing state directory/file and a corrupt timestamp are both treated as
+// the zero time (never blocked) rather than an error, mirroring
+// GoalBlockCount's precedent for unreadable state.
+func (s SessionState) LastGoalBlockAt(condition string) time.Time {
+	path := filepath.Join(s.Dir, goalBlockAtFilePrefix+goalBlockKey(condition))
+	data, err := os.ReadFile(path) //nolint:gosec // Path comes from trusted caller-composed session dir
+	if err != nil {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data)))
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+// MarkGoalBlocked records t as the last-block time for condition: it creates
+// Dir as needed and writes t (RFC3339Nano), mirroring MarkNotified's write
+// pattern exactly.
+func (s SessionState) MarkGoalBlocked(condition string, t time.Time) error {
+	if err := os.MkdirAll(s.Dir, 0o750); err != nil {
+		return fmt.Errorf("notify: creating session state dir: %w", err)
+	}
+	path := filepath.Join(s.Dir, goalBlockAtFilePrefix+goalBlockKey(condition))
+	if err := os.WriteFile(path, []byte(t.Format(time.RFC3339Nano)), 0o600); err != nil {
+		return fmt.Errorf("notify: writing goal block time: %w", err)
 	}
 	return nil
 }
