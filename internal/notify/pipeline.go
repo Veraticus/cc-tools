@@ -10,10 +10,11 @@ import (
 	"time"
 )
 
-// maxNotificationTailLen bounds the fallback notification body built from
-// HookInput.LastAssistantMessage when the judge errors: the tail (via
-// truncateHead) is what carries the meaningful content, matching the
-// head/tail convention established in transcript.go/digest.go.
+// maxNotificationTailLen bounds the fallback notification body when the
+// judge errors — HookInput.LastAssistantMessage on Stop events, and
+// HookInput.Message on Notification events: the tail (via truncateHeadWords)
+// is what carries the meaningful content, matching the head/tail convention
+// established in transcript.go/digest.go.
 const maxNotificationTailLen = 160
 
 // dryRunWouldArmWatchdogSuffix is appended to a decision's Reason whenever a
