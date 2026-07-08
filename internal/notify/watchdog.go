@@ -45,6 +45,15 @@ type WatchdogArmRequest struct {
 	Workspace string
 	Meta      DigestMeta
 	ArmedAt   time.Time
+	// GoalArmed marks a watchdog armed while the session's goal was active
+	// (ScanResult.Goal.Status == GoalActive at arming). The /goal evaluator's
+	// met/failed verdict lands in the transcript AFTER the Stop-hook scan
+	// that arms this watchdog — hook ordering is undocumented, verified in
+	// production 2026-07-08, with the verdict landing at roughly Stop+seconds
+	// while the standard schedule's first wake is +5m — so a goal-armed
+	// watchdog's first wakes are the delivery path for the goal-complete
+	// ping and must be seconds, not minutes. See scheduleInterval.
+	GoalArmed bool
 }
 
 // Watchdog is Pipeline's interface onto arming and reaping the in-daemon
@@ -159,7 +168,7 @@ type wakeState struct {
 // or remove.
 func RunWatchdog(ctx context.Context, req WatchdogArmRequest, deps WatchdogDeps) string {
 	idx := 0
-	next := scheduleInterval(idx)
+	next := scheduleInterval(idx, req.GoalArmed)
 	state := &wakeState{budget: initialStaleBudget}
 
 	for {
@@ -172,7 +181,7 @@ func RunWatchdog(ctx context.Context, req WatchdogArmRequest, deps WatchdogDeps)
 		}
 
 		idx++
-		next = scheduleInterval(idx)
+		next = scheduleInterval(idx, req.GoalArmed)
 		if state.doubleNext {
 			next *= 2
 			state.doubleNext = false
@@ -484,21 +493,54 @@ func judgeModeLabel(mode JudgeMode) string {
 	}
 }
 
-// Wake schedule intervals: sleep watchdogFirstWakeDelay, then
-// watchdogSecondWakeDelay, then watchdogThirdWakeDelay, then hourly.
-// watchdogThirdWakeIdx names the "2" index golangci-lint's mnd check
-// otherwise flags as a bare magic number, mirroring the hoursPerDay pattern
-// in digest.go.
+// Wake schedule intervals. The non-goal schedule sleeps watchdogFirstWakeDelay,
+// then watchdogSecondWakeDelay, then watchdogThirdWakeDelay, then hourly.
+// A goal-armed watchdog (see WatchdogArmRequest.GoalArmed) instead front-loads
+// goalArmedPrefixLen fast wakes — watchdogGoalFirstWakeDelay through
+// watchdogGoalFourthWakeDelay — ahead of that same tail, so a goal met/failed
+// verdict landing seconds after arming is delivered in seconds rather than
+// waiting for the standard +5m first wake. watchdogThirdWakeIdx,
+// watchdogGoalThirdWakeIdx, and watchdogGoalFourthWakeIdx name indices
+// golangci-lint's mnd check otherwise flags as bare magic numbers, mirroring
+// the hoursPerDay pattern in digest.go.
 const (
 	watchdogFirstWakeDelay  = 5 * time.Minute
 	watchdogSecondWakeDelay = 15 * time.Minute
 	watchdogThirdWakeDelay  = 30 * time.Minute
 	watchdogThirdWakeIdx    = 2
+
+	// goalArmedPrefixLen is how many front-loaded wakes precede the standard
+	// tail schedule when GoalArmed is true.
+	goalArmedPrefixLen = 4
+
+	watchdogGoalFirstWakeDelay  = 2 * time.Second
+	watchdogGoalSecondWakeDelay = 5 * time.Second
+	watchdogGoalThirdWakeDelay  = 15 * time.Second
+	watchdogGoalFourthWakeDelay = 45 * time.Second
+	watchdogGoalThirdWakeIdx    = 2
+	watchdogGoalFourthWakeIdx   = 3
 )
 
 // scheduleInterval is the wake schedule's base interval (before any
-// staleness doubling) for the idx-th sleep.
-func scheduleInterval(idx int) time.Duration {
+// staleness doubling) for the idx-th sleep. goalArmed selects the
+// front-loaded schedule: its first goalArmedPrefixLen wakes are the fast
+// 2s/5s/15s/45s prefix, after which it falls through to the same tail the
+// non-goal schedule uses.
+func scheduleInterval(idx int, goalArmed bool) time.Duration {
+	if goalArmed {
+		switch idx {
+		case 0:
+			return watchdogGoalFirstWakeDelay
+		case 1:
+			return watchdogGoalSecondWakeDelay
+		case watchdogGoalThirdWakeIdx:
+			return watchdogGoalThirdWakeDelay
+		case watchdogGoalFourthWakeIdx:
+			return watchdogGoalFourthWakeDelay
+		default:
+			return scheduleInterval(idx-goalArmedPrefixLen, false)
+		}
+	}
 	switch idx {
 	case 0:
 		return watchdogFirstWakeDelay

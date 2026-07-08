@@ -831,3 +831,83 @@ func TestRunWatchdog_GoalMet_ClaimWinSendsBodyWithLocator(t *testing.T) {
 		t.Errorf("claimed message = %q, want the final sent body %q", claimedMsg, wantBody)
 	}
 }
+
+// --- scheduleInterval ---
+
+// TestScheduleInterval_NonGoalArmed pins the existing (pre-goal-arming)
+// schedule exactly: it must stay byte-identical now that scheduleInterval
+// also serves a second, goal-armed schedule.
+func TestScheduleInterval_NonGoalArmed(t *testing.T) {
+	want := []time.Duration{
+		5 * time.Minute,
+		15 * time.Minute,
+		30 * time.Minute,
+		time.Hour,
+		time.Hour,
+	}
+	for idx, wantDelay := range want {
+		if got := scheduleInterval(idx, false); got != wantDelay {
+			t.Errorf("scheduleInterval(%d, false) = %v, want %v", idx, got, wantDelay)
+		}
+	}
+}
+
+// TestScheduleInterval_GoalArmed pins the front-loaded schedule a
+// goal-armed watchdog uses: four fast wakes (2s/5s/15s/45s) so a goal
+// met/failed verdict landing seconds after the arming Stop hook is
+// delivered as a ping in seconds, then falling through to the same tail
+// the non-goal schedule uses.
+func TestScheduleInterval_GoalArmed(t *testing.T) {
+	want := []time.Duration{
+		2 * time.Second,
+		5 * time.Second,
+		15 * time.Second,
+		45 * time.Second,
+		5 * time.Minute,
+		15 * time.Minute,
+		30 * time.Minute,
+		time.Hour,
+		time.Hour,
+	}
+	for idx, wantDelay := range want {
+		if got := scheduleInterval(idx, true); got != wantDelay {
+			t.Errorf("scheduleInterval(%d, true) = %v, want %v", idx, got, wantDelay)
+		}
+	}
+}
+
+// --- RunWatchdog: goal-armed fast first wake ---
+
+// TestRunWatchdog_GoalArmed_MetDeliversOnFastFirstWake proves the front-loaded
+// schedule is actually wired into RunWatchdog's loop, not just scheduleInterval:
+// a goal-armed watchdog whose transcript already carries a goal-met record
+// (the verdict landing before the first wake, mirroring TestRunWatchdog_GoalMet)
+// delivers the goal-complete notification on that first wake, and the sleep it
+// took to get there is the fast 2s wake, not the standard 5m one.
+func TestRunWatchdog_GoalArmed_MetDeliversOnFastFirstWake(t *testing.T) {
+	transcript, metLine := activeOnlyTranscript(t, "goal_met.jsonl")
+	offset := scannedBytes(t, transcript)
+	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	appendLine(t, transcript, metLine)
+
+	h := newTestHarness(now, -1, []judgeResult{
+		{verdict: JudgeVerdict{Notify: true, Urgency: UrgencyDone, Task: "ship it", Body: "all done", Reason: "r"}},
+	})
+	req := WatchdogArmRequest{
+		SessionID: "sess-1", Transcript: transcript, Offset: offset, ParentPID: testParentPID, ArmedAt: now,
+		Meta: DigestMeta{Project: "proj"}, GoalArmed: true,
+	}
+
+	got := RunWatchdog(context.Background(), req, h.deps)
+
+	if got != "goal met" {
+		t.Errorf("RunWatchdog() = %q, want %q", got, "goal met")
+	}
+	if h.send.sendCount() != 1 {
+		t.Fatalf("sendCount = %d, want 1", h.send.sendCount())
+	}
+	gotSleeps := h.clock.sleepDurations()
+	if len(gotSleeps) != 1 || gotSleeps[0] != 2*time.Second {
+		t.Errorf("sleeps = %v, want a single 2s sleep (the goal-armed fast first wake)", gotSleeps)
+	}
+}

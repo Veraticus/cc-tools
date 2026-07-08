@@ -574,6 +574,7 @@ func (p Pipeline) arm(in HookInput, res ScanResult, now time.Time, project, host
 		Workspace:  p.Workspace,
 		Meta:       DigestMeta{Project: project, Host: host, Event: "recheck"},
 		ArmedAt:    now,
+		GoalArmed:  res.Goal.Status == GoalActive,
 	})
 }
 

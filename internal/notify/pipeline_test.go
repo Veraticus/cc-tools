@@ -1247,3 +1247,56 @@ func TestPipeline_Arm_ForwardsWorkspace(t *testing.T) {
 		t.Fatalf("armed = %+v, want one arm carrying Workspace earth:3", wd.armed)
 	}
 }
+
+// TestPipeline_Arm_GoalActive_SetsGoalArmedTrue pins GoalArmed plumbing at
+// the arm site: a scan whose Goal.Status is GoalActive must produce a
+// WatchdogArmRequest with GoalArmed true, since that watchdog's first wakes
+// are the delivery path for a met/failed verdict landing seconds later.
+func TestPipeline_Arm_GoalActive_SetsGoalArmedTrue(t *testing.T) {
+	var stdout bytes.Buffer
+	p, _ := newTestPipeline(t, &stdout, writeStubClaude(t))
+	p.DryRun = false
+	wd := &fakeWatchdog{}
+	p.Watchdog = wd
+	transcript := copyFixture(t, "goal_active_set.jsonl")
+
+	in := HookInput{
+		SessionID: "sess-arm-goal-active", CWD: "/home/user/project", TranscriptPath: transcript, HookEventName: "Stop",
+	}
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if len(wd.armed) != 1 || !wd.armed[0].GoalArmed {
+		t.Fatalf("armed = %+v, want one arm carrying GoalArmed true", wd.armed)
+	}
+}
+
+// TestPipeline_Arm_GoalNone_GoalArmedFalse pins the other side: a scan with
+// no goal in progress must not front-load the fast wake schedule. Mirrors
+// TestPipeline_Stop_Teammates_DecideNotifyFalse_SilentAndArms's setup (a
+// no-goal, no-live-task transcript that reaches OutcomeSilent through the
+// decide-mode judge and arms the watchdog) since that is the arming path
+// this fixture actually exercises.
+func TestPipeline_Arm_GoalNone_GoalArmedFalse(t *testing.T) {
+	stubBin := writeStubClaude(t)
+	const judgeReason = "teammate still working, no reply yet"
+	t.Setenv("STUB_STDOUT", `{"notify":false,"urgency":"info","task":"t","body":"b","reason":"`+judgeReason+`"}`)
+
+	var stdout bytes.Buffer
+	p, _ := newGoalTestPipeline(t, &stdout, stubBin)
+	wd := &fakeWatchdog{}
+	p.Watchdog = wd
+	transcript := copyFixture(t, "teammates.jsonl")
+
+	in := HookInput{
+		SessionID: "sess-arm-goal-none", CWD: "/home/user/project", TranscriptPath: transcript, HookEventName: "Stop",
+	}
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if len(wd.armed) != 1 || wd.armed[0].GoalArmed {
+		t.Fatalf("armed = %+v, want one arm carrying GoalArmed false", wd.armed)
+	}
+}
