@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -109,7 +110,7 @@ type broadcastJob struct {
 // broadcast-type Notification event. Claiming writes to the shared ledger;
 // a dry run only observes it, so rehearsals never suppress a real
 // session's send.
-func (p Pipeline) broadcastFacts(in HookInput, now time.Time) *BroadcastFacts {
+func (p Pipeline) broadcastFacts(ctx context.Context, in HookInput, now time.Time) *BroadcastFacts {
 	if in.HookEventName != eventNotification || in.AgentID != "" {
 		return nil
 	}
@@ -119,15 +120,15 @@ func (p Pipeline) broadcastFacts(in HookInput, now time.Time) *BroadcastFacts {
 
 	facts := &BroadcastFacts{}
 	key := in.NotificationType + "\n" + in.Message
-	facts.Duplicate = !claimBroadcast(p.StateBase, key, claimWindowFor(in.NotificationType), now, p.DryRun)
+	facts.Duplicate = !p.dedupeState().ClaimBroadcast(ctx, key, claimWindowFor(in.NotificationType), now, p.DryRun)
 
 	job, ok := resolveBroadcastSource(jobsDir(p.Environ), in.Message)
 	if !ok {
 		return facts
 	}
 	facts.JobProject = filepath.Base(job.CWD)
-	source := SessionState{Dir: filepath.Join(p.StateBase, job.SessionID)}
-	if since := source.SinceLastNotify(now); since >= 0 && since < broadcastCoveredWindow {
+	since := p.dedupeState().SinceLastNotify(ctx, job.SessionID, now)
+	if since >= 0 && since < broadcastCoveredWindow {
 		facts.Covered = true
 		facts.CoveredAgo = since
 	}

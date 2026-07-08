@@ -129,6 +129,47 @@ func TestDispatchNotify_UnreachableSocket_OutcomeSend_DeterministicFallback(t *t
 	}
 }
 
+// TestDispatchNotify_UnreachableSocket_NopState_IgnoresStaleFileDedupe pins
+// the fallback Pipeline's State: notify.NopState{} wiring: notifyd now
+// holds the real dedupe state in memory, so the client's inline fallback
+// must never consult on-disk state left over from some earlier daemon-side
+// (or pre-epic) run — a duplicate ping beats a lost one. It seeds a
+// session state dir with a last-notify file recording the *same* message
+// this event carries, moments ago: under the old file-based fallback that
+// dedupe.go SinceLastNotifySame gate would have silenced this as an
+// identical repeat within blockedRepeatWindow. With NopState, the fallback
+// must still send.
+func TestDispatchNotify_UnreachableSocket_NopState_IgnoresStaleFileDedupe(t *testing.T) {
+	sockPath := filepath.Join(t.TempDir(), "no-daemon-here.sock")
+	cfg := testNotifyClientConfig(t, sockPath)
+
+	const sessionID = "sess-nopstate"
+	const message = "May I run rm?"
+	state := notify.SessionState{Dir: filepath.Join(cfg.StateBase, sessionID)}
+	if err := state.MarkNotified(time.Now(), message); err != nil {
+		t.Fatalf("seeding stale file-based state: %v", err)
+	}
+
+	stdin := strings.NewReader(
+		`{"session_id":"` + sessionID + `","cwd":"/home/user/proj","hook_event_name":"Notification",` +
+			`"notification_type":"permission_prompt","message":"` + message + `"}`,
+	)
+	var stdout, stderr bytes.Buffer
+
+	dispatchNotify(context.Background(), cfg, stdin, &stdout, &stderr)
+
+	if !strings.Contains(stdout.String(), "[blocked]") {
+		t.Errorf(
+			"stdout = %q, want a blocked-urgency send despite the fresh file-based dedupe state "+
+				"(fallback must use NopState, not consult the file)",
+			stdout.String(),
+		)
+	}
+	if !strings.Contains(stdout.String(), message) {
+		t.Errorf("stdout = %q, want it to contain the message", stdout.String())
+	}
+}
+
 func TestDispatchNotify_UnreachableSocket_JudgeRoute_NeverInvokesRealJudge(t *testing.T) {
 	sockPath := filepath.Join(t.TempDir(), "no-daemon-here.sock")
 	cfg := testNotifyClientConfig(t, sockPath)

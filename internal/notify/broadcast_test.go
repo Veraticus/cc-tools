@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -227,15 +228,15 @@ func TestBroadcastFacts_NonBroadcastEventsAreNil(t *testing.T) {
 	p := Pipeline{StateBase: t.TempDir()}
 	now := time.Now()
 
-	if got := p.broadcastFacts(HookInput{HookEventName: "Stop"}, now); got != nil {
+	if got := p.broadcastFacts(context.Background(), HookInput{HookEventName: "Stop"}, now); got != nil {
 		t.Errorf("broadcastFacts(Stop) = %+v, want nil", got)
 	}
 	perm := HookInput{HookEventName: "Notification", NotificationType: "permission_prompt"}
-	if got := p.broadcastFacts(perm, now); got != nil {
+	if got := p.broadcastFacts(context.Background(), perm, now); got != nil {
 		t.Errorf("broadcastFacts(permission_prompt) = %+v, want nil", got)
 	}
 	agent := HookInput{HookEventName: "Notification", NotificationType: "agent_needs_input", AgentID: "a1"}
-	if got := p.broadcastFacts(agent, now); got != nil {
+	if got := p.broadcastFacts(context.Background(), agent, now); got != nil {
 		t.Errorf("broadcastFacts(agent context) = %+v, want nil", got)
 	}
 }
@@ -256,7 +257,7 @@ func TestBroadcastFacts_CoveredBySourceJobSend(t *testing.T) {
 		HookEventName: "Notification", NotificationType: "agent_needs_input",
 		Message: "deploy the widget needs your input: proceed?",
 	}
-	facts := p.broadcastFacts(in, now)
+	facts := p.broadcastFacts(context.Background(), in, now)
 	if facts == nil {
 		t.Fatal("broadcastFacts() = nil, want facts")
 	}
@@ -282,13 +283,13 @@ func TestBroadcastFacts_UncoveredWhenSourceNeverSent(t *testing.T) {
 		HookEventName: "Notification", NotificationType: "agent_needs_input",
 		Message: "deploy the widget needs your input: proceed?",
 	}
-	facts := p.broadcastFacts(in, now)
+	facts := p.broadcastFacts(context.Background(), in, now)
 	if facts == nil || facts.Covered {
 		t.Fatalf("broadcastFacts() = %+v, want uncovered facts (backstop must fire)", facts)
 	}
 
 	// A second session receiving the same broadcast loses the claim.
-	second := p.broadcastFacts(in, now.Add(500*time.Millisecond))
+	second := p.broadcastFacts(context.Background(), in, now.Add(500*time.Millisecond))
 	if second == nil || !second.Duplicate {
 		t.Fatalf("second receiver facts = %+v, want Duplicate", second)
 	}

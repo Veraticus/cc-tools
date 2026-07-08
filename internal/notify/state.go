@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -102,4 +103,78 @@ func (s SessionState) Reap() error {
 		return fmt.Errorf("notify: reaping session state dir: %w", err)
 	}
 	return nil
+}
+
+// FileState is DedupeState's on-disk implementation: the historical
+// per-hook-invocation behavior, reading and writing a SessionState file
+// tree per session under Base plus the shared broadcast-claims ledger.
+// It is what Pipeline.dedupeState falls back to when State is unset, so
+// every existing single-shot call site keeps today's file-based semantics
+// unchanged.
+type FileState struct {
+	Base string
+}
+
+// session returns the SessionState for sessionID under f.Base.
+func (f FileState) session(sessionID string) SessionState {
+	return SessionState{Dir: filepath.Join(f.Base, sessionID)}
+}
+
+// SinceLastNotify implements DedupeState by delegating to the on-disk
+// SessionState for sessionID. ctx is unused: file I/O here is neither
+// judge nor sender work, so there is nothing for it to bound or cancel.
+func (f FileState) SinceLastNotify(_ context.Context, sessionID string, now time.Time) time.Duration {
+	return f.session(sessionID).SinceLastNotify(now)
+}
+
+// SinceLastNotifySame implements DedupeState by delegating to the on-disk
+// SessionState for sessionID.
+func (f FileState) SinceLastNotifySame(
+	_ context.Context, sessionID string, now time.Time, message string,
+) time.Duration {
+	return f.session(sessionID).SinceLastNotifySame(now, message)
+}
+
+// MarkNotified implements DedupeState by delegating to the on-disk
+// SessionState for sessionID.
+func (f FileState) MarkNotified(_ context.Context, sessionID string, t time.Time, message string) error {
+	return f.session(sessionID).MarkNotified(t, message)
+}
+
+// ClaimBroadcast implements DedupeState via the package-level claimBroadcast,
+// rooted at f.Base.
+func (f FileState) ClaimBroadcast(
+	_ context.Context, key string, window time.Duration, now time.Time, dryRun bool,
+) bool {
+	return claimBroadcast(f.Base, key, window, now, dryRun)
+}
+
+// NopState is DedupeState's no-op implementation: every session reports
+// "never notified" and every broadcast claim wins. It is what the hook
+// client's inline fallback uses (see cmd/cc-tools/notify.go) when notifyd
+// is unreachable — the daemon now holds the real dedupe state in memory
+// (see MemoryState), so a single fallback invocation has no shared history
+// left to consult on disk, and consulting stale on-disk state would be
+// actively wrong once the daemon is the source of truth. Per the epic's
+// reliability invariant that a duplicate ping beats a lost one, NopState
+// trades a possible duplicate notification for never silently swallowing
+// one the daemon never saw.
+type NopState struct{}
+
+// SinceLastNotify always reports "never notified".
+func (NopState) SinceLastNotify(_ context.Context, _ string, _ time.Time) time.Duration {
+	return neverNotifiedDuration
+}
+
+// SinceLastNotifySame always reports "never notified".
+func (NopState) SinceLastNotifySame(_ context.Context, _ string, _ time.Time, _ string) time.Duration {
+	return neverNotifiedDuration
+}
+
+// MarkNotified is a no-op: there is nothing to record without a store.
+func (NopState) MarkNotified(_ context.Context, _ string, _ time.Time, _ string) error { return nil }
+
+// ClaimBroadcast always reports a win: there is no shared ledger to check.
+func (NopState) ClaimBroadcast(_ context.Context, _ string, _ time.Duration, _ time.Time, _ bool) bool {
+	return true
 }

@@ -30,6 +30,36 @@ const dryRunWouldArmWatchdogSuffix = " (would arm watchdog)"
 // window are the same failure already surfaced.
 const failOpenWindow = 10 * time.Minute
 
+// DedupeState is Pipeline's interface onto per-session notify dedupe
+// (last-notify time and message hash) and broadcast-claim coordination.
+// Pipeline reads and writes it instead of talking to SessionState files
+// directly, so where that bookkeeping actually lives is a swappable
+// concern: on disk, one file tree per session (FileState — the default,
+// preserving notify's historical single-shot-hook behavior), entirely in
+// memory and confined to one goroutine (MemoryState — notifyd's dedupe
+// store), or nowhere at all (NopState — the hook client's inline
+// fallback). sessionID keys every session-scoped method because one
+// DedupeState instance is shared across every session a process handles —
+// unlike SessionState, whose Dir already bakes in a single session.
+type DedupeState interface {
+	// SinceLastNotify returns how long before now sessionID last notified;
+	// see SessionState.SinceLastNotify for the "never notified" sentinel
+	// contract every implementation must honor. ctx carries no deadline
+	// today — it exists so the daemon's loopState implementation can bail
+	// out of its loop round trip on shutdown rather than storing ctx on
+	// itself.
+	SinceLastNotify(ctx context.Context, sessionID string, now time.Time) time.Duration
+	// SinceLastNotifySame returns how long before now sessionID last sent
+	// message verbatim; see SessionState.SinceLastNotifySame.
+	SinceLastNotifySame(ctx context.Context, sessionID string, now time.Time, message string) time.Duration
+	// MarkNotified records t/message as sessionID's last notification.
+	MarkNotified(ctx context.Context, sessionID string, t time.Time, message string) error
+	// ClaimBroadcast atomically claims key for a window starting at now,
+	// reporting whether this call won; see claimBroadcast's first-claimant
+	// contract. dryRun observes without claiming.
+	ClaimBroadcast(ctx context.Context, key string, window time.Duration, now time.Time, dryRun bool) bool
+}
+
 // Pipeline is the top-level orchestrator for a single hook invocation: it
 // scans the transcript, computes the deterministic Decide() gates, and
 // routes to a plain send, silence, or the LLM judge — then delivers,
@@ -43,9 +73,15 @@ type Pipeline struct {
 	Judge     Judge
 	Sender    Sender
 	Log       DecisionLog
-	Environ   []string
-	Stdout    io.Writer
-	SelfBin   string
+	// State is where dedupe/broadcast-claim bookkeeping lives. The zero
+	// value (nil) defaults to FileState{Base: StateBase} — the historical
+	// file-backed behavior every single-shot hook invocation still relies
+	// on — so only callers that want different semantics (notifyd's
+	// MemoryState, the hook client fallback's NopState) need to set it.
+	State   DedupeState
+	Environ []string
+	Stdout  io.Writer
+	SelfBin string
 	// Workspace is the tmux session name this hook's pane lives in
 	// (WorkspaceName), or "" outside tmux — background jobs included.
 	// Notification titles use it as the where-to-go segment, falling back
@@ -57,6 +93,17 @@ type Pipeline struct {
 	// Present reports whether the user is at the terminal right now.
 	// Production wires UserPresent+RunCommand; tests inject a canned func.
 	Present func(environ []string, now time.Time) bool
+}
+
+// dedupeState returns p.State, or a FileState rooted at p.StateBase when
+// State is unset — see the State field's doc comment.
+//
+//nolint:ireturn // DedupeState is intentionally swappable (file/memory/nop); this is the field's single accessor.
+func (p Pipeline) dedupeState() DedupeState {
+	if p.State != nil {
+		return p.State
+	}
+	return FileState{Base: p.StateBase}
 }
 
 // Run executes the pipeline for one hook payload. It always returns nil:
@@ -101,13 +148,13 @@ func (p Pipeline) Run(ctx context.Context, in HookInput) error {
 	// the sentinel that means "never/differs" instead.
 	sinceSame := neverNotifiedDuration
 	if in.HookEventName == eventNotification {
-		sinceSame = state.SinceLastNotifySame(now, in.Message)
+		sinceSame = p.dedupeState().SinceLastNotifySame(ctx, in.SessionID, now, in.Message)
 	}
 	env := Env{
 		UserPresent:         p.Present(p.Environ, now),
-		SinceLastNotify:     state.SinceLastNotify(now),
+		SinceLastNotify:     p.dedupeState().SinceLastNotify(ctx, in.SessionID, now),
 		SinceLastNotifySame: sinceSame,
-		Broadcast:           p.broadcastFacts(in, now),
+		Broadcast:           p.broadcastFacts(ctx, in, now),
 	}
 	d := Decide(in, res, env)
 
@@ -116,7 +163,7 @@ func (p Pipeline) Run(ctx context.Context, in HookInput) error {
 		//nolint:contextcheck // arming spawns a detached child that must outlive this hook's ctx; see SpawnRecheck
 		p.handleSilent(state, in, res, now, project, host, d, reasonSuffix)
 	case OutcomeSend:
-		p.handleSend(ctx, state, in, now, project, locus, host, d, reasonSuffix)
+		p.handleSend(ctx, in, now, project, locus, host, d, reasonSuffix)
 	case OutcomeJudge:
 		p.handleJudge(ctx, state, in, res, env, now, project, locus, host, d, reasonSuffix)
 	}
@@ -169,7 +216,6 @@ func (p Pipeline) handleSilent(
 // would be misleading; those use the host.
 func (p Pipeline) handleSend(
 	ctx context.Context,
-	state SessionState,
 	in HookInput,
 	now time.Time,
 	project, locus, host string,
@@ -191,7 +237,7 @@ func (p Pipeline) handleSend(
 
 	sendSuffix := p.deliver(ctx, n)
 	if !p.DryRun {
-		_ = state.MarkNotified(now, n.Body)
+		_ = p.dedupeState().MarkNotified(ctx, in.SessionID, now, n.Body)
 	}
 	p.logRecord(in, now, DecisionRecord{
 		Outcome: OutcomeSend.String(), Reason: d.Reason + reasonSuffix + sendSuffix,
@@ -289,7 +335,7 @@ func (p Pipeline) handleComposeVerdict(
 
 	sendSuffix := p.deliver(ctx, n)
 	if !p.DryRun {
-		_ = state.MarkNotified(now, n.Body)
+		_ = p.dedupeState().MarkNotified(ctx, in.SessionID, now, n.Body)
 	}
 	p.logJudged(
 		in, now, OutcomeSend.String(),
@@ -370,7 +416,7 @@ func (p Pipeline) handleDecideVerdict(
 		n := Notification{Title: project + " · " + locus, Body: body, Urgency: UrgencyInfo}
 		sendSuffix := p.deliver(ctx, n)
 		if !p.DryRun {
-			_ = state.MarkNotified(now, n.Body)
+			_ = p.dedupeState().MarkNotified(ctx, in.SessionID, now, n.Body)
 		}
 		p.logJudged(
 			in, now, OutcomeSend.String(), d.Reason+reasonSuffix+sendSuffix, n, JudgeModeDecide, jerr, digest, judgeMs,
@@ -420,7 +466,7 @@ func (p Pipeline) handleDecideVerdict(
 	n := Notification{Title: project + " · " + verdict.Task, Body: verdict.Body, Urgency: verdict.Urgency}
 	sendSuffix := p.deliver(ctx, n)
 	if !p.DryRun {
-		_ = state.MarkNotified(now, n.Body)
+		_ = p.dedupeState().MarkNotified(ctx, in.SessionID, now, n.Body)
 	}
 	p.logJudged(
 		in, now, OutcomeSend.String(),

@@ -143,6 +143,11 @@ func dispatchNotify(ctx context.Context, cfg notifyClientConfig, stdin io.Reader
 		Judge:     notify.Judge{Bin: disabledJudgeBin},
 		Sender:    cfg.Sender,
 		Log:       cfg.Log,
+		// NopState: notifyd holds the real dedupe state in memory now, so
+		// this single fallback invocation has no shared history to consult
+		// on disk — see NopState's doc comment for the reliability
+		// rationale (a duplicate ping beats a lost one).
+		State:     notify.NopState{},
 		Environ:   cfg.Environ,
 		Stdout:    stdout,
 		SelfBin:   cfg.SelfBin,

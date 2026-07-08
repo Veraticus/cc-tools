@@ -139,6 +139,266 @@ func TestDaemon_Serve_AcceptsConnectionAndRunsInjectedPipeline(t *testing.T) {
 	}
 }
 
+// dialAndSendFrame dials sockPath and writes frame, fire-and-forget —
+// mirroring cmd/cc-tools/notify.go's sendFrame, since these daemon-level
+// tests exercise Daemon.Serve directly rather than through the client.
+func dialAndSendFrame(t *testing.T, sockPath string, frame Frame) {
+	t.Helper()
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("net.Dial() error = %v", err)
+	}
+	if encErr := EncodeFrame(conn, frame); encErr != nil {
+		t.Fatalf("EncodeFrame() error = %v", encErr)
+	}
+	if closeErr := conn.Close(); closeErr != nil {
+		t.Fatalf("conn.Close() error = %v", closeErr)
+	}
+}
+
+// TestDaemon_Loop_SlowJudgeForOneSessionNeverDelaysAnother is the epic's
+// core event-loop guarantee: the loop goroutine must never block on a
+// judge call. Session A's Stop event routes through the compose judge,
+// stubbed to sleep 2s; session B's Notification (permission_prompt) is a
+// deterministic send that never touches the judge at all. B's decision
+// record must land almost immediately, proving the loop dispatched A's
+// judge call off itself instead of processing frames serially.
+func TestDaemon_Loop_SlowJudgeForOneSessionNeverDelaysAnother(t *testing.T) {
+	stateBase := t.TempDir()
+	logPath := filepath.Join(stateBase, "notify-decisions.jsonl")
+	slowJudgeBin := writeStubClaude(t)
+	t.Setenv("STUB_SLEEP", "2")
+	t.Setenv("STUB_STDOUT", `{"notify":true,"urgency":"done","task":"t","body":"finished","reason":"r"}`)
+
+	d := Daemon{
+		Pipeline: Pipeline{
+			StateBase: stateBase,
+			DryRun:    true,
+			Judge:     Judge{Bin: slowJudgeBin, Model: "claude-haiku-4-5"},
+			Log:       DecisionLog{Path: logPath},
+			Stdout:    os.Stdout,
+			Host:      "testhost",
+			Present:   neverPresent,
+		},
+	}
+	sockPath := filepath.Join(t.TempDir(), "notifyd.sock")
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("net.Listen() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = d.Serve(ctx, ln) }()
+
+	transcript := copyFixture(t, "goal_none.jsonl")
+	dialAndSendFrame(t, sockPath, Frame{HookInput: HookInput{
+		SessionID: "sess-slow-judge", CWD: "/home/user/project", TranscriptPath: transcript, HookEventName: "Stop",
+	}})
+
+	start := time.Now()
+	dialAndSendFrame(t, sockPath, Frame{HookInput: HookInput{
+		SessionID: "sess-fast-send", CWD: "/home/user/project", TranscriptPath: "/nonexistent",
+		HookEventName: "Notification", NotificationType: "permission_prompt", Message: "allow rm?",
+	}})
+
+	const budget = 500 * time.Millisecond
+	deadline := time.Now().Add(budget)
+	var fastRecorded bool
+	for time.Now().Before(deadline) {
+		if data, readErr := os.ReadFile(logPath); readErr == nil && strings.Contains(string(data), "sess-fast-send") {
+			fastRecorded = true
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	elapsed := time.Since(start)
+	if !fastRecorded {
+		t.Fatalf("sess-fast-send record did not land within %s (loop appears blocked on the slow judge)", budget)
+	}
+	if elapsed >= budget {
+		t.Errorf(
+			"sess-fast-send record took %s, want under %s even with a 2s judge in flight for another session",
+			elapsed, budget,
+		)
+	}
+
+	// Wait for the slow session to finish too, so the test doesn't tear
+	// down the daemon (and kill the judge subprocess) mid-flight.
+	waitForDecisionRecords(t, logPath, 2, 3*time.Second)
+}
+
+// TestDaemon_Loop_IdlePromptDedupe_NeverTouchesFiles proves the daemon's
+// dedupe now lives entirely in memory: a deterministic send for a session
+// followed by an idle_prompt for the same session inside dedupeWindow must
+// resolve silent with a dedupe reason, and the session's on-disk state
+// directory under StateBase must never have been created — the old
+// file-based dedupe would have created it via SessionState.MarkNotified.
+func TestDaemon_Loop_IdlePromptDedupe_NeverTouchesFiles(t *testing.T) {
+	stateBase := t.TempDir()
+	logPath := filepath.Join(stateBase, "notify-decisions.jsonl")
+	var sent []capturedRequest
+
+	d := Daemon{
+		Pipeline: Pipeline{
+			StateBase: stateBase,
+			DryRun:    false,
+			Judge:     Judge{Bin: writeStubClaude(t), Model: "claude-haiku-4-5"},
+			Sender:    stubSenderRecording(&sent),
+			Log:       DecisionLog{Path: logPath},
+			Stdout:    os.Stdout,
+			Host:      "testhost",
+			Present:   neverPresent,
+		},
+	}
+	sockPath := filepath.Join(t.TempDir(), "notifyd.sock")
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("net.Listen() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = d.Serve(ctx, ln) }()
+
+	const sessionID = "sess-idle-dedupe"
+	dialAndSendFrame(t, sockPath, Frame{HookInput: HookInput{
+		SessionID: sessionID, CWD: "/home/user/project", TranscriptPath: "/nonexistent",
+		HookEventName: "Notification", NotificationType: "permission_prompt", Message: "allow rm?",
+	}})
+	waitForDecisionRecords(t, logPath, 1, 2*time.Second)
+
+	dialAndSendFrame(t, sockPath, Frame{HookInput: HookInput{
+		SessionID: sessionID, CWD: "/home/user/project", TranscriptPath: "/nonexistent",
+		HookEventName: "Notification", NotificationType: "idle_prompt",
+	}})
+	recs := waitForDecisionRecords(t, logPath, 2, 2*time.Second)
+
+	if recs[0].Outcome != OutcomeSend.String() {
+		t.Fatalf("first record Outcome = %q, want send", recs[0].Outcome)
+	}
+	if recs[1].Outcome != OutcomeSilent.String() || !strings.Contains(recs[1].Reason, "dedupe") {
+		t.Fatalf("second record = %+v, want a silent dedupe record", recs[1])
+	}
+	if len(sent) != 1 {
+		t.Fatalf("sent = %+v, want exactly one delivered notification (the idle_prompt was deduped)", sent)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(stateBase, sessionID)); !os.IsNotExist(statErr) {
+		t.Errorf(
+			"session state dir exists (err = %v), want it never created — dedupe must come entirely from memory",
+			statErr,
+		)
+	}
+}
+
+// TestDaemon_Loop_SameSessionFramesProcessInArrivalOrder sends three
+// identical frames for the same session, each held back until the prior
+// one's decision record has landed, and confirms every repeat after the
+// first correctly dedupes. This is "arrival order" in the sense the loop
+// actually guarantees it: frames that arrive after a prior one has fully
+// completed see that prior write, with no torn or lost state access along
+// the way. It deliberately does not fire the frames concurrently — two
+// truly simultaneous frames for the same session can both read "not yet
+// marked" before either writes and both send, exactly as the old
+// file-based, one-goroutine-per-connection design already could (see
+// Daemon.loop's doc comment); that race is unchanged by this task, not
+// fixed by it. Run with -race, this also catches any concurrent,
+// unsynchronized map access in MemoryState.
+func TestDaemon_Loop_SameSessionFramesProcessInArrivalOrder(t *testing.T) {
+	stateBase := t.TempDir()
+	logPath := filepath.Join(stateBase, "notify-decisions.jsonl")
+	var sent []capturedRequest
+
+	d := Daemon{
+		Pipeline: Pipeline{
+			StateBase: stateBase,
+			DryRun:    false,
+			Judge:     Judge{Bin: writeStubClaude(t), Model: "claude-haiku-4-5"},
+			Sender:    stubSenderRecording(&sent),
+			Log:       DecisionLog{Path: logPath},
+			Stdout:    os.Stdout,
+			Host:      "testhost",
+			Present:   neverPresent,
+		},
+	}
+	sockPath := filepath.Join(t.TempDir(), "notifyd.sock")
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("net.Listen() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = d.Serve(ctx, ln) }()
+
+	const sessionID = "sess-arrival-order"
+	for i := 1; i <= 3; i++ {
+		dialAndSendFrame(t, sockPath, Frame{HookInput: HookInput{
+			SessionID: sessionID, CWD: "/home/user/project", TranscriptPath: "/nonexistent",
+			HookEventName: "Notification", NotificationType: "permission_prompt", Message: "allow rm?",
+		}})
+		waitForDecisionRecords(t, logPath, i, 2*time.Second)
+	}
+
+	recs := readDecisionLog(t, logPath)
+	if recs[0].Outcome != OutcomeSend.String() {
+		t.Fatalf("first record Outcome = %q, want send", recs[0].Outcome)
+	}
+	for i, rec := range recs[1:] {
+		if rec.Outcome != OutcomeSilent.String() || !strings.Contains(rec.Reason, "dedupe: identical ping") {
+			t.Errorf("record[%d] = %+v, want a silent identical-ping dedupe record", i+1, rec)
+		}
+	}
+	if len(sent) != 1 {
+		t.Fatalf("sent = %+v, want exactly one delivered notification (identical repeats deduped)", sent)
+	}
+}
+
+// TestLoopState_Call_WaitsForOpEvenIfCtxCancelsAfterSend drives
+// loopState.call directly against a hand-rolled receiver (standing in for
+// the real event loop) to pin the exact interleaving a mutex-free design
+// depends on: once the send to ch succeeds, the "loop" has committed to
+// running the op, so call() must wait for it unconditionally — even if ctx
+// is canceled in the gap between the send completing and the op actually
+// running. Racing that wait against ctx.Done() would let call() return
+// (and the caller read its result variable) while the op is still
+// in-flight, writing to the same variable — a data race only -race
+// reliably catches, which is why this test drives msg.op itself on a
+// controlled delay rather than relying on the real daemon's shutdown
+// timing.
+func TestLoopState_Call_WaitsForOpEvenIfCtxCancelsAfterSend(t *testing.T) {
+	ch := make(chan loopMsg)
+	ctx, cancel := context.WithCancel(context.Background())
+	l := loopState{ch: ch}
+
+	callReturned := make(chan struct{})
+	go func() {
+		l.call(ctx, func(_ *MemoryState) {})
+		close(callReturned)
+	}()
+
+	// Receive the msg the way the real loop would — this is what unblocks
+	// call()'s first select.
+	msg := <-ch
+	cancel()
+
+	// Give call() every chance to race ahead if it still raced the wait
+	// against ctx.Done(): with ctx already canceled and the op not yet
+	// run, a buggy second select would return here.
+	select {
+	case <-callReturned:
+		t.Fatal("call() returned before its op ran — the wait raced ctx cancellation against the op completing")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	// Now run the op the way the loop would, well after cancellation.
+	msg.op(nil)
+
+	select {
+	case <-callReturned:
+	case <-time.After(time.Second):
+		t.Fatal("call() never returned after its op ran")
+	}
+}
+
 func TestDaemon_Serve_MalformedFrame_LogsAndKeepsServing(t *testing.T) {
 	d, logPath := newTestDaemon(t)
 
