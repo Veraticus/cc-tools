@@ -49,9 +49,9 @@ type dailyCacheEntry struct {
 // grandparent directory.
 //
 // subscribed is the caller's ground truth for whether anthropic-backend
-// rows price at $0 (see statusline.go's costSource, which derives it
-// from stdin's rate_limits presence) — it is folded into the cache key
-// (see costSessionCacheName/costDailyCacheName) so a cache entry
+// rows price at $0 (see statusline.go's costSource, which derives it from
+// whether stdin's rate_limits data is available) — it is folded into the
+// cache key (see costSessionCacheName/costDailyCacheName) so a cache entry
 // computed under one value is never served back under the other.
 //
 // The session and daily figures are cached under two separate keys —

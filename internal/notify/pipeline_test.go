@@ -35,29 +35,24 @@ func readDecisionLog(t *testing.T, path string) []DecisionRecord {
 	return recs
 }
 
-// newTestPipeline builds a DryRun Pipeline pointed at a fresh temp state base,
-// with judgeBin as the stub claude binary and present as the injected
-// presence check.
+// newTestPipeline builds a DryRun Pipeline pointed at a fresh temp state
+// base, with judgeBin as the stub claude binary.
 func newTestPipeline(
 	t *testing.T,
 	stdout *bytes.Buffer,
 	judgeBin string,
-	present func([]string, time.Time) bool,
 ) (Pipeline, string) {
 	t.Helper()
 	logPath := filepath.Join(t.TempDir(), "notify-decisions.jsonl")
 	p := Pipeline{
-		DryRun:  true,
-		Judge:   Judge{Bin: judgeBin, Model: "claude-haiku-4-5"},
-		Log:     DecisionLog{Path: logPath},
-		Stdout:  stdout,
-		Host:    "testhost",
-		Present: present,
+		DryRun: true,
+		Judge:  Judge{Bin: judgeBin, Model: "claude-haiku-4-5"},
+		Log:    DecisionLog{Path: logPath},
+		Stdout: stdout,
+		Host:   "testhost",
 	}
 	return p, logPath
 }
-
-func neverPresent(_ []string, _ time.Time) bool { return false }
 
 // goalIncidentDaemonCondition is the exact goal condition text baked into the
 // goal_incident_daemon.jsonl fixture's goal_status attachment: it reproduces
@@ -79,7 +74,6 @@ func newGoalTestPipeline(
 	t *testing.T,
 	stdout *bytes.Buffer,
 	judgeBin string,
-	present func([]string, time.Time) bool,
 ) (Pipeline, string) {
 	t.Helper()
 	logPath := filepath.Join(t.TempDir(), "notify-decisions.jsonl")
@@ -89,7 +83,6 @@ func newGoalTestPipeline(
 		Log:     DecisionLog{Path: logPath},
 		Stdout:  stdout,
 		SelfBin: judgeBin,
-		Present: present,
 	}
 	return p, logPath
 }
@@ -188,7 +181,7 @@ func stubSenderRecording(captured *[]capturedRequest) Sender {
 
 func TestPipeline_SessionEnd_ReapsWatchdog(t *testing.T) {
 	var stdout bytes.Buffer
-	p, _ := newTestPipeline(t, &stdout, writeStubClaude(t), neverPresent)
+	p, _ := newTestPipeline(t, &stdout, writeStubClaude(t))
 	wd := &fakeWatchdog{}
 	p.Watchdog = wd
 
@@ -209,7 +202,7 @@ func TestPipeline_SessionEnd_ReapsWatchdog(t *testing.T) {
 // panic on SessionEnd.
 func TestPipeline_SessionEnd_NilWatchdog_NeverPanics(t *testing.T) {
 	var stdout bytes.Buffer
-	p, _ := newTestPipeline(t, &stdout, writeStubClaude(t), neverPresent)
+	p, _ := newTestPipeline(t, &stdout, writeStubClaude(t))
 
 	in := HookInput{SessionID: "sess-end-nil-watchdog", HookEventName: "SessionEnd"}
 	if err := p.Run(context.Background(), in); err != nil {
@@ -219,7 +212,7 @@ func TestPipeline_SessionEnd_NilWatchdog_NeverPanics(t *testing.T) {
 
 func TestPipeline_Stop_GoalActive_DryRun_WouldArmWatchdog(t *testing.T) {
 	var stdout bytes.Buffer
-	p, logPath := newTestPipeline(t, &stdout, writeStubClaude(t), neverPresent)
+	p, logPath := newTestPipeline(t, &stdout, writeStubClaude(t))
 	transcript := copyFixture(t, "goal_active_set.jsonl")
 
 	in := HookInput{
@@ -246,7 +239,7 @@ func TestPipeline_Stop_GoalActive_DryRun_WouldArmWatchdog(t *testing.T) {
 
 func TestPipeline_PermissionPrompt_BadTranscript_StillDelivers(t *testing.T) {
 	var stdout bytes.Buffer
-	p, _ := newTestPipeline(t, &stdout, writeStubClaude(t), neverPresent)
+	p, _ := newTestPipeline(t, &stdout, writeStubClaude(t))
 
 	in := HookInput{
 		SessionID:        "sess-2",
@@ -276,7 +269,7 @@ func TestPipeline_Stop_Clean_ComposeVerdict_DryRunLine(t *testing.T) {
 	)
 
 	var stdout bytes.Buffer
-	p, _ := newTestPipeline(t, &stdout, stubBin, neverPresent)
+	p, _ := newTestPipeline(t, &stdout, stubBin)
 	transcript := copyFixture(t, "goal_none.jsonl")
 
 	in := HookInput{
@@ -297,7 +290,7 @@ func TestPipeline_Stop_Clean_ComposeJudgeError_FallbackSessionIdle(t *testing.T)
 	t.Setenv("STUB_STDERR", "boom")
 
 	var stdout bytes.Buffer
-	p, _ := newTestPipeline(t, &stdout, stubBin, neverPresent)
+	p, _ := newTestPipeline(t, &stdout, stubBin)
 	transcript := copyFixture(t, "goal_none.jsonl")
 
 	in := HookInput{
@@ -321,7 +314,7 @@ func TestPipeline_Stop_LiveTasks_DecideNotifyFalse_Silent(t *testing.T) {
 	t.Setenv("STUB_STDOUT", `{"notify":false,"urgency":"info","task":"t","body":"b","reason":"parked, still building"}`)
 
 	var stdout bytes.Buffer
-	p, logPath := newTestPipeline(t, &stdout, stubBin, neverPresent)
+	p, logPath := newTestPipeline(t, &stdout, stubBin)
 	transcript := copyFixture(t, "tasks_live.jsonl")
 
 	in := HookInput{
@@ -343,50 +336,13 @@ func TestPipeline_Stop_LiveTasks_DecideNotifyFalse_Silent(t *testing.T) {
 	}
 }
 
-func TestPipeline_Stop_LiveTasks_DecideNotifyTrue_UserPresent_Suppressed(t *testing.T) {
-	stubBin := writeStubClaude(t)
-	t.Setenv(
-		"STUB_STDOUT",
-		`{"notify":true,"urgency":"done","task":"wrap up","body":"finished a subtask","reason":"r"}`,
-	)
-
-	var stdout bytes.Buffer
-	p, logPath := newTestPipeline(t, &stdout, stubBin, func(_ []string, _ time.Time) bool { return true })
-	transcript := copyFixture(t, "tasks_live.jsonl")
-
-	in := HookInput{
-		SessionID: "sess-6", CWD: "/home/user/project", TranscriptPath: transcript, HookEventName: "Stop",
-	}
-	if err := p.Run(context.Background(), in); err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-
-	if stdout.String() != "" {
-		t.Errorf("stdout = %q, want empty (suppressed)", stdout.String())
-	}
-	recs := readDecisionLog(t, logPath)
-	if len(recs) != 1 || recs[0].Outcome != OutcomeSilent.String() {
-		t.Fatalf("records = %+v, want one silent record", recs)
-	}
-	if !strings.Contains(recs[0].Reason, "suppressed: user present") {
-		t.Errorf("Reason = %q, want suppressed reason", recs[0].Reason)
-	}
-	// The live-tasks Stop gate sets ArmWatchdog: true (background work is
-	// still running even though the user is present and got suppressed) —
-	// a silent outcome here must not mean zero coverage of that live work.
-	// This pipeline is DryRun, so the arm attempt is logged, not executed.
-	if !strings.Contains(recs[0].Reason, "would arm watchdog") {
-		t.Errorf("Reason = %q, want it to mention would arm watchdog", recs[0].Reason)
-	}
-}
-
-// TestPipeline_Stop_LiveTasks_DecideNotifyTrue_NotPresent_Delivers exercises
-// the decide-mode delivery branch that TestPipeline_Stop_LiveTasks_
-// DecideNotifyTrue_UserPresent_Suppressed does not reach: verdict.Notify
-// true, urgency not blocked, but the user is NOT present, so the focus gate
-// never fires and the pipeline actually delivers (here: the DryRun line for
-// what the skill brief calls the parked-dev-server ping).
-func TestPipeline_Stop_LiveTasks_DecideNotifyTrue_NotPresent_Delivers(t *testing.T) {
+// TestPipeline_Stop_LiveTasks_DecideNotifyTrue_Delivers exercises the
+// decide-mode delivery branch: verdict.Notify true, urgency not blocked, so
+// the pipeline actually delivers (here: the DryRun line for what the skill
+// brief calls the parked-dev-server ping). Nothing gates this path on
+// whether anyone is at the terminal — a decide-mode notify:true verdict
+// always sends.
+func TestPipeline_Stop_LiveTasks_DecideNotifyTrue_Delivers(t *testing.T) {
 	stubBin := writeStubClaude(t)
 	t.Setenv(
 		"STUB_STDOUT",
@@ -394,7 +350,7 @@ func TestPipeline_Stop_LiveTasks_DecideNotifyTrue_NotPresent_Delivers(t *testing
 	)
 
 	var stdout bytes.Buffer
-	p, _ := newTestPipeline(t, &stdout, stubBin, neverPresent)
+	p, _ := newTestPipeline(t, &stdout, stubBin)
 	transcript := copyFixture(t, "tasks_live.jsonl")
 
 	in := HookInput{
@@ -412,12 +368,10 @@ func TestPipeline_Stop_LiveTasks_DecideNotifyTrue_NotPresent_Delivers(t *testing
 	}
 }
 
-// TestPipeline_Stop_LiveTasks_DecideNotifyTrue_Blocked_PresentStillDelivers
-// exercises the other half of the focus gate: verdict.Urgency == blocked
-// bypasses the "user present" suppression entirely, even with the user
-// sitting right at the pane, since a blocked session needs the user
-// regardless of which pane currently has focus.
-func TestPipeline_Stop_LiveTasks_DecideNotifyTrue_Blocked_PresentStillDelivers(t *testing.T) {
+// TestPipeline_Stop_LiveTasks_DecideNotifyTrue_Blocked_Delivers exercises a
+// blocked-urgency decide-mode verdict: it delivers exactly like any other
+// notify:true verdict, since no terminal-focus gate exists to bypass.
+func TestPipeline_Stop_LiveTasks_DecideNotifyTrue_Blocked_Delivers(t *testing.T) {
 	stubBin := writeStubClaude(t)
 	t.Setenv(
 		"STUB_STDOUT",
@@ -425,7 +379,7 @@ func TestPipeline_Stop_LiveTasks_DecideNotifyTrue_Blocked_PresentStillDelivers(t
 	)
 
 	var stdout bytes.Buffer
-	p, _ := newTestPipeline(t, &stdout, stubBin, func(_ []string, _ time.Time) bool { return true })
+	p, _ := newTestPipeline(t, &stdout, stubBin)
 	transcript := copyFixture(t, "tasks_live.jsonl")
 
 	in := HookInput{
@@ -436,7 +390,7 @@ func TestPipeline_Stop_LiveTasks_DecideNotifyTrue_Blocked_PresentStillDelivers(t
 	}
 
 	if !strings.HasPrefix(stdout.String(), "DRY RUN: [blocked]") {
-		t.Errorf("stdout = %q, want DRY RUN blocked line despite user present", stdout.String())
+		t.Errorf("stdout = %q, want DRY RUN blocked line", stdout.String())
 	}
 	if !strings.Contains(stdout.String(), "needs a decision") {
 		t.Errorf("stdout = %q, want it to contain the verdict task", stdout.String())
@@ -457,7 +411,7 @@ func TestPipeline_Stop_Teammates_DecideNotifyFalse_SilentAndArms(t *testing.T) {
 	t.Setenv("STUB_STDOUT", `{"notify":false,"urgency":"info","task":"t","body":"b","reason":"`+judgeReason+`"}`)
 
 	var stdout bytes.Buffer
-	p, logPath := newGoalTestPipeline(t, &stdout, stubBin, neverPresent)
+	p, logPath := newGoalTestPipeline(t, &stdout, stubBin)
 	const parentPIDSentinel = 424242
 	p.ParentPID = parentPIDSentinel
 	wd := &fakeWatchdog{}
@@ -520,7 +474,7 @@ func TestPipeline_Stop_Teammates_DecideNotifyFalse_SilentAndArms(t *testing.T) {
 // that arming is an interface call, not a subprocess spawn that can fail.
 func TestPipeline_Stop_GoalActive_NilWatchdog_NoOpNoPanic(t *testing.T) {
 	var stdout bytes.Buffer
-	p, logPath := newTestPipeline(t, &stdout, writeStubClaude(t), neverPresent)
+	p, logPath := newTestPipeline(t, &stdout, writeStubClaude(t))
 	p.DryRun = false
 	transcript := copyFixture(t, "goal_active_set.jsonl")
 
@@ -542,7 +496,7 @@ func TestPipeline_Stop_GoalActive_NilWatchdog_NoOpNoPanic(t *testing.T) {
 
 func TestPipeline_IdlePrompt_DedupeWindow_Silent(t *testing.T) {
 	var stdout bytes.Buffer
-	p, logPath := newTestPipeline(t, &stdout, writeStubClaude(t), neverPresent)
+	p, logPath := newTestPipeline(t, &stdout, writeStubClaude(t))
 	ds := newMemDedupeState()
 	p.State = ds
 
@@ -571,6 +525,58 @@ func TestPipeline_IdlePrompt_DedupeWindow_Silent(t *testing.T) {
 	}
 }
 
+// TestPipeline_IdlePrompt_LiveTasks_SilentNoJudgeCallArmsWatchdog is the
+// pipeline-level proof for the idle_prompt live-work gate (see decideNotification
+// in decide.go): an idle_prompt Notification for a session with live
+// background tasks resolves silent and arms the watchdog WITHOUT ever
+// invoking the judge — the Stop decide-judge already ruled on this state
+// ~60s earlier, so a second judge call here would be redundant, and the
+// epic requires this path to make zero judge calls. STUB_DUMP_FILE proves
+// non-invocation mechanically (not just via the outcome): the stub claude
+// binary only ever writes it when actually executed, so its absence after
+// Run proves the judge subprocess never ran.
+func TestPipeline_IdlePrompt_LiveTasks_SilentNoJudgeCallArmsWatchdog(t *testing.T) {
+	stubBin := writeStubClaude(t)
+	dumpFile := filepath.Join(t.TempDir(), "dump.txt")
+	t.Setenv("STUB_DUMP_FILE", dumpFile)
+
+	var stdout bytes.Buffer
+	p, logPath := newGoalTestPipeline(t, &stdout, stubBin)
+	wd := &fakeWatchdog{}
+	p.Watchdog = wd
+	transcript := copyFixture(t, "tasks_live.jsonl")
+
+	sessionID := "sess-idle-live-tasks"
+	in := HookInput{
+		SessionID: sessionID, CWD: "/home/user/project", TranscriptPath: transcript,
+		HookEventName: "Notification", NotificationType: "idle_prompt",
+	}
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if _, statErr := os.Stat(dumpFile); statErr == nil {
+		t.Fatal("dump file exists: the judge stub was invoked, but idle_prompt with live tasks must never call it")
+	} else if !os.IsNotExist(statErr) {
+		t.Fatalf("stat dump file: %v", statErr)
+	}
+
+	if stdout.String() != "" {
+		t.Errorf("stdout = %q, want empty (silent, no DRY RUN line)", stdout.String())
+	}
+	recs := readDecisionLog(t, logPath)
+	if len(recs) != 1 || recs[0].Outcome != OutcomeSilent.String() {
+		t.Fatalf("records = %+v, want one silent record", recs)
+	}
+	if !strings.Contains(recs[0].Reason, "live work: watchdog covers") {
+		t.Errorf("Reason = %q, want the live-work watchdog reason", recs[0].Reason)
+	}
+
+	if len(wd.armed) != 1 || wd.armed[0].SessionID != sessionID {
+		t.Fatalf("armed = %+v, want exactly one arm for %s", wd.armed, sessionID)
+	}
+}
+
 // TestPipeline_PermissionPrompt_IdenticalRepeat_SecondIsSilent is the
 // end-to-end version of the blockedRepeatWindow gate: two identical
 // permission_prompt events for the same session, roughly a minute apart,
@@ -581,7 +587,7 @@ func TestPipeline_PermissionPrompt_IdenticalRepeat_SecondIsSilent(t *testing.T) 
 	stubBin := writeStubClaude(t)
 	var stdout bytes.Buffer
 	var sent []capturedRequest
-	p, logPath := newGoalTestPipeline(t, &stdout, stubBin, neverPresent)
+	p, logPath := newGoalTestPipeline(t, &stdout, stubBin)
 	p.Sender = stubSenderRecording(&sent)
 	ds := newMemDedupeState()
 	p.State = ds
@@ -642,7 +648,7 @@ func TestPipeline_Regression_ComposePath_NonDryRun_StdoutEmpty(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var sent []capturedRequest
-	p, _ := newGoalTestPipeline(t, &stdout, stubBin, neverPresent)
+	p, _ := newGoalTestPipeline(t, &stdout, stubBin)
 	p.Sender = stubSenderRecording(&sent)
 	transcript := copyFixture(t, "goal_none.jsonl")
 
@@ -709,7 +715,7 @@ func TestPipeline_Stop_ComposeJudgeError_SuppressedWithinFailOpenWindow(t *testi
 	t.Setenv("STUB_STDERR", "boom")
 
 	var stdout bytes.Buffer
-	p, logPath := newTestPipeline(t, &stdout, stubBin, neverPresent)
+	p, logPath := newTestPipeline(t, &stdout, stubBin)
 	ds := newMemDedupeState()
 	p.State = ds
 	transcript := copyFixture(t, "goal_none.jsonl")
@@ -757,7 +763,7 @@ func TestPipeline_Stop_DecideJudgeError_NeverNotified_SendsFallback(t *testing.T
 
 	var stdout bytes.Buffer
 	var sent []capturedRequest
-	p, logPath := newGoalTestPipeline(t, &stdout, stubBin, neverPresent)
+	p, logPath := newGoalTestPipeline(t, &stdout, stubBin)
 	p.Sender = stubSenderRecording(&sent)
 	transcript := copyFixture(t, "tasks_live.jsonl")
 
@@ -789,7 +795,7 @@ func TestPipeline_Stop_DecideJudgeError_SuppressedWithinFailOpenWindow_NoSend(t 
 
 	var stdout bytes.Buffer
 	var sent []capturedRequest
-	p, logPath := newGoalTestPipeline(t, &stdout, stubBin, neverPresent)
+	p, logPath := newGoalTestPipeline(t, &stdout, stubBin)
 	p.Sender = stubSenderRecording(&sent)
 	wd := &fakeWatchdog{}
 	p.Watchdog = wd
@@ -842,7 +848,7 @@ func TestPipeline_Stop_DecideJudgeError_AfterFailOpenWindow_SendsAgain(t *testin
 
 	var stdout bytes.Buffer
 	var sent []capturedRequest
-	p, logPath := newGoalTestPipeline(t, &stdout, stubBin, neverPresent)
+	p, logPath := newGoalTestPipeline(t, &stdout, stubBin)
 	p.Sender = stubSenderRecording(&sent)
 	ds := newMemDedupeState()
 	p.State = ds
@@ -880,7 +886,7 @@ func TestPipeline_Stop_ComposeVerdict_RetriedWithoutModel_AppendsReasonSuffix(t 
 	t.Setenv("STUB_RETRY_MODE", "invalid_then_ok")
 
 	var stdout bytes.Buffer
-	p, logPath := newTestPipeline(t, &stdout, stubBin, neverPresent)
+	p, logPath := newTestPipeline(t, &stdout, stubBin)
 	transcript := copyFixture(t, "goal_none.jsonl")
 
 	in := HookInput{
@@ -901,7 +907,7 @@ func TestPipeline_Stop_ComposeVerdict_RetriedWithoutModel_AppendsReasonSuffix(t 
 
 func TestPipeline_SendTitles_LocusByWorkspaceAndBroadcastByHost(t *testing.T) {
 	var stdout bytes.Buffer
-	p, _ := newTestPipeline(t, &stdout, writeStubClaude(t), neverPresent)
+	p, _ := newTestPipeline(t, &stdout, writeStubClaude(t))
 	p.Workspace = "mercury"
 
 	// A same-session event (permission prompt) locates by workspace.
@@ -944,7 +950,7 @@ func TestPipeline_Stop_GoalActive_LiveTasks_DefersSilentNoBlock(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var sent []capturedRequest
-	p, logPath := newGoalTestPipeline(t, &stdout, stubBin, neverPresent)
+	p, logPath := newGoalTestPipeline(t, &stdout, stubBin)
 	p.Sender = stubSenderRecording(&sent)
 	wd := &fakeWatchdog{}
 	p.Watchdog = wd
@@ -1026,7 +1032,7 @@ func TestPipeline_TwoJudgedStops_SecondLosesClaimAndArms(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var sent []capturedRequest
-	p, logPath := newGoalTestPipeline(t, &stdout, stubBin, neverPresent)
+	p, logPath := newGoalTestPipeline(t, &stdout, stubBin)
 	p.Sender = stubSenderRecording(&sent)
 	p.State = newMemDedupeState()
 	wd := &fakeWatchdog{}
@@ -1075,7 +1081,7 @@ func TestPipeline_JudgedSend_BodyCarriesLocator(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var sent []capturedRequest
-	p, _ := newGoalTestPipeline(t, &stdout, stubBin, neverPresent)
+	p, _ := newGoalTestPipeline(t, &stdout, stubBin)
 	p.Sender = stubSenderRecording(&sent)
 	p.Workspace = "earth:3"
 	p.Host = "vermissian"
@@ -1121,7 +1127,7 @@ func TestLocatorSuffix(t *testing.T) {
 // dropped Workspace would silently produce locator-less watchdog pings.
 func TestPipeline_Arm_ForwardsWorkspace(t *testing.T) {
 	var stdout bytes.Buffer
-	p, _ := newTestPipeline(t, &stdout, writeStubClaude(t), neverPresent)
+	p, _ := newTestPipeline(t, &stdout, writeStubClaude(t))
 	p.DryRun = false
 	p.Workspace = "earth:3"
 	wd := &fakeWatchdog{}

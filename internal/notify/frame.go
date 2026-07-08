@@ -10,9 +10,9 @@ import (
 // socket: the parsed hook input plus the process context the daemon cannot
 // recover from its own (long-lived, single) environment — the hook
 // invocation's tmux workspace (WorkspaceName depends on the calling
-// process's TMUX_PANE) and its full environ (UserPresent's TMUX lookup and
-// broadcast.go's jobsDir both key off entries — e.g. CLAUDE_CONFIG_DIR —
-// that are per-hook-context, not daemon-wide).
+// process's TMUX_PANE) and its full environ (broadcast.go's jobsDir keys
+// off entries — e.g. CLAUDE_CONFIG_DIR — that are per-hook-context, not
+// daemon-wide).
 type Frame struct {
 	HookInput HookInput `json:"hook_input"`
 	Workspace string    `json:"workspace"`

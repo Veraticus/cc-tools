@@ -108,9 +108,6 @@ type Pipeline struct {
 	// there anyway); the daemon overwrites it per connection from the
 	// frame, alongside Environ and Workspace.
 	ParentPID int
-	// Present reports whether the user is at the terminal right now.
-	// Production wires UserPresent+RunCommand; tests inject a canned func.
-	Present func(environ []string, now time.Time) bool
 	// Watchdog arms/reaps the in-daemon watchdog for a session with
 	// live/pending work. A nil Watchdog makes Pipeline.arm a no-op — the
 	// hook client's inline fallback's documented degraded mode (see
@@ -174,7 +171,6 @@ func (p Pipeline) Run(ctx context.Context, in HookInput) error {
 		sinceSame = p.dedupeState().SinceLastNotifySame(ctx, in.SessionID, now, in.Message)
 	}
 	env := Env{
-		UserPresent:         p.Present(p.Environ, now),
 		SinceLastNotify:     p.dedupeState().SinceLastNotify(ctx, in.SessionID, now),
 		SinceLastNotifySame: sinceSame,
 		Broadcast:           p.broadcastFacts(ctx, in, now),
@@ -508,25 +504,6 @@ func (p Pipeline) handleDecideVerdict(
 			digest,
 			judgeMs,
 		)
-		return
-	}
-
-	if verdict.Urgency != UrgencyBlocked && env.UserPresent {
-		reason := "suppressed: user present (post-judge)" + reasonSuffix +
-			retriedWithoutModelSuffix(verdict.RetriedWithoutModel)
-		// This is still a silent outcome with live/pending background work
-		// (that's how JudgeModeDecide was reached at all) — the user being
-		// present right now doesn't mean they'll stay at this pane, so the
-		// watchdog must still arm to keep coverage on that work, exactly as
-		// the !verdict.Notify branch above does.
-		if d.ArmWatchdog {
-			if p.DryRun {
-				reason += dryRunWouldArmWatchdogSuffix
-			} else {
-				p.arm(in, res, now, project, host)
-			}
-		}
-		p.logJudged(in, now, OutcomeSilent.String(), reason, Notification{}, JudgeModeDecide, nil, digest, judgeMs)
 		return
 	}
 

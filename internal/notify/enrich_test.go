@@ -200,11 +200,11 @@ func TestEnrichTasksAgentSymlinkNoTail(t *testing.T) {
 	}
 }
 
-// TestEnrichTasksPreservesOrderMixedPresence exercises a realistic digest
+// TestEnrichTasksPreservesOrderMixedOutputFiles exercises a realistic digest
 // input: several tasks in launch order, some with output on disk and some
 // without, and confirms EnrichTasks returns one TaskActivity per input task
 // in the same order with no reordering or dropped entries.
-func TestEnrichTasksPreservesOrderMixedPresence(t *testing.T) {
+func TestEnrichTasksPreservesOrderMixedOutputFiles(t *testing.T) {
 	dir := t.TempDir()
 	presentPath := claudeShapedPath(dir, "present.output")
 	if err := os.MkdirAll(filepath.Dir(presentPath), 0o750); err != nil {

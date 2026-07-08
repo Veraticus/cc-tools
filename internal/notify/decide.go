@@ -18,11 +18,11 @@ const dedupeWindow = 5 * time.Minute
 
 // blockedRepeatWindow suppresses a second permission_prompt or
 // agent_needs_input notification within this long of an identical previous
-// one for the same session. Blocked-tier events are otherwise presence-blind
-// and dedupe-blind by design (a blocked session needs attention regardless
-// of pane focus), so this is scoped to content identity only: a session
-// asking the exact same thing every poll cycle gets pinged once, but a
-// DIFFERENT message always sends immediately.
+// one for the same session. Blocked-tier events are otherwise dedupe-blind
+// by design (a blocked session needs attention regardless of pane focus), so
+// this is scoped to content identity only: a session asking the exact same
+// thing every poll cycle gets pinged once, but a DIFFERENT message always
+// sends immediately.
 const blockedRepeatWindow = 5 * time.Minute
 
 // Outcome is what Decide resolved to do with a hook event.
@@ -105,12 +105,10 @@ type Decision struct {
 }
 
 // Env carries environment facts the caller computed, since Decide itself
-// does no I/O: whether the user is currently looking at this session's
-// focused tmux pane, how long ago this session last sent a notification
-// (negative means never), and — for broadcast-type Notification events —
-// the cross-session BroadcastFacts (nil otherwise).
+// does no I/O: how long ago this session last sent a notification (negative
+// means never), and — for broadcast-type Notification events — the
+// cross-session BroadcastFacts (nil otherwise).
 type Env struct {
-	UserPresent     bool
 	SinceLastNotify time.Duration
 	// SinceLastNotifySame is how long ago this session last sent the
 	// current Notification event's message verbatim (negative when never,
@@ -141,7 +139,7 @@ func Decide(in HookInput, scan ScanResult, env Env) Decision {
 		// resolves SessionEnd to a sensible silent decision.
 		return Decision{Outcome: OutcomeSilent, Reason: "session end"}
 	case "Stop":
-		return decideStop(scan, env)
+		return decideStop(scan)
 	case eventNotification:
 		return decideNotification(in, scan, env)
 	default:
@@ -149,14 +147,16 @@ func Decide(in HookInput, scan ScanResult, env Env) Decision {
 	}
 }
 
-// decideStop handles the Stop event's gates: an active goal, live
-// background work, or active teammates all win over user presence, since a
-// Stop's implication (the assistant turn ended) is only a silence signal
-// when there is genuinely nothing left for the session to track. Teammates
-// are softer evidence than live tasks (a spawn with no reply yet doesn't
-// guarantee more work is coming), so they route to the decide-mode judge
-// rather than resolving silent on their own.
-func decideStop(scan ScanResult, env Env) Decision {
+// decideStop handles the Stop event's gates: an active goal or live
+// background work or active teammates are all reasons a Stop's implication
+// (the assistant turn ended) is not yet a signal to notify — there is still
+// something for the session to track. Teammates are softer evidence than
+// live tasks (a spawn with no reply yet doesn't guarantee more work is
+// coming), so they route to the decide-mode judge rather than resolving
+// silent on their own. Absent any of those, a Stop always composes: a ping
+// means "a stopped session needs the user's response," so nothing here may
+// gate that on whether the user happens to be looking at the pane right now.
+func decideStop(scan ScanResult) Decision {
 	if scan.Goal.Status == GoalActive {
 		// Claude Code's built-in /goal evaluator owns goal continuation; a
 		// hook decision:block here would override its verdict, and
@@ -177,25 +177,16 @@ func decideStop(scan ScanResult, env Env) Decision {
 			Reason: "teammates active: parked vs pending", ArmWatchdog: true,
 		}
 	}
-	if env.UserPresent {
-		// broadcastCoveredWindow is gone (ownership of a local job
-		// broadcast is now structural, see suppressBroadcast Local
-		// check), so this session can no longer rely on a receiving
-		// session presence-blind broadcast backstop to catch it if it
-		// goes idle while genuinely blocked. Arm the watchdog itself to
-		// preserve that walked-away-while-blocked coverage.
-		return Decision{Outcome: OutcomeSilent, Reason: "user present at focused pane", ArmWatchdog: true}
-	}
 	return Decision{Outcome: OutcomeJudge, JudgeMode: JudgeModeCompose, Reason: "turn ended, composing"}
 }
 
 // decideNotification handles the Notification event's gates, branching on
 // NotificationType. permission_prompt and agent_needs_input are
-// blocked-tier: they skip presence and idle-dedupe suppression entirely,
-// because a blocked session needs the user's attention regardless of which
-// tmux pane (if any) currently has focus. They do still gate on
-// blockedRepeatWindow — an identical repeat of the exact same blocked ping —
-// since that is a content-identity check, not a presence or staleness one.
+// blocked-tier: they skip idle-dedupe suppression entirely, because a
+// blocked session needs the user's attention regardless of which tmux pane
+// (if any) currently has focus. They do still gate on blockedRepeatWindow —
+// an identical repeat of the exact same blocked ping — since that is a
+// content-identity check, not a staleness one.
 func decideNotification(in HookInput, scan ScanResult, env Env) Decision {
 	switch in.NotificationType {
 	case "permission_prompt":
@@ -208,6 +199,14 @@ func decideNotification(in HookInput, scan ScanResult, env Env) Decision {
 		}
 
 	case "idle_prompt":
+		// A ping means "a stopped session needs the user's response," so
+		// nothing here may gate on whether anyone is looking at the pane.
+		// What silences idle_prompt below instead is coverage: the Stop
+		// decision already ruled on goal/live-task/teammate state ~60s
+		// earlier when this same turn ended, and the watchdog it armed
+		// (staleness check plus a 4h ceiling) is the recovery path if that
+		// work hangs. Only when none of that coverage applies does
+		// idle_prompt fall through to compose its own backstop ping.
 		if env.SinceLastNotify >= 0 && env.SinceLastNotify < dedupeWindow {
 			return Decision{
 				Outcome: OutcomeSilent,
@@ -215,10 +214,10 @@ func decideNotification(in HookInput, scan ScanResult, env Env) Decision {
 			}
 		}
 		if scan.Goal.Status == GoalActive {
-			return Decision{Outcome: OutcomeSilent, Reason: "goal active"}
+			return Decision{Outcome: OutcomeSilent, Reason: "goal active", ArmWatchdog: true}
 		}
-		if env.UserPresent {
-			return Decision{Outcome: OutcomeSilent, Reason: "user present"}
+		if len(scan.LiveTasks) > 0 || len(scan.Teammates) > 0 {
+			return Decision{Outcome: OutcomeSilent, Reason: "live work: watchdog covers", ArmWatchdog: true}
 		}
 		return Decision{Outcome: OutcomeJudge, JudgeMode: JudgeModeCompose, Reason: "idle backstop"}
 
@@ -237,9 +236,6 @@ func decideNotification(in HookInput, scan ScanResult, env Env) Decision {
 	case notifTypeAgentCompleted:
 		if s := suppressBroadcast(env); s != nil {
 			return *s
-		}
-		if env.UserPresent {
-			return Decision{Outcome: OutcomeSilent, Reason: "user present"}
 		}
 		return Decision{
 			Outcome: OutcomeSend, Urgency: UrgencyDone,

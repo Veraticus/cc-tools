@@ -141,9 +141,6 @@ func dispatchNotify(ctx context.Context, cfg notifyClientConfig, stdin io.Reader
 		Stdout:    stdout,
 		SelfBin:   cfg.SelfBin,
 		Workspace: workspace,
-		Present: func(environ []string, now time.Time) bool {
-			return notify.UserPresent(environ, now, notify.RunCommand)
-		},
 	}
 	if runErr := p.Run(ctx, in); runErr != nil {
 		_, _ = fmt.Fprintf(stderr, "cc-tools notify: %v\n", runErr)
@@ -229,9 +226,6 @@ func runNotifydCommand() {
 			Sender:  sender,
 			Log:     log,
 			SelfBin: selfBin,
-			Present: func(environ []string, now time.Time) bool {
-				return notify.UserPresent(environ, now, notify.RunCommand)
-			},
 		},
 	}
 

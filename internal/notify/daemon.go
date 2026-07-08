@@ -29,9 +29,9 @@ const connReadDeadline = 5 * time.Second
 // Daemon runs the notify Pipeline once per accepted connection, serializing
 // every access to its in-memory dedupe state through a single event-loop
 // goroutine (see Serve/loop). Pipeline is a template: DryRun, Judge, Sender,
-// Log, SelfBin, Host, and Present are the daemon's own fixed config,
-// resolved once at startup — Environ, Workspace, and ParentPID are
-// overwritten per connection from the client's Frame, since those carry the
+// Log, SelfBin, and Host are the daemon's own fixed config, resolved once at
+// startup — Environ, Workspace, and ParentPID are overwritten per connection
+// from the client's Frame, since those carry the
 // hook invocation's own process context (see Frame's doc comment) that the
 // daemon's single long-lived environment cannot supply. Pipeline.State and
 // Pipeline.Watchdog are also overwritten per connection, bound to the loop's

@@ -82,12 +82,11 @@ func newTestDaemon(t *testing.T) (Daemon, string) {
 	logPath := filepath.Join(t.TempDir(), "notify-decisions.jsonl")
 	d := Daemon{
 		Pipeline: Pipeline{
-			DryRun:  true,
-			Judge:   Judge{Bin: writeStubClaude(t), Model: "claude-haiku-4-5"},
-			Log:     DecisionLog{Path: logPath},
-			Stdout:  os.Stdout,
-			Host:    "testhost",
-			Present: neverPresent,
+			DryRun: true,
+			Judge:  Judge{Bin: writeStubClaude(t), Model: "claude-haiku-4-5"},
+			Log:    DecisionLog{Path: logPath},
+			Stdout: os.Stdout,
+			Host:   "testhost",
 		},
 	}
 	return d, logPath
@@ -169,12 +168,11 @@ func TestDaemon_Loop_SlowJudgeForOneSessionNeverDelaysAnother(t *testing.T) {
 
 	d := Daemon{
 		Pipeline: Pipeline{
-			DryRun:  true,
-			Judge:   Judge{Bin: slowJudgeBin, Model: "claude-haiku-4-5"},
-			Log:     DecisionLog{Path: logPath},
-			Stdout:  os.Stdout,
-			Host:    "testhost",
-			Present: neverPresent,
+			DryRun: true,
+			Judge:  Judge{Bin: slowJudgeBin, Model: "claude-haiku-4-5"},
+			Log:    DecisionLog{Path: logPath},
+			Stdout: os.Stdout,
+			Host:   "testhost",
 		},
 	}
 	sockPath := filepath.Join(t.TempDir(), "notifyd.sock")
@@ -237,13 +235,12 @@ func TestDaemon_Loop_IdlePromptDedupe_NeverTouchesFiles(t *testing.T) {
 
 	d := Daemon{
 		Pipeline: Pipeline{
-			DryRun:  false,
-			Judge:   Judge{Bin: writeStubClaude(t), Model: "claude-haiku-4-5"},
-			Sender:  stubSenderRecording(&sent),
-			Log:     DecisionLog{Path: logPath},
-			Stdout:  os.Stdout,
-			Host:    "testhost",
-			Present: neverPresent,
+			DryRun: false,
+			Judge:  Judge{Bin: writeStubClaude(t), Model: "claude-haiku-4-5"},
+			Sender: stubSenderRecording(&sent),
+			Log:    DecisionLog{Path: logPath},
+			Stdout: os.Stdout,
+			Host:   "testhost",
 		},
 	}
 	sockPath := filepath.Join(t.TempDir(), "notifyd.sock")
@@ -303,13 +300,12 @@ func TestDaemon_Loop_SessionEnd_EvictsDedupeState(t *testing.T) {
 
 	d := Daemon{
 		Pipeline: Pipeline{
-			DryRun:  false,
-			Judge:   Judge{Bin: writeStubClaude(t), Model: "claude-haiku-4-5"},
-			Sender:  stubSenderRecording(&sent),
-			Log:     DecisionLog{Path: logPath},
-			Stdout:  os.Stdout,
-			Host:    "testhost",
-			Present: neverPresent,
+			DryRun: false,
+			Judge:  Judge{Bin: writeStubClaude(t), Model: "claude-haiku-4-5"},
+			Sender: stubSenderRecording(&sent),
+			Log:    DecisionLog{Path: logPath},
+			Stdout: os.Stdout,
+			Host:   "testhost",
 		},
 	}
 	sockPath := filepath.Join(t.TempDir(), "notifyd.sock")
@@ -370,13 +366,12 @@ func TestDaemon_Loop_SameSessionFramesProcessInArrivalOrder(t *testing.T) {
 
 	d := Daemon{
 		Pipeline: Pipeline{
-			DryRun:  false,
-			Judge:   Judge{Bin: writeStubClaude(t), Model: "claude-haiku-4-5"},
-			Sender:  stubSenderRecording(&sent),
-			Log:     DecisionLog{Path: logPath},
-			Stdout:  os.Stdout,
-			Host:    "testhost",
-			Present: neverPresent,
+			DryRun: false,
+			Judge:  Judge{Bin: writeStubClaude(t), Model: "claude-haiku-4-5"},
+			Sender: stubSenderRecording(&sent),
+			Log:    DecisionLog{Path: logPath},
+			Stdout: os.Stdout,
+			Host:   "testhost",
 		},
 	}
 	sockPath := filepath.Join(t.TempDir(), "notifyd.sock")
@@ -627,13 +622,12 @@ func TestWatchdogClaimSend_MarksNotifiedThroughLoopState(t *testing.T) {
 
 	logPath := filepath.Join(t.TempDir(), "notify-decisions.jsonl")
 	p := Pipeline{
-		DryRun:  true,
-		Judge:   Judge{Bin: writeStubClaude(t)},
-		Log:     DecisionLog{Path: logPath},
-		Stdout:  new(strings.Builder),
-		Host:    "testhost",
-		Present: neverPresent,
-		State:   loopState{ch: ch},
+		DryRun: true,
+		Judge:  Judge{Bin: writeStubClaude(t)},
+		Log:    DecisionLog{Path: logPath},
+		Stdout: new(strings.Builder),
+		Host:   "testhost",
+		State:  loopState{ch: ch},
 	}
 	in := HookInput{SessionID: sessionID, HookEventName: "Notification", NotificationType: "idle_prompt"}
 	if err := p.Run(context.Background(), in); err != nil {

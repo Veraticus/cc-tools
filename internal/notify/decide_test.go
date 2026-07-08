@@ -79,20 +79,7 @@ func TestDecide(t *testing.T) {
 			},
 		},
 		{
-			// ArmWatchdog: true here is the epic's presence-watchdog rule:
-			// with the broadcastCoveredWindow heuristic deleted (ownership is
-			// now structural, not time-window-based), a Stop that resolves
-			// silent solely because the user is present must arm the
-			// watchdog itself to preserve the walked-away-while-blocked
-			// coverage the presence-blind broadcast backstop used to provide.
-			name: "stop with user present and no work is silent and arms watchdog",
-			in:   HookInput{HookEventName: "Stop"},
-			scan: ScanResult{},
-			env:  Env{UserPresent: true},
-			want: Decision{Outcome: OutcomeSilent, Reason: "user present at focused pane", ArmWatchdog: true},
-		},
-		{
-			name: "stop with no goal, no tasks, no presence composes",
+			name: "stop with no goal and no work composes",
 			in:   HookInput{HookEventName: "Stop"},
 			scan: ScanResult{},
 			env:  Env{},
@@ -121,18 +108,25 @@ func TestDecide(t *testing.T) {
 			want: Decision{Outcome: OutcomeSilent, Reason: "dedupe: notified 30s ago"},
 		},
 		{
-			name: "idle prompt with goal active is silent",
+			name: "idle prompt with goal active is silent and arms watchdog",
 			in:   HookInput{HookEventName: "Notification", NotificationType: "idle_prompt"},
 			scan: ScanResult{Goal: GoalState{Status: GoalActive}},
 			env:  Env{SinceLastNotify: neverNotified},
-			want: Decision{Outcome: OutcomeSilent, Reason: "goal active"},
+			want: Decision{Outcome: OutcomeSilent, Reason: "goal active", ArmWatchdog: true},
 		},
 		{
-			name: "idle prompt with user present is silent",
+			name: "idle prompt with live tasks is silent and arms watchdog",
 			in:   HookInput{HookEventName: "Notification", NotificationType: "idle_prompt"},
-			scan: ScanResult{},
-			env:  Env{SinceLastNotify: neverNotified, UserPresent: true},
-			want: Decision{Outcome: OutcomeSilent, Reason: "user present"},
+			scan: ScanResult{LiveTasks: liveTasks},
+			env:  Env{SinceLastNotify: neverNotified},
+			want: Decision{Outcome: OutcomeSilent, Reason: "live work: watchdog covers", ArmWatchdog: true},
+		},
+		{
+			name: "idle prompt with teammates is silent and arms watchdog",
+			in:   HookInput{HookEventName: "Notification", NotificationType: "idle_prompt"},
+			scan: ScanResult{Teammates: []TeammateActivity{{Name: "worker-wire"}}},
+			env:  Env{SinceLastNotify: neverNotified},
+			want: Decision{Outcome: OutcomeSilent, Reason: "live work: watchdog covers", ArmWatchdog: true},
 		},
 		{
 			name: "idle prompt otherwise composes as backstop",
@@ -148,24 +142,14 @@ func TestDecide(t *testing.T) {
 				Message: "need a decision",
 			},
 			scan: ScanResult{},
-			env:  Env{UserPresent: true, SinceLastNotify: 1 * time.Second, SinceLastNotifySame: neverNotified},
+			env:  Env{SinceLastNotify: 1 * time.Second, SinceLastNotifySame: neverNotified},
 			want: Decision{
 				Outcome: OutcomeSend, Urgency: UrgencyBlocked,
 				Message: "need a decision", Reason: "background session needs input",
 			},
 		},
 		{
-			name: "agent completed with user present is silent",
-			in: HookInput{
-				HookEventName: "Notification", NotificationType: "agent_completed",
-				Message: "finished the run",
-			},
-			scan: ScanResult{},
-			env:  Env{UserPresent: true},
-			want: Decision{Outcome: OutcomeSilent, Reason: "user present"},
-		},
-		{
-			name: "agent completed without presence sends done",
+			name: "agent completed sends done",
 			in: HookInput{
 				HookEventName: "Notification", NotificationType: "agent_completed",
 				Message: "finished the run",
@@ -220,7 +204,7 @@ func TestDecide(t *testing.T) {
 			want: Decision{Outcome: OutcomeSilent, Reason: "deferred to source session"},
 		},
 		{
-			name: "agent completed claimed elsewhere is silent even without presence",
+			name: "agent completed claimed elsewhere is silent",
 			in: HookInput{
 				HookEventName: "Notification", NotificationType: "agent_completed",
 				Message: "finished the run",
@@ -349,44 +333,11 @@ func TestDecide(t *testing.T) {
 			want: Decision{Outcome: OutcomeSilent, Reason: "agent context"},
 		},
 		{
-			name: "permission prompt sends even with user present and recent notify",
-			in: HookInput{
-				HookEventName: "Notification", NotificationType: "permission_prompt",
-				Message: "allow this?",
-			},
-			scan: ScanResult{},
-			env:  Env{UserPresent: true, SinceLastNotify: 1 * time.Second, SinceLastNotifySame: neverNotified},
-			want: Decision{
-				Outcome: OutcomeSend, Urgency: UrgencyBlocked,
-				Message: "allow this?", Reason: "permission prompt",
-			},
-		},
-		{
-			name: "idle prompt never notified with no goal and not present still judges",
+			name: "idle prompt never notified with no goal or live work still judges",
 			in:   HookInput{HookEventName: "Notification", NotificationType: "idle_prompt"},
 			scan: ScanResult{},
 			env:  Env{SinceLastNotify: neverNotified},
 			want: Decision{Outcome: OutcomeJudge, JudgeMode: JudgeModeCompose, Reason: "idle backstop"},
-		},
-		{
-			name: "stop with live tasks still judges even when user present",
-			in:   HookInput{HookEventName: "Stop"},
-			scan: ScanResult{LiveTasks: liveTasks},
-			env:  Env{UserPresent: true},
-			want: Decision{
-				Outcome: OutcomeJudge, JudgeMode: JudgeModeDecide,
-				Reason: "live tasks: parked vs pending", ArmWatchdog: true,
-			},
-		},
-		{
-			name: "stop with teammates still judges even when user present",
-			in:   HookInput{HookEventName: "Stop"},
-			scan: ScanResult{Teammates: []TeammateActivity{{Name: "worker-wire"}}},
-			env:  Env{UserPresent: true},
-			want: Decision{
-				Outcome: OutcomeJudge, JudgeMode: JudgeModeDecide,
-				Reason: "teammates active: parked vs pending", ArmWatchdog: true,
-			},
 		},
 	}
 

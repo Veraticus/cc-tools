@@ -237,12 +237,11 @@ func TestDispatchNotify_ReachableSocket_ReturnsFastEvenWithSlowDaemonJudge(t *te
 
 	d := notify.Daemon{
 		Pipeline: notify.Pipeline{
-			DryRun:  true,
-			Judge:   notify.Judge{Bin: slowJudgeBin, Model: "claude-haiku-4-5"},
-			Log:     notify.DecisionLog{Path: logPath},
-			Stdout:  os.Stdout,
-			Host:    "testhost",
-			Present: func(_ []string, _ time.Time) bool { return false },
+			DryRun: true,
+			Judge:  notify.Judge{Bin: slowJudgeBin, Model: "claude-haiku-4-5"},
+			Log:    notify.DecisionLog{Path: logPath},
+			Stdout: os.Stdout,
+			Host:   "testhost",
 		},
 	}
 	sockPath := filepath.Join(t.TempDir(), "notifyd.sock")

@@ -128,10 +128,10 @@ func TestTranscriptCosts_UnreadableTranscriptFails(t *testing.T) {
 // TestComputeTranscriptCosts_SubscribedPricesBedrockZeroesPlainRows reuses
 // internal/cost/testdata/real_shape.jsonl (two msg_bdrk rows plus one
 // plain msg_ row) to prove the subscribed flag now threaded through from
-// stdin's rate_limits presence, not a credentials file, is what decides
-// pricing: with subscribed=false every row (including the plain one)
-// prices, so the total is higher than with subscribed=true, where only
-// the two msg_bdrk rows still price.
+// whether stdin carries rate_limits data, not a credentials file, is what
+// decides pricing: with subscribed=false every row (including the plain
+// one) prices, so the total is higher than with subscribed=true, where
+// only the two msg_bdrk rows still price.
 func TestComputeTranscriptCosts_SubscribedPricesBedrockZeroesPlainRows(t *testing.T) {
 	now := time.Now()
 	transcriptPath := filepath.Join("..", "cost", "testdata", "real_shape.jsonl")
@@ -424,7 +424,7 @@ func statuslineDeps() *Dependencies {
 	}
 }
 
-// TestComputeData_RateLimitsPresence_TogglesTranscriptSubscribedPricing
+// TestComputeData_RateLimitsAvailability_TogglesTranscriptSubscribedPricing
 // drives the real (non-injected) costSource path end to end — no
 // Dependencies.CostSource fixture, so this exercises the actual
 // RateLimits-derived subscribed flag threaded through transcriptCosts.
@@ -432,7 +432,7 @@ func statuslineDeps() *Dependencies {
 // object and exactly $0 when it does, matching the same subscribed
 // semantics TestComputeTranscriptCosts_SubscribedZeroesPlainRow pins at
 // the transcriptCosts level.
-func TestComputeData_RateLimitsPresence_TogglesTranscriptSubscribedPricing(t *testing.T) {
+func TestComputeData_RateLimitsAvailability_TogglesTranscriptSubscribedPricing(t *testing.T) {
 	now := time.Now()
 	timestamp := now.Format(time.RFC3339)
 	transcriptPath := setupTranscriptFixture(t, plainRow(timestamp))

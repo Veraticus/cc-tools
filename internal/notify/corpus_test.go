@@ -61,7 +61,7 @@ const blockDecisionJSON = `"decision":"block"`
 func runCorpusStop(t *testing.T, stdout *bytes.Buffer, sent *[]capturedRequest, fixture, sessionID string) string {
 	t.Helper()
 	stubBin := writeStubClaude(t)
-	p, logPath := newGoalTestPipeline(t, stdout, stubBin, neverPresent)
+	p, logPath := newGoalTestPipeline(t, stdout, stubBin)
 	p.Sender = stubSenderRecording(sent)
 	transcript := copyFixture(t, fixture)
 
@@ -104,7 +104,7 @@ func testActiveParkedTwoStops(t *testing.T, fixture, sessionID string) {
 
 	var stdout bytes.Buffer
 	var sent []capturedRequest
-	p, logPath := newGoalTestPipeline(t, &stdout, stubBin, neverPresent)
+	p, logPath := newGoalTestPipeline(t, &stdout, stubBin)
 	p.Sender = stubSenderRecording(&sent)
 	wd := &fakeWatchdog{}
 	p.Watchdog = wd
@@ -156,7 +156,7 @@ func TestCorpus_GoalMet_NoBlock(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var sent []capturedRequest
-	p, logPath := newGoalTestPipeline(t, &stdout, stubBin, neverPresent)
+	p, logPath := newGoalTestPipeline(t, &stdout, stubBin)
 	p.Sender = stubSenderRecording(&sent)
 	transcript := copyFixture(t, "corpus_goal_met.jsonl")
 
@@ -196,7 +196,7 @@ func TestCorpus_GoalCleared_NoBlock(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var sent []capturedRequest
-	p, logPath := newGoalTestPipeline(t, &stdout, stubBin, neverPresent)
+	p, logPath := newGoalTestPipeline(t, &stdout, stubBin)
 	p.Sender = stubSenderRecording(&sent)
 	transcript := copyFixture(t, "corpus_goal_cleared.jsonl")
 
@@ -255,9 +255,10 @@ func TestCorpus_AllShapes_NeverBlock(t *testing.T) {
 // stopHookSummaryMarker identifies a transcript line as a real recorded Stop
 // hook boundary: Claude Code appends a
 // {"type":"system","subtype":"stop_hook_summary",...} record to the
-// transcript immediately after each Stop hook invocation finishes, so its
-// presence marks exactly the point a real Stop event fired against the
-// transcript-so-far. Used only by the opt-in full-transcript replay below.
+// transcript immediately after each Stop hook invocation finishes, so
+// finding this marker pinpoints exactly where a real Stop event fired
+// against the transcript-so-far. Used only by the opt-in full-transcript
+// replay below.
 const stopHookSummaryMarker = `"subtype":"stop_hook_summary"`
 
 // replayInstructions documents how to run the opt-in harness against the two
@@ -311,7 +312,7 @@ func TestCorpus_FullTranscriptReplay_OptIn(t *testing.T) {
 	scanner.Buffer(make([]byte, 0, initialScanBufferSize), maxLineBufferSize)
 
 	var stdout bytes.Buffer
-	p, _ := newTestPipeline(t, &stdout, stubBin, neverPresent)
+	p, _ := newTestPipeline(t, &stdout, stubBin)
 	sessionID := "sess-replay-full"
 
 	stops := 0
