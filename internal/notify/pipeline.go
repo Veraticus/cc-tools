@@ -226,9 +226,6 @@ func (p Pipeline) handleSend(
 	if body == "" {
 		body = sendLabel(in.NotificationType)
 	}
-	if d.ProjectOverride != "" {
-		project = d.ProjectOverride
-	}
 	where := locus
 	if in.NotificationType == notifTypeAgentNeedsInput || in.NotificationType == notifTypeAgentCompleted {
 		where = host

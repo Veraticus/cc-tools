@@ -77,11 +77,17 @@ func TestDecide(t *testing.T) {
 			},
 		},
 		{
-			name: "stop with user present and no work is silent",
+			// ArmWatchdog: true here is the epic's presence-watchdog rule:
+			// with the broadcastCoveredWindow heuristic deleted (ownership is
+			// now structural, not time-window-based), a Stop that resolves
+			// silent solely because the user is present must arm the
+			// watchdog itself to preserve the walked-away-while-blocked
+			// coverage the presence-blind broadcast backstop used to provide.
+			name: "stop with user present and no work is silent and arms watchdog",
 			in:   HookInput{HookEventName: "Stop"},
 			scan: ScanResult{},
 			env:  Env{UserPresent: true},
-			want: Decision{Outcome: OutcomeSilent, Reason: "user present at focused pane"},
+			want: Decision{Outcome: OutcomeSilent, Reason: "user present at focused pane", ArmWatchdog: true},
 		},
 		{
 			name: "stop with no goal, no tasks, no presence composes",
@@ -180,28 +186,36 @@ func TestDecide(t *testing.T) {
 			want: Decision{Outcome: OutcomeSilent, Reason: "dedupe: broadcast claimed by another session"},
 		},
 		{
-			name: "agent needs input covered by source job is silent",
+			// Ownership is structural, not time-window-based: any broadcast
+			// that resolves to a local job always defers to the source
+			// session, regardless of claim state and regardless of whether
+			// the source has sent yet (the epic's 18s-judge-race scenario —
+			// the source's own pipeline fails open on judge errors, so no
+			// ping is lost by deferring unconditionally).
+			// broadcastCoveredWindow and Covered/CoveredAgo are deleted;
+			// Local replaces them.
+			name: "agent needs input resolved to local job is silent, deferred to source",
 			in: HookInput{
 				HookEventName: "Notification", NotificationType: "agent_needs_input",
 				Message: "need a decision",
 			},
 			scan: ScanResult{},
-			env:  Env{Broadcast: &BroadcastFacts{Covered: true, CoveredAgo: 2 * time.Second}},
-			want: Decision{Outcome: OutcomeSilent, Reason: "covered: source job session notified 2s ago"},
+			env:  Env{Broadcast: &BroadcastFacts{Local: true}},
+			want: Decision{Outcome: OutcomeSilent, Reason: "deferred to source session"},
 		},
 		{
-			name: "agent needs input uncovered sends with source job project",
+			// Local defers even when a claim was already lost elsewhere: the
+			// two suppressions are independent, and Local is checked first
+			// (see suppressBroadcast), so this must never fall through to
+			// the duplicate-claim reason.
+			name: "agent needs input resolved to local job defers even if also claimed elsewhere",
 			in: HookInput{
 				HookEventName: "Notification", NotificationType: "agent_needs_input",
 				Message: "need a decision",
 			},
 			scan: ScanResult{},
-			env:  Env{Broadcast: &BroadcastFacts{JobProject: "widget"}, SinceLastNotifySame: neverNotified},
-			want: Decision{
-				Outcome: OutcomeSend, Urgency: UrgencyBlocked,
-				Message: "need a decision", Reason: "background session needs input",
-				ProjectOverride: "widget",
-			},
+			env:  Env{Broadcast: &BroadcastFacts{Local: true, Duplicate: true}},
+			want: Decision{Outcome: OutcomeSilent, Reason: "deferred to source session"},
 		},
 		{
 			name: "agent completed claimed elsewhere is silent even without presence",

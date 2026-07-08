@@ -36,13 +36,6 @@ const (
 	// agent_needs_input's.
 	broadcastClaimWindowCompleted = 30 * time.Minute
 
-	// broadcastCoveredWindow is how recently the source job's own session
-	// must have sent for the broadcast to be considered covered. The job's
-	// Stop-hook send has been observed landing 0.3–1.2s before the
-	// broadcast; anything close to this window's edge is a different,
-	// earlier notification.
-	broadcastCoveredWindow = 60 * time.Second
-
 	// broadcastClaimTTL is when an old claim file becomes garbage to
 	// opportunistically sweep. It must stay >= the largest claim window
 	// (broadcastClaimWindowCompleted) — sweeping a claim before its own
@@ -84,32 +77,30 @@ const (
 type BroadcastFacts struct {
 	// Duplicate means another hook process already claimed this exact
 	// broadcast inside broadcastClaimWindow — someone else owns delivery.
+	// Never set alongside Local: a local broadcast is never claimed (see
+	// broadcastFacts) since ownership is resolved before claiming is even
+	// attempted.
 	Duplicate bool
-	// Covered means the broadcast resolved to a local source job whose own
-	// session sent a notification within broadcastCoveredWindow — the
-	// richer Stop-hook ping already went out.
-	Covered bool
-	// CoveredAgo is how long ago that send was (set only with Covered).
-	CoveredAgo time.Duration
-	// JobProject is the project name derived from the source job's own
-	// cwd, replacing the receiving session's project in the notification
-	// title. Empty when the source job could not be resolved.
-	JobProject string
+	// Local means the broadcast resolved to a source job running on this
+	// host: ownership is structural, not a matter of timing, so the
+	// receiving session always defers to the source session's own
+	// (richer, judge-composed) notification — see suppressBroadcast.
+	Local bool
 }
 
-// broadcastJob is the slice of a job's state.json this file needs: the
-// job's display name (the broadcast message's prefix), the session it runs
-// as, and where.
+// broadcastJob is the slice of a job's state.json this file needs: just the
+// job's display name, the broadcast message's prefix.
 type broadcastJob struct {
-	Name      string `json:"name"`
-	SessionID string `json:"sessionId"`
-	CWD       string `json:"cwd"`
+	Name string `json:"name"`
 }
 
 // broadcastFacts computes BroadcastFacts for in, or nil when in is not a
-// broadcast-type Notification event. Claiming writes to the shared ledger;
-// a dry run only observes it, so rehearsals never suppress a real
-// session's send.
+// broadcast-type Notification event. Source resolution runs first: a
+// broadcast that resolves to a local job is never claimed — claiming would
+// write shared-ledger state for an event this session will never deliver
+// (see suppressBroadcast's Local check). Only an unresolved broadcast reaches
+// the claim ledger. Claiming writes to that shared ledger; a dry run only
+// observes it, so rehearsals never suppress a real session's send.
 func (p Pipeline) broadcastFacts(ctx context.Context, in HookInput, now time.Time) *BroadcastFacts {
 	if in.HookEventName != eventNotification || in.AgentID != "" {
 		return nil
@@ -118,20 +109,13 @@ func (p Pipeline) broadcastFacts(ctx context.Context, in HookInput, now time.Tim
 		return nil
 	}
 
+	if resolveBroadcastSource(jobsDir(p.Environ), in.Message) {
+		return &BroadcastFacts{Local: true}
+	}
+
 	facts := &BroadcastFacts{}
 	key := in.NotificationType + "\n" + in.Message
 	facts.Duplicate = !p.dedupeState().ClaimBroadcast(ctx, key, claimWindowFor(in.NotificationType), now, p.DryRun)
-
-	job, ok := resolveBroadcastSource(jobsDir(p.Environ), in.Message)
-	if !ok {
-		return facts
-	}
-	facts.JobProject = filepath.Base(job.CWD)
-	since := p.dedupeState().SinceLastNotify(ctx, job.SessionID, now)
-	if since >= 0 && since < broadcastCoveredWindow {
-		facts.Covered = true
-		facts.CoveredAgo = since
-	}
 	return facts
 }
 
@@ -200,22 +184,23 @@ func sweepBroadcastClaims(dir string, now time.Time) {
 	}
 }
 
-// resolveBroadcastSource maps a broadcast message back to the local job it
-// is about. The harness composes these messages as "<job name> needs your
-// input: …" / "<job name> finished", so the job whose name prefixes the
-// message (longest match wins, guarding against prefix-nested names) is
-// the source. Returns false when no local job matches — a remote job, a
+// resolveBroadcastSource reports whether message belongs to a job running
+// locally (this host's jobs dir). The harness composes these messages as
+// "<job name> needs your input: …" / "<job name> finished", so a local job
+// owns the broadcast when its name prefixes the message. Ownership is then
+// structural (see BroadcastFacts.Local) — the caller only needs to know
+// whether some local job matches, not which one, so this returns as soon as
+// it finds one. Returns false when no local job matches — a remote job, a
 // renamed message format, or a jobs dir this host doesn't have.
-func resolveBroadcastSource(dir, message string) (broadcastJob, bool) {
+func resolveBroadcastSource(dir, message string) bool {
 	if message == "" {
-		return broadcastJob{}, false
+		return false
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return broadcastJob{}, false
+		return false
 	}
 
-	var best broadcastJob
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -229,17 +214,11 @@ func resolveBroadcastSource(dir, message string) (broadcastJob, bool) {
 		if json.Unmarshal(data, &job) != nil {
 			continue
 		}
-		if job.Name == "" || !strings.HasPrefix(message, job.Name+" ") {
-			continue
-		}
-		if !validSessionID(job.SessionID) {
-			continue
-		}
-		if len(job.Name) > len(best.Name) {
-			best = job
+		if job.Name != "" && strings.HasPrefix(message, job.Name+" ") {
+			return true
 		}
 	}
-	return best, best.Name != ""
+	return false
 }
 
 // jobsDir resolves the background-jobs directory for the Claude Code

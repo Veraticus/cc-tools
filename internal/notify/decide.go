@@ -95,11 +95,6 @@ type Decision struct {
 	Message string
 	// Reason is always set, distinct per gate, and feeds the decision log.
 	Reason string
-	// ProjectOverride, when non-empty, replaces the receiving session's
-	// project in the notification title — a broadcast event is about its
-	// source job's project, not the project of whichever session happened
-	// to receive it.
-	ProjectOverride string
 	// ArmWatchdog is true when a watchdog is wanted because the FINAL
 	// outcome is silence and there is live/active work (goal active or
 	// pending tasks) to keep checking on.
@@ -178,7 +173,13 @@ func decideStop(scan ScanResult, env Env) Decision {
 		}
 	}
 	if env.UserPresent {
-		return Decision{Outcome: OutcomeSilent, Reason: "user present at focused pane"}
+		// broadcastCoveredWindow is gone (ownership of a local job
+		// broadcast is now structural, see suppressBroadcast Local
+		// check), so this session can no longer rely on a receiving
+		// session presence-blind broadcast backstop to catch it if it
+		// goes idle while genuinely blocked. Arm the watchdog itself to
+		// preserve that walked-away-while-blocked coverage.
+		return Decision{Outcome: OutcomeSilent, Reason: "user present at focused pane", ArmWatchdog: true}
 	}
 	return Decision{Outcome: OutcomeJudge, JudgeMode: JudgeModeCompose, Reason: "turn ended, composing"}
 }
@@ -226,7 +227,6 @@ func decideNotification(in HookInput, scan ScanResult, env Env) Decision {
 		return Decision{
 			Outcome: OutcomeSend, Urgency: UrgencyBlocked,
 			Message: in.Message, Reason: "background session needs input",
-			ProjectOverride: broadcastProject(env),
 		}
 
 	case notifTypeAgentCompleted:
@@ -239,7 +239,6 @@ func decideNotification(in HookInput, scan ScanResult, env Env) Decision {
 		return Decision{
 			Outcome: OutcomeSend, Urgency: UrgencyDone,
 			Message: in.Message, Reason: "background session completed",
-			ProjectOverride: broadcastProject(env),
 		}
 
 	default:
@@ -267,33 +266,25 @@ func suppressBlockedRepeat(env Env) *Decision {
 }
 
 // suppressBroadcast returns the silent Decision a broadcast event resolves
-// to when another session already claimed it or the source job's own
-// Stop-hook send already covered it — nil when the event should proceed to
-// its own send gate. Broadcast events are otherwise blocked-tier precisely
-// because they are the backstop for a job whose own session went silent;
-// these two suppressions are the only ones they get.
+// to when it belongs to a local job (source-session ownership, checked
+// first) or another session already claimed it — nil when the event should
+// proceed to its own send gate. Broadcast events are otherwise blocked-tier
+// precisely because they are the backstop for a job whose own session went
+// silent; these two suppressions are the only ones they get.
 func suppressBroadcast(env Env) *Decision {
 	b := env.Broadcast
 	if b == nil {
 		return nil
 	}
+	if b.Local {
+		// Ownership is structural, not a matter of timing (see BroadcastFacts
+		// and broadcastFacts): the source session always owns delivery for
+		// its own job, regardless of claim state or whether it has sent
+		// yet.
+		return &Decision{Outcome: OutcomeSilent, Reason: "deferred to source session"}
+	}
 	if b.Duplicate {
 		return &Decision{Outcome: OutcomeSilent, Reason: "dedupe: broadcast claimed by another session"}
 	}
-	if b.Covered {
-		return &Decision{
-			Outcome: OutcomeSilent,
-			Reason:  fmt.Sprintf("covered: source job session notified %s ago", humanDuration(b.CoveredAgo)),
-		}
-	}
 	return nil
-}
-
-// broadcastProject is the source job's project for the notification title,
-// or "" (no override) when the broadcast didn't resolve to a local job.
-func broadcastProject(env Env) string {
-	if env.Broadcast == nil {
-		return ""
-	}
-	return env.Broadcast.JobProject
 }

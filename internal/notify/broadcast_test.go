@@ -183,44 +183,45 @@ func TestResolveBroadcastSource_MatchesNamePrefix(t *testing.T) {
 	cfg := t.TempDir()
 	writeJobState(t, cfg, "abc12345", "pam grants alert ingestion", "abc12345-full-session-id", "/work/CSRE-813")
 
-	job, ok := resolveBroadcastSource(
-		filepath.Join(cfg, "jobs"), "pam grants alert ingestion needs your input: Want it?")
-	if !ok {
-		t.Fatal("resolveBroadcastSource() ok = false, want match")
-	}
-	if job.SessionID != "abc12345-full-session-id" || job.CWD != "/work/CSRE-813" {
-		t.Errorf("resolveBroadcastSource() = %+v, want matched job fields", job)
+	if !resolveBroadcastSource(filepath.Join(cfg, "jobs"), "pam grants alert ingestion needs your input: Want it?") {
+		t.Fatal("resolveBroadcastSource() = false, want match")
 	}
 }
 
-func TestResolveBroadcastSource_LongestNameWins(t *testing.T) {
+// TestResolveBroadcastSource_PrefixNestedNamesBothMatch replaces the old
+// longest-match-wins assertion: resolveBroadcastSource no longer returns a
+// specific job's fields (see broadcastJob and BroadcastFacts.Local) — it
+// only reports whether SOME local job owns the broadcast, so disambiguating
+// among prefix-nested names is no longer this function's job. Two jobs whose
+// names both prefix the message must still resolve to a match.
+func TestResolveBroadcastSource_PrefixNestedNamesBothMatch(t *testing.T) {
 	cfg := t.TempDir()
 	writeJobState(t, cfg, "short001", "fix tests", "short-session", "/p/short")
 	writeJobState(t, cfg, "long0001", "fix tests and lint", "long-session", "/p/long")
 
-	job, ok := resolveBroadcastSource(filepath.Join(cfg, "jobs"), "fix tests and lint finished")
-	if !ok || job.SessionID != "long-session" {
-		t.Fatalf("resolveBroadcastSource() = %+v ok=%v, want longest-name match long-session", job, ok)
+	if !resolveBroadcastSource(filepath.Join(cfg, "jobs"), "fix tests and lint finished") {
+		t.Fatal("resolveBroadcastSource() = false, want match (prefix-nested job names)")
 	}
 }
 
+// TestResolveBroadcastSource_NoMatchAndBadInputs covers cases where no local
+// job should be treated as the broadcast's source. The path-traversal
+// sessionId guard this test used to cover is gone along with the SessionID
+// field itself (see broadcastJob): resolveBroadcastSource no longer reads or
+// returns a job's session ID, so there is nothing left for a malicious value
+// in that field to attack.
 func TestResolveBroadcastSource_NoMatchAndBadInputs(t *testing.T) {
 	cfg := t.TempDir()
 	writeJobState(t, cfg, "abc12345", "known job", "known-session", "/p/known")
-	writeJobState(t, cfg, "evil0001", "evil job", "../escape", "/p/evil")
 
-	if _, ok := resolveBroadcastSource(filepath.Join(cfg, "jobs"), "unrelated message"); ok {
+	if resolveBroadcastSource(filepath.Join(cfg, "jobs"), "unrelated message") {
 		t.Error("unrelated message matched, want no match")
 	}
-	if _, ok := resolveBroadcastSource(filepath.Join(cfg, "jobs"), ""); ok {
+	if resolveBroadcastSource(filepath.Join(cfg, "jobs"), "") {
 		t.Error("empty message matched, want no match")
 	}
-	if _, ok := resolveBroadcastSource(filepath.Join(cfg, "missing"), "known job finished"); ok {
+	if resolveBroadcastSource(filepath.Join(cfg, "missing"), "known job finished") {
 		t.Error("missing jobs dir matched, want no match")
-	}
-	// A job whose sessionId would escape the state base is never returned.
-	if _, ok := resolveBroadcastSource(filepath.Join(cfg, "jobs"), "evil job finished"); ok {
-		t.Error("job with path-traversal sessionId matched, want rejection")
 	}
 }
 
@@ -241,38 +242,62 @@ func TestBroadcastFacts_NonBroadcastEventsAreNil(t *testing.T) {
 	}
 }
 
-func TestBroadcastFacts_CoveredBySourceJobSend(t *testing.T) {
-	base := t.TempDir()
-	cfg := t.TempDir()
-	now := time.Now()
-	writeJobState(t, cfg, "job00001", "deploy the widget", "job-session-id", "/projects/widget")
-
-	source := SessionState{Dir: filepath.Join(base, "job-session-id")}
-	if err := source.MarkNotified(now.Add(-2*time.Second), "deploying now"); err != nil {
-		t.Fatalf("marking source session notified: %v", err)
+// TestBroadcastFacts_LocalJobDefersRegardlessOfSourceSendTiming replaces the
+// deleted broadcastCoveredWindow heuristic's coverage: ownership of a
+// broadcast that resolves to a local job is structural, not a function of
+// when (or whether) the source session has sent its own notification yet.
+// This is the epic's 18s-judge-race scenario: a source session can still be
+// composing its own richer ping when the broadcast lands, and the receiver
+// must defer anyway, trusting the source's fail-open-to-send guarantee.
+func TestBroadcastFacts_LocalJobDefersRegardlessOfSourceSendTiming(t *testing.T) {
+	tests := []struct {
+		name           string
+		notifyType     string
+		markSourceSent bool
+	}{
+		{name: "source sent moments ago", notifyType: "agent_needs_input", markSourceSent: true},
+		{name: "source never sent", notifyType: "agent_needs_input", markSourceSent: false},
+		{name: "agent_completed, source never sent", notifyType: "agent_completed", markSourceSent: false},
 	}
 
-	p := Pipeline{StateBase: base, Environ: []string{"CLAUDE_CONFIG_DIR=" + cfg}}
-	in := HookInput{
-		HookEventName: "Notification", NotificationType: "agent_needs_input",
-		Message: "deploy the widget needs your input: proceed?",
-	}
-	facts := p.broadcastFacts(context.Background(), in, now)
-	if facts == nil {
-		t.Fatal("broadcastFacts() = nil, want facts")
-	}
-	if facts.Duplicate {
-		t.Error("Duplicate = true, want false for first claim")
-	}
-	if !facts.Covered {
-		t.Error("Covered = false, want true (source session sent 2s ago)")
-	}
-	if facts.JobProject != "widget" {
-		t.Errorf("JobProject = %q, want %q", facts.JobProject, "widget")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := t.TempDir()
+			cfg := t.TempDir()
+			now := time.Now()
+			writeJobState(t, cfg, "job00001", "deploy the widget", "job-session-id", "/projects/widget")
+
+			if tt.markSourceSent {
+				source := SessionState{Dir: filepath.Join(base, "job-session-id")}
+				if err := source.MarkNotified(now.Add(-2*time.Second), "deploying now"); err != nil {
+					t.Fatalf("marking source session notified: %v", err)
+				}
+			}
+
+			p := Pipeline{StateBase: base, Environ: []string{"CLAUDE_CONFIG_DIR=" + cfg}}
+			in := HookInput{
+				HookEventName: "Notification", NotificationType: tt.notifyType,
+				Message: "deploy the widget needs your input: proceed?",
+			}
+			facts := p.broadcastFacts(context.Background(), in, now)
+			if facts == nil {
+				t.Fatal("broadcastFacts() = nil, want facts")
+			}
+			if !facts.Local {
+				t.Error("Local = false, want true (broadcast resolves to a job in this host's jobs dir)")
+			}
+			if facts.Duplicate {
+				t.Error("Duplicate = true, want false (a local broadcast is never claimed)")
+			}
+		})
 	}
 }
 
-func TestBroadcastFacts_UncoveredWhenSourceNeverSent(t *testing.T) {
+// TestBroadcastFacts_LocalJobDoesNotWriteClaim asserts a resolved-local
+// broadcast never touches the shared claim ledger: claiming for an event
+// this session will never deliver is pointless state, so broadcastFacts must
+// resolve the source before it ever calls ClaimBroadcast.
+func TestBroadcastFacts_LocalJobDoesNotWriteClaim(t *testing.T) {
 	base := t.TempDir()
 	cfg := t.TempDir()
 	now := time.Now()
@@ -283,9 +308,34 @@ func TestBroadcastFacts_UncoveredWhenSourceNeverSent(t *testing.T) {
 		HookEventName: "Notification", NotificationType: "agent_needs_input",
 		Message: "deploy the widget needs your input: proceed?",
 	}
+	if facts := p.broadcastFacts(context.Background(), in, now); facts == nil || !facts.Local {
+		t.Fatalf("broadcastFacts() = %+v, want Local", facts)
+	}
+
+	claimsDir := filepath.Join(base, broadcastClaimsDirName)
+	entries, err := os.ReadDir(claimsDir)
+	if err == nil && len(entries) != 0 {
+		t.Fatalf("claims dir entries = %d, want 0 (a local broadcast must not write a claim)", len(entries))
+	}
+}
+
+// TestBroadcastFacts_UnresolvedBroadcastStillUsesClaimPath covers the other
+// side of the ownership split: a broadcast that does not resolve to a local
+// job (no matching job state in this host's jobs dir) is unaffected by the
+// Local change and still runs the first-claimant-wins dedupe.
+func TestBroadcastFacts_UnresolvedBroadcastStillUsesClaimPath(t *testing.T) {
+	base := t.TempDir()
+	cfg := t.TempDir()
+	now := time.Now()
+
+	p := Pipeline{StateBase: base, Environ: []string{"CLAUDE_CONFIG_DIR=" + cfg}}
+	in := HookInput{
+		HookEventName: "Notification", NotificationType: "agent_needs_input",
+		Message: "deploy the widget needs your input: proceed?",
+	}
 	facts := p.broadcastFacts(context.Background(), in, now)
-	if facts == nil || facts.Covered {
-		t.Fatalf("broadcastFacts() = %+v, want uncovered facts (backstop must fire)", facts)
+	if facts == nil || facts.Local || facts.Duplicate {
+		t.Fatalf("broadcastFacts() = %+v, want unresolved first claim (not Local, not Duplicate)", facts)
 	}
 
 	// A second session receiving the same broadcast loses the claim.
