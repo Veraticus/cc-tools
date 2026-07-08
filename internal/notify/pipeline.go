@@ -5,10 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -31,32 +29,27 @@ const dryRunWouldArmWatchdogSuffix = " (would arm watchdog)"
 const failOpenWindow = 10 * time.Minute
 
 // DedupeState is Pipeline's interface onto per-session notify dedupe
-// (last-notify time and message hash) and broadcast-claim coordination.
-// Pipeline reads and writes it instead of talking to SessionState files
-// directly, so where that bookkeeping actually lives is a swappable
-// concern: on disk, one file tree per session (FileState — the default,
-// preserving notify's historical single-shot-hook behavior), entirely in
-// memory and confined to one goroutine (MemoryState — notifyd's dedupe
-// store), or nowhere at all (NopState — the hook client's inline
-// fallback). sessionID keys every session-scoped method because one
-// DedupeState instance is shared across every session a process handles —
-// unlike SessionState, whose Dir already bakes in a single session.
+// (last-notify time and message hash) and broadcast-claim coordination, so
+// where that bookkeeping actually lives is a swappable concern: entirely in
+// memory and confined to one goroutine (MemoryState via loopState —
+// notifyd's dedupe store), or nowhere at all (NopState — the hook client's
+// inline fallback, and Pipeline.dedupeState's own default). sessionID keys
+// every session-scoped method because one DedupeState instance is shared
+// across every session a process handles.
 type DedupeState interface {
 	// SinceLastNotify returns how long before now sessionID last notified;
-	// see SessionState.SinceLastNotify for the "never notified" sentinel
-	// contract every implementation must honor. ctx carries no deadline
-	// today — it exists so the daemon's loopState implementation can bail
-	// out of its loop round trip on shutdown rather than storing ctx on
-	// itself.
+	// negative means never. ctx carries no deadline today — it exists so
+	// the daemon's loopState implementation can bail out of its loop round
+	// trip on shutdown rather than storing ctx on itself.
 	SinceLastNotify(ctx context.Context, sessionID string, now time.Time) time.Duration
 	// SinceLastNotifySame returns how long before now sessionID last sent
-	// message verbatim; see SessionState.SinceLastNotifySame.
+	// message verbatim; negative when never, or the last send differed.
 	SinceLastNotifySame(ctx context.Context, sessionID string, now time.Time, message string) time.Duration
 	// MarkNotified records t/message as sessionID's last notification.
 	MarkNotified(ctx context.Context, sessionID string, t time.Time, message string) error
 	// ClaimBroadcast atomically claims key for a window starting at now,
-	// reporting whether this call won; see claimBroadcast's first-claimant
-	// contract. dryRun observes without claiming.
+	// reporting whether this call won; see MemoryState.ClaimBroadcast's
+	// first-claimant contract. dryRun observes without claiming.
 	ClaimBroadcast(ctx context.Context, key string, window time.Duration, now time.Time, dryRun bool) bool
 }
 
@@ -74,10 +67,9 @@ type Pipeline struct {
 	Sender    Sender
 	Log       DecisionLog
 	// State is where dedupe/broadcast-claim bookkeeping lives. The zero
-	// value (nil) defaults to FileState{Base: StateBase} — the historical
-	// file-backed behavior every single-shot hook invocation still relies
-	// on — so only callers that want different semantics (notifyd's
-	// MemoryState, the hook client fallback's NopState) need to set it.
+	// value (nil) defaults to NopState{} — every session reports "never
+	// notified" — so only callers that want real dedupe (notifyd's
+	// loopState, backed by MemoryState) need to set it.
 	State   DedupeState
 	Environ []string
 	Stdout  io.Writer
@@ -90,20 +82,31 @@ type Pipeline struct {
 	// Host is the short hostname for titles and falls back to
 	// ShortHostname() when empty; tests inject a fixed value.
 	Host string
+	// ParentPID is the claude process that invoked this hook (Frame.
+	// ParentPID), forwarded into an armed watchdog's dead-session probe.
+	// The hook client's inline fallback leaves it zero (Watchdog is nil
+	// there anyway); the daemon overwrites it per connection from the
+	// frame, alongside Environ and Workspace.
+	ParentPID int
 	// Present reports whether the user is at the terminal right now.
 	// Production wires UserPresent+RunCommand; tests inject a canned func.
 	Present func(environ []string, now time.Time) bool
+	// Watchdog arms/reaps the in-daemon watchdog for a session with
+	// live/pending work. A nil Watchdog makes Pipeline.arm a no-op — the
+	// hook client's inline fallback's documented degraded mode (see
+	// Watchdog's doc comment).
+	Watchdog Watchdog
 }
 
-// dedupeState returns p.State, or a FileState rooted at p.StateBase when
-// State is unset — see the State field's doc comment.
+// dedupeState returns p.State, or NopState{} when State is unset — see the
+// State field's doc comment.
 //
-//nolint:ireturn // DedupeState is intentionally swappable (file/memory/nop); this is the field's single accessor.
+//nolint:ireturn // DedupeState is intentionally swappable (memory/nop); this is the field's single accessor.
 func (p Pipeline) dedupeState() DedupeState {
 	if p.State != nil {
 		return p.State
 	}
-	return FileState{Base: p.StateBase}
+	return NopState{}
 }
 
 // Run executes the pipeline for one hook payload. It always returns nil:
@@ -112,7 +115,6 @@ func (p Pipeline) dedupeState() DedupeState {
 // reason to fail the hook itself.
 func (p Pipeline) Run(ctx context.Context, in HookInput) error {
 	now := time.Now()
-	state := SessionState{Dir: filepath.Join(p.StateBase, in.SessionID)}
 	project := filepath.Base(in.CWD)
 	host := p.Host
 	if host == "" {
@@ -129,9 +131,9 @@ func (p Pipeline) Run(ctx context.Context, in HookInput) error {
 	}
 
 	if in.HookEventName == "SessionEnd" {
-		deps := DefaultWatchdogDeps(p.Judge, p.Sender, p.Log)
-		_ = ReapWatchdog(state, deps)
-		_ = state.Reap()
+		if p.Watchdog != nil {
+			p.Watchdog.Reap(in.SessionID)
+		}
 		p.logRecord(in, now, DecisionRecord{Outcome: OutcomeSilent.String(), Reason: "session end"})
 		return nil
 	}
@@ -160,12 +162,11 @@ func (p Pipeline) Run(ctx context.Context, in HookInput) error {
 
 	switch d.Outcome {
 	case OutcomeSilent:
-		//nolint:contextcheck // arming spawns a detached child that must outlive this hook's ctx; see SpawnRecheck
-		p.handleSilent(state, in, res, now, project, host, d, reasonSuffix)
+		p.handleSilent(in, res, now, project, host, d, reasonSuffix)
 	case OutcomeSend:
 		p.handleSend(ctx, in, now, project, locus, host, d, reasonSuffix)
 	case OutcomeJudge:
-		p.handleJudge(ctx, state, in, res, env, now, project, locus, host, d, reasonSuffix)
+		p.handleJudge(ctx, in, res, env, now, project, locus, host, d, reasonSuffix)
 	}
 	return nil
 }
@@ -190,7 +191,6 @@ func (p Pipeline) scanTranscript(path string) (ScanResult, error) {
 // handleSilent implements the OutcomeSilent branch: log the silence, and
 // either arm the watchdog (real run) or note that it would have (dry run).
 func (p Pipeline) handleSilent(
-	state SessionState,
 	in HookInput,
 	res ScanResult,
 	now time.Time,
@@ -203,7 +203,7 @@ func (p Pipeline) handleSilent(
 		if p.DryRun {
 			reason += dryRunWouldArmWatchdogSuffix
 		} else {
-			p.arm(state, in, res, now, project, host)
+			p.arm(in, res, now, project, host)
 		}
 	}
 	p.logRecord(in, now, DecisionRecord{Outcome: OutcomeSilent.String(), Reason: reason})
@@ -261,7 +261,7 @@ func sendLabel(notificationType string) string {
 // handleJudge implements the OutcomeJudge branch: build the digest, call
 // the judge, and route the verdict (or its absence) per JudgeMode.
 func (p Pipeline) handleJudge(
-	ctx context.Context, state SessionState, in HookInput, res ScanResult, env Env, now time.Time,
+	ctx context.Context, in HookInput, res ScanResult, env Env, now time.Time,
 	project, locus, host string, d Decision, reasonSuffix string,
 ) {
 	tasks := EnrichTasks(res.LiveTasks, now)
@@ -276,25 +276,11 @@ func (p Pipeline) handleJudge(
 	switch d.JudgeMode {
 	case JudgeModeCompose:
 		p.handleComposeVerdict(
-			ctx, state, in, res, env, now, project, locus, host, d, verdict, jerr, digest, judgeMs, reasonSuffix,
+			ctx, in, res, env, now, project, locus, host, d, verdict, jerr, digest, judgeMs, reasonSuffix,
 		)
 	case JudgeModeDecide:
 		p.handleDecideVerdict(
-			ctx,
-			state,
-			in,
-			res,
-			env,
-			now,
-			project,
-			locus,
-			host,
-			d,
-			verdict,
-			jerr,
-			digest,
-			judgeMs,
-			reasonSuffix,
+			ctx, in, res, env, now, project, locus, host, d, verdict, jerr, digest, judgeMs, reasonSuffix,
 		)
 	case JudgeModeNone:
 		// Decide never returns OutcomeJudge with JudgeModeNone; nothing to do.
@@ -307,15 +293,12 @@ func (p Pipeline) handleJudge(
 // "session idle" label would waste the slot) — never silent, per the
 // reliability invariant that an LLM failure may never lose a genuine ping.
 func (p Pipeline) handleComposeVerdict(
-	ctx context.Context, state SessionState, in HookInput, res ScanResult, env Env, now time.Time,
+	ctx context.Context, in HookInput, res ScanResult, env Env, now time.Time,
 	project, locus, host string,
 	d Decision, verdict JudgeVerdict, jerr error, digest string, judgeMs int64, reasonSuffix string,
 ) {
 	if jerr != nil && failOpenSuppressed(env) {
-		//nolint:contextcheck // arming spawns a detached child that must outlive this hook's ctx; see SpawnRecheck
-		p.suppressJudgeError(
-			state, in, res, env, now, project, host, JudgeModeCompose, jerr, digest, judgeMs, reasonSuffix,
-		)
+		p.suppressJudgeError(in, res, env, now, project, host, JudgeModeCompose, jerr, digest, judgeMs, reasonSuffix)
 		return
 	}
 
@@ -356,14 +339,14 @@ func failOpenSuppressed(env Env) bool {
 // logged as the distinct "judge error" outcome so a suppressed repeat stays
 // distinguishable in the decision log from a genuine silent verdict.
 func (p Pipeline) suppressJudgeError(
-	state SessionState, in HookInput, res ScanResult, env Env, now time.Time, project, host string,
+	in HookInput, res ScanResult, env Env, now time.Time, project, host string,
 	mode JudgeMode, jerr error, digest string, judgeMs int64, reasonSuffix string,
 ) {
 	reason := fmt.Sprintf("suppressed: notified %s ago", humanDuration(env.SinceLastNotify)) + reasonSuffix
 	if p.DryRun {
 		reason += dryRunWouldArmWatchdogSuffix
 	} else {
-		p.arm(state, in, res, now, project, host)
+		p.arm(in, res, now, project, host)
 	}
 	p.logJudged(in, now, "judge error", reason, Notification{}, mode, jerr, digest, judgeMs)
 }
@@ -385,7 +368,6 @@ func retriedWithoutModelSuffix(retried bool) string {
 // has no retry, so it fails open to a send instead of risking a lost ping).
 func (p Pipeline) handleDecideVerdict(
 	ctx context.Context,
-	state SessionState,
 	in HookInput,
 	res ScanResult,
 	env Env,
@@ -400,10 +382,7 @@ func (p Pipeline) handleDecideVerdict(
 ) {
 	if jerr != nil {
 		if failOpenSuppressed(env) {
-			//nolint:contextcheck // arming spawns a detached child that must outlive this hook's ctx; see SpawnRecheck
-			p.suppressJudgeError(
-				state, in, res, env, now, project, host, JudgeModeDecide, jerr, digest, judgeMs, reasonSuffix,
-			)
+			p.suppressJudgeError(in, res, env, now, project, host, JudgeModeDecide, jerr, digest, judgeMs, reasonSuffix)
 			return
 		}
 		body := truncateHeadWords(in.LastAssistantMessage, maxNotificationTailLen)
@@ -423,8 +402,7 @@ func (p Pipeline) handleDecideVerdict(
 
 	if !verdict.Notify {
 		if d.ArmWatchdog && !p.DryRun {
-			//nolint:contextcheck // arming spawns a detached child that must outlive this hook's ctx; see SpawnRecheck
-			p.arm(state, in, res, now, project, host)
+			p.arm(in, res, now, project, host)
 		}
 		p.logJudged(
 			in,
@@ -452,8 +430,7 @@ func (p Pipeline) handleDecideVerdict(
 			if p.DryRun {
 				reason += dryRunWouldArmWatchdogSuffix
 			} else {
-				//nolint:contextcheck // arming spawns a detached child that must outlive this hook's ctx; see SpawnRecheck
-				p.arm(state, in, res, now, project, host)
+				p.arm(in, res, now, project, host)
 			}
 		}
 		p.logJudged(in, now, OutcomeSilent.String(), reason, Notification{}, JudgeModeDecide, nil, digest, judgeMs)
@@ -488,73 +465,22 @@ func (p Pipeline) deliver(ctx context.Context, n Notification) string {
 	return ""
 }
 
-// arm spawns a detached recheck process and writes its watchdog lock. The
-// lock is written immediately after the child starts: the child sleeps at
-// least watchdogFirstWakeDelay before its first lock read, so this write
-// wins any race by hours, and a child that ever reads a lock naming a
-// different PID exits "superseded" harmlessly (see watchdog.go). Both
-// steps are best-effort: a failure here is swallowed, matching Run's
-// contract that no watchdog-arming failure may fail the hook.
-func (p Pipeline) arm(state SessionState, in HookInput, res ScanResult, now time.Time, project, host string) {
-	pid, err := SpawnRecheck(p.SelfBin, []string{
-		"notify", "--recheck",
-		"--session", in.SessionID,
-		"--state-base", p.StateBase,
-		"--project", project,
-		"--host", host,
-	})
-	if err != nil {
-		p.logArmFailed(in, now, fmt.Sprintf("spawn recheck: %v", err))
+// arm notifies p.Watchdog to start (or supersede) covering this session's
+// live/pending work. A nil Watchdog — the hook client's inline fallback —
+// makes this a no-op: see Watchdog's doc comment for the documented degraded
+// mode that leaves.
+func (p Pipeline) arm(in HookInput, res ScanResult, now time.Time, project, host string) {
+	if p.Watchdog == nil {
 		return
 	}
-	deps := DefaultWatchdogDeps(p.Judge, p.Sender, p.Log)
-	if lockErr := WriteWatchdogLock(state, WatchdogLock{
-		PID: pid, ParentPID: os.Getppid(), Transcript: in.TranscriptPath, Offset: res.BytesScanned, ArmedAt: now,
-	}, deps); lockErr != nil {
-		p.logArmFailed(in, now, fmt.Sprintf("write lock: %v", lockErr))
-	}
-}
-
-// logArmFailed records a failed watchdog arm attempt: this is the only
-// coverage that a "never zero coverage while work is in flight" guarantee
-// silently failed, since arm itself must stay non-fatal to the hook. Event
-// is fixed to "watchdog" (matching logWatchdogExit's convention) rather
-// than in.HookEventName, since this record documents a watchdog-arming
-// failure, not the triggering hook event.
-func (p Pipeline) logArmFailed(in HookInput, now time.Time, reason string) {
-	_ = p.Log.Append(DecisionRecord{
-		Time: now, SessionID: in.SessionID, Event: eventWatchdog, Outcome: "arm failed", Reason: reason,
+	p.Watchdog.Arm(WatchdogArmRequest{
+		SessionID:  in.SessionID,
+		Transcript: in.TranscriptPath,
+		Offset:     res.BytesScanned,
+		ParentPID:  p.ParentPID,
+		Meta:       DigestMeta{Project: project, Host: host, Event: "recheck"},
+		ArmedAt:    now,
 	})
-}
-
-// SpawnRecheck starts bin with args as a fully detached process (its own
-// session via Setsid, all three stdio to os.DevNull) and returns its PID
-// without waiting for it: the caller (Pipeline.arm) is the hook process,
-// which must exit immediately, not block on a watchdog that can run for
-// hours.
-func SpawnRecheck(bin string, args []string) (int, error) {
-	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
-	if err != nil {
-		return 0, fmt.Errorf("notify: opening %s: %w", os.DevNull, err)
-	}
-	defer func() { _ = devNull.Close() }()
-
-	// context.Background(), deliberately not the caller's ctx: this child
-	// must outlive the hook invocation that spawns it, so it must never be
-	// canceled when that invocation's own context expires.
-	//nolint:gosec // G204: bin is Pipeline.SelfBin (this tool's own binary), args built internally, not external input
-	cmd := exec.CommandContext(context.Background(), bin, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	cmd.Stdin = devNull
-	cmd.Stdout = devNull
-	cmd.Stderr = devNull
-
-	if startErr := cmd.Start(); startErr != nil {
-		return 0, fmt.Errorf("notify: starting recheck process: %w", startErr)
-	}
-	pid := cmd.Process.Pid
-	_ = cmd.Process.Release()
-	return pid, nil
 }
 
 // logRecord appends rec to the decision log with Time/SessionID/Event

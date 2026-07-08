@@ -352,6 +352,245 @@ func TestDaemon_Loop_SameSessionFramesProcessInArrivalOrder(t *testing.T) {
 	}
 }
 
+// canceledWaitTimeout bounds waitForCanceledCount's poll.
+const canceledWaitTimeout = 2 * time.Second
+
+// waitForCanceledCount polls path until it holds at least want decision
+// records with Event "watchdog", Outcome "canceled", and the given
+// SessionID, or canceledWaitTimeout elapses. Counting (not just "at least
+// one") matters for a session that gets more than one "canceled" record in a
+// single test (e.g. supersession followed by an explicit Reap of the
+// survivor).
+func waitForCanceledCount(t *testing.T, path, sessionID string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(canceledWaitTimeout)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			count := 0
+			for _, rec := range readDecisionLog(t, path) {
+				if rec.Event == "watchdog" && rec.SessionID == sessionID && rec.Outcome == "canceled" {
+					count++
+				}
+			}
+			if count >= want {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %d watchdog/canceled record(s) for %s at %s", want, sessionID, path)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestDaemonWatchdog_Arm_SupersedesPriorWatchdog proves Arm cancels a prior
+// watchdog for the same session rather than letting both run: arming twice
+// for the same SessionID must leave exactly one live watchdog, with the
+// first goroutine observed exiting "canceled". Neither watchdog's Sleep
+// call is ever reached with a real 5-minute wait — RunWatchdog's ctx-aware
+// Sleep unblocks on cancellation immediately, regardless of the timer
+// duration, so this test runs against the real clock without waiting. The
+// surviving (second) watchdog is explicitly reaped before the test returns
+// so no goroutine is still touching the transcript/log files under this
+// test's TempDir when it gets cleaned up.
+func TestDaemonWatchdog_Arm_SupersedesPriorWatchdog(t *testing.T) {
+	ch := make(chan loopMsg)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d := Daemon{}
+	go d.loop(ctx, ch)
+
+	logPath := filepath.Join(t.TempDir(), "notify-decisions.jsonl")
+	w := daemonWatchdog{
+		ch: ch, done: ctx.Done(),
+		judge: Judge{Bin: "/nonexistent"}, sender: Sender{}, log: DecisionLog{Path: logPath},
+	}
+
+	transcript := copyFixture(t, "goal_none.jsonl")
+	offset := scannedBytes(t, transcript)
+	const sessionID = "sess-supersede"
+	req := WatchdogArmRequest{
+		SessionID: sessionID, Transcript: transcript, Offset: offset, ParentPID: 0, ArmedAt: time.Now(),
+		Meta: DigestMeta{Project: "proj"},
+	}
+
+	w.Arm(req)
+	w.Arm(req) // supersedes the first
+
+	waitForCanceledCount(t, logPath, sessionID, 1)
+
+	w.Reap(sessionID)
+	waitForCanceledCount(t, logPath, sessionID, 2)
+}
+
+// TestArmWatchdog_ReapThenReArm_DelayedCleanupDoesNotDeleteSuccessor is the
+// regression test for the gen-reuse bug: armWatchdog used to derive gen from
+// the (deletable) map entry it was replacing (old.gen + 1), so Reap-then-
+// re-Arm for the same session restarted at gen 1 with nothing to derive
+// from — and the reaped watchdog's own delayed exit-cleanup op, captured
+// with that same gen 1, could then match the successor's freshly-registered
+// gen 1 and delete its entry out of the registry, leaking a live watchdog
+// past the daemon-shutdown-cancel branch.
+//
+// This drives armWatchdog and cleanupWatchdog directly (the loop-confined
+// functions themselves, not through the channel/goroutine machinery) so the
+// exact interleaving — the first watchdog's cleanup arriving LAST, after
+// the second Arm has already re-registered the session — is deterministic
+// rather than a real race dependent on goroutine scheduling.
+func TestArmWatchdog_ReapThenReArm_DelayedCleanupDoesNotDeleteSuccessor(t *testing.T) {
+	reg := &watchdogRegistry{entries: make(map[string]watchdogEntry)}
+	w := daemonWatchdog{}
+
+	transcript := copyFixture(t, "goal_none.jsonl")
+	offset := scannedBytes(t, transcript)
+	const sessionID = "sess-gen-reuse"
+	req := WatchdogArmRequest{
+		SessionID: sessionID, Transcript: transcript, Offset: offset, Meta: DigestMeta{Project: "proj"},
+	}
+
+	armWatchdog(reg, req, w)
+	firstGen := reg.entries[sessionID].gen
+
+	// Reap: cancel and remove, mirroring daemonWatchdog.Reap's loop-confined
+	// body exactly (without the channel round trip).
+	reg.entries[sessionID].cancel()
+	delete(reg.entries, sessionID)
+
+	// Re-arm the same session. With the bug, this lands on gen 1 again
+	// (nothing to derive old.gen from — the entry is gone); fixed, nextGen
+	// is loop-lifetime monotonic and never reused.
+	armWatchdog(reg, req, w)
+	secondGen := reg.entries[sessionID].gen
+	t.Cleanup(func() {
+		if e, ok := reg.entries[sessionID]; ok {
+			e.cancel()
+		}
+	})
+	if secondGen == firstGen {
+		t.Fatalf(
+			"second arm's gen = %d, same as first arm's gen %d (gen must never be reused after a delete)",
+			secondGen, firstGen,
+		)
+	}
+
+	// Simulate the first (reaped) watchdog's cleanup op arriving late — well
+	// after the second Arm already re-registered the session. With the bug
+	// this deletes the live successor's entry entirely.
+	cleanupWatchdog(reg, sessionID, firstGen)
+
+	got, ok := reg.entries[sessionID]
+	if !ok {
+		t.Fatal("successor watchdog entry was deleted by the reaped predecessor's delayed cleanup")
+	}
+	if got.gen != secondGen {
+		t.Errorf("surviving entry gen = %d, want %d (the second arm's)", got.gen, secondGen)
+	}
+}
+
+// TestDaemonWatchdog_Reap_CancelsRunningWatchdog proves Reap cancels a live
+// watchdog's goroutine: after Arm, Reap must produce an observable
+// "canceled" exit record for that session.
+func TestDaemonWatchdog_Reap_CancelsRunningWatchdog(t *testing.T) {
+	ch := make(chan loopMsg)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d := Daemon{}
+	go d.loop(ctx, ch)
+
+	logPath := filepath.Join(t.TempDir(), "notify-decisions.jsonl")
+	w := daemonWatchdog{
+		ch: ch, done: ctx.Done(),
+		judge: Judge{Bin: "/nonexistent"}, sender: Sender{}, log: DecisionLog{Path: logPath},
+	}
+
+	transcript := copyFixture(t, "goal_none.jsonl")
+	offset := scannedBytes(t, transcript)
+	const sessionID = "sess-reap"
+	req := WatchdogArmRequest{
+		SessionID: sessionID, Transcript: transcript, Offset: offset, ParentPID: 0, ArmedAt: time.Now(),
+		Meta: DigestMeta{Project: "proj"},
+	}
+
+	w.Arm(req)
+	w.Reap(sessionID)
+
+	waitForCanceledCount(t, logPath, sessionID, 1)
+}
+
+// TestDaemonLoop_ShutdownCancelsAllLiveWatchdogs proves Daemon.loop's ctx.Done
+// branch cancels every still-live watchdog, not just the one most recently
+// armed: two distinct sessions armed, then the loop's own ctx canceled, must
+// each produce a "canceled" exit record.
+func TestDaemonLoop_ShutdownCancelsAllLiveWatchdogs(t *testing.T) {
+	ch := make(chan loopMsg)
+	ctx, cancel := context.WithCancel(context.Background())
+	d := Daemon{}
+	go d.loop(ctx, ch)
+
+	logPath := filepath.Join(t.TempDir(), "notify-decisions.jsonl")
+	w := daemonWatchdog{
+		ch: ch, done: ctx.Done(),
+		judge: Judge{Bin: "/nonexistent"}, sender: Sender{}, log: DecisionLog{Path: logPath},
+	}
+
+	transcript := copyFixture(t, "goal_none.jsonl")
+	offset := scannedBytes(t, transcript)
+	meta := DigestMeta{Project: "proj"}
+	w.Arm(WatchdogArmRequest{SessionID: "sess-shutdown-a", Transcript: transcript, Offset: offset, Meta: meta})
+	w.Arm(WatchdogArmRequest{SessionID: "sess-shutdown-b", Transcript: transcript, Offset: offset, Meta: meta})
+
+	cancel() // daemon shutdown
+
+	waitForCanceledCount(t, logPath, "sess-shutdown-a", 1)
+	waitForCanceledCount(t, logPath, "sess-shutdown-b", 1)
+}
+
+// TestWatchdogSendWithDedupe_MarksNotifiedThroughLoopState proves a
+// watchdog's send routes MarkNotified through the loop's own DedupeState
+// (loopState/MemoryState), not any state this package owns directly: a
+// following idle_prompt for the same session within dedupeWindow must
+// dedupe against it, exactly as an ordinary hook invocation's send would.
+func TestWatchdogSendWithDedupe_MarksNotifiedThroughLoopState(t *testing.T) {
+	ch := make(chan loopMsg)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d := Daemon{}
+	go d.loop(ctx, ch)
+
+	const sessionID = "sess-watchdog-dedupe"
+	deps := WatchdogDeps{
+		Now:  time.Now,
+		Send: func(_ context.Context, _ Notification) error { return nil },
+	}
+	deps.Send = watchdogSendWithDedupe(sessionID, deps, ch)
+
+	if err := deps.Send(context.Background(), Notification{Title: "t", Body: "watchdog said hi"}); err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+
+	stateBase := t.TempDir()
+	logPath := filepath.Join(stateBase, "notify-decisions.jsonl")
+	p := Pipeline{
+		StateBase: stateBase,
+		DryRun:    true,
+		Judge:     Judge{Bin: writeStubClaude(t)},
+		Log:       DecisionLog{Path: logPath},
+		Stdout:    new(strings.Builder),
+		Host:      "testhost",
+		Present:   neverPresent,
+		State:     loopState{ch: ch},
+	}
+	in := HookInput{SessionID: sessionID, HookEventName: "Notification", NotificationType: "idle_prompt"}
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	recs := readDecisionLog(t, logPath)
+	if len(recs) != 1 || recs[0].Outcome != OutcomeSilent.String() || !strings.Contains(recs[0].Reason, "dedupe") {
+		t.Fatalf("records = %+v, want a silent dedupe record (watchdog send must have marked notified)", recs)
+	}
+}
+
 // TestLoopState_Call_WaitsForOpEvenIfCtxCancelsAfterSend drives
 // loopState.call directly against a hand-rolled receiver (standing in for
 // the real event loop) to pin the exact interleaving a mutex-free design

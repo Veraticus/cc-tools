@@ -74,11 +74,9 @@ const goalIncidentDaemonCondition = "Get the grailquest content daemon (grailque
 
 // newGoalTestPipeline builds a Pipeline pointed at a fresh temp state base
 // with DryRun:false (unlike newTestPipeline, which fixes DryRun:true) —
-// tests needing the real, non-DryRun notification-send and watchdog-arm
-// paths that DryRun:true can never reach use this instead. SelfBin is the
-// same stub claude binary used as the judge: it is a valid, quick-exiting
-// executable, which is all SpawnRecheck needs to succeed and write a
-// watchdog lock.
+// tests needing the real, non-DryRun notification-send path that DryRun:true
+// can never reach use this instead. Watchdog is left nil: tests that need to
+// observe a real arm attempt inject a *fakeWatchdog explicitly.
 func newGoalTestPipeline(
 	t *testing.T,
 	stdout *bytes.Buffer,
@@ -99,6 +97,49 @@ func newGoalTestPipeline(
 	}
 	return p, logPath
 }
+
+// memDedupeState adapts a fresh MemoryState to DedupeState for tests that
+// need to seed or inspect Pipeline dedupe state directly, without a live
+// daemon event loop: safe because these tests only ever drive Pipeline.Run
+// from a single goroutine at a time, so MemoryState's loop-confinement
+// requirement (see its doc comment) is trivially satisfied here.
+type memDedupeState struct {
+	m *MemoryState
+}
+
+func newMemDedupeState() memDedupeState {
+	return memDedupeState{m: NewMemoryState()}
+}
+
+func (d memDedupeState) SinceLastNotify(_ context.Context, sessionID string, now time.Time) time.Duration {
+	return d.m.SinceLastNotify(sessionID, now)
+}
+
+func (d memDedupeState) SinceLastNotifySame(
+	_ context.Context, sessionID string, now time.Time, message string,
+) time.Duration {
+	return d.m.SinceLastNotifySame(sessionID, now, message)
+}
+
+func (d memDedupeState) MarkNotified(_ context.Context, sessionID string, t time.Time, message string) error {
+	return d.m.MarkNotified(sessionID, t, message)
+}
+
+func (d memDedupeState) ClaimBroadcast(
+	_ context.Context, key string, window time.Duration, now time.Time, dryRun bool,
+) bool {
+	return d.m.ClaimBroadcast(key, window, now, dryRun)
+}
+
+// fakeWatchdog is a spy Pipeline.Watchdog for tests that need to observe
+// arm/reap calls without a live daemon event loop.
+type fakeWatchdog struct {
+	armed  []WatchdogArmRequest
+	reaped []string
+}
+
+func (f *fakeWatchdog) Arm(req WatchdogArmRequest) { f.armed = append(f.armed, req) }
+func (f *fakeWatchdog) Reap(sessionID string)      { f.reaped = append(f.reaped, sessionID) }
 
 // capturedRequest is what stubSenderRecording's round tripper records for
 // one Sender.Send call: everything a real ntfy POST would have carried.
@@ -139,26 +180,34 @@ func stubSenderRecording(captured *[]capturedRequest) Sender {
 	}
 }
 
-func TestPipeline_SessionEnd_ReapsExistingStateDir(t *testing.T) {
+func TestPipeline_SessionEnd_ReapsWatchdog(t *testing.T) {
 	var stdout bytes.Buffer
 	p, _ := newTestPipeline(t, &stdout, writeStubClaude(t), neverPresent)
+	wd := &fakeWatchdog{}
+	p.Watchdog = wd
 
 	sessionID := "sess-end-1"
-	state := SessionState{Dir: filepath.Join(p.StateBase, sessionID)}
-	if err := state.MarkNotified(time.Now(), "prior"); err != nil {
-		t.Fatalf("MarkNotified: %v", err)
-	}
-	if _, err := os.Stat(state.Dir); err != nil {
-		t.Fatalf("state dir missing before test: %v", err)
-	}
-
 	in := HookInput{SessionID: sessionID, HookEventName: "SessionEnd"}
 	if err := p.Run(context.Background(), in); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
 
-	if _, err := os.Stat(state.Dir); !os.IsNotExist(err) {
-		t.Errorf("state dir still exists after SessionEnd: err = %v", err)
+	if len(wd.reaped) != 1 || wd.reaped[0] != sessionID {
+		t.Errorf("reaped = %v, want [%s]", wd.reaped, sessionID)
+	}
+}
+
+// TestPipeline_SessionEnd_NilWatchdog_NeverPanics proves the SessionEnd
+// branch's Watchdog.Reap call is properly guarded: a Pipeline with no
+// Watchdog configured (the hook client's inline fallback shape) must not
+// panic on SessionEnd.
+func TestPipeline_SessionEnd_NilWatchdog_NeverPanics(t *testing.T) {
+	var stdout bytes.Buffer
+	p, _ := newTestPipeline(t, &stdout, writeStubClaude(t), neverPresent)
+
+	in := HookInput{SessionID: "sess-end-nil-watchdog", HookEventName: "SessionEnd"}
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() error = %v", err)
 	}
 }
 
@@ -403,7 +452,12 @@ func TestPipeline_Stop_Teammates_DecideNotifyFalse_SilentAndArms(t *testing.T) {
 
 	var stdout bytes.Buffer
 	p, logPath := newGoalTestPipeline(t, &stdout, stubBin, neverPresent)
+	const parentPIDSentinel = 424242
+	p.ParentPID = parentPIDSentinel
+	wd := &fakeWatchdog{}
+	p.Watchdog = wd
 	transcript := copyFixture(t, "teammates.jsonl")
+	wantOffset := scannedBytes(t, transcript)
 
 	sessionID := "sess-teammates"
 	in := HookInput{
@@ -417,9 +471,23 @@ func TestPipeline_Stop_Teammates_DecideNotifyFalse_SilentAndArms(t *testing.T) {
 		t.Errorf("stdout = %q, want empty (silent, no DRY RUN line)", stdout.String())
 	}
 
-	state := SessionState{Dir: filepath.Join(p.StateBase, sessionID)}
-	if _, err := os.Stat(filepath.Join(state.Dir, "watchdog.lock")); err != nil {
-		t.Errorf("watchdog.lock missing, want armed: %v", err)
+	if len(wd.armed) != 1 || wd.armed[0].SessionID != sessionID {
+		t.Fatalf("armed = %+v, want exactly one arm for %s", wd.armed, sessionID)
+	}
+	// Pins the rest of the arm request's forwarding: a broken ParentPID
+	// plumbing path (pipeline.go's arm literal, or the daemon's per-frame
+	// copy) would be invisible to a SessionID-only assertion, and
+	// parentAlive treats a zero ParentPID as "no probe" — so a silently
+	// dropped ParentPID would never surface as a dead-session exit either.
+	got := wd.armed[0]
+	if got.ParentPID != parentPIDSentinel {
+		t.Errorf("armed[0].ParentPID = %d, want %d", got.ParentPID, parentPIDSentinel)
+	}
+	if got.Transcript != transcript {
+		t.Errorf("armed[0].Transcript = %q, want %q", got.Transcript, transcript)
+	}
+	if got.Offset != wantOffset {
+		t.Errorf("armed[0].Offset = %d, want %d", got.Offset, wantOffset)
 	}
 
 	recs := readDecisionLog(t, logPath)
@@ -439,47 +507,41 @@ func TestPipeline_Stop_Teammates_DecideNotifyFalse_SilentAndArms(t *testing.T) {
 	}
 }
 
-func TestPipeline_Stop_GoalActive_ArmFails_LogsDecisionRecord(t *testing.T) {
+// TestPipeline_Stop_GoalActive_NilWatchdog_NoOpNoPanic proves arm() is a
+// safe no-op when Pipeline.Watchdog is unset (the hook client's inline
+// fallback shape): a goal-active Stop must still resolve silent and log
+// normally, with no "arm failed" record — that outcome no longer exists now
+// that arming is an interface call, not a subprocess spawn that can fail.
+func TestPipeline_Stop_GoalActive_NilWatchdog_NoOpNoPanic(t *testing.T) {
 	var stdout bytes.Buffer
-	stateBase := t.TempDir()
-	logPath := filepath.Join(stateBase, "notify-decisions.jsonl")
-	p := Pipeline{
-		StateBase: stateBase,
-		DryRun:    false,
-		Judge:     Judge{Bin: writeStubClaude(t), Model: "claude-haiku-4-5"},
-		Log:       DecisionLog{Path: logPath},
-		Stdout:    &stdout,
-		SelfBin:   filepath.Join(stateBase, "no-such-binary"),
-		Present:   neverPresent,
-	}
+	p, logPath := newTestPipeline(t, &stdout, writeStubClaude(t), neverPresent)
+	p.DryRun = false
 	transcript := copyFixture(t, "goal_active_set.jsonl")
 
 	in := HookInput{
-		SessionID: "sess-arm-fail", CWD: "/home/user/project", TranscriptPath: transcript, HookEventName: "Stop",
+		SessionID: "sess-nil-watchdog", CWD: "/home/user/project", TranscriptPath: transcript, HookEventName: "Stop",
 	}
 	if err := p.Run(context.Background(), in); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
 
 	recs := readDecisionLog(t, logPath)
-	found := false
-	for _, rec := range recs {
-		if rec.Event == "watchdog" && rec.Outcome == "arm failed" && strings.Contains(rec.Reason, "spawn recheck") {
-			found = true
-		}
+	if len(recs) != 1 || recs[0].Outcome != OutcomeSilent.String() {
+		t.Fatalf("records = %+v, want one silent record", recs)
 	}
-	if !found {
-		t.Errorf("decision log = %+v, want a watchdog/arm failed record mentioning spawn recheck", recs)
+	if !strings.Contains(recs[0].Reason, "goal active") {
+		t.Errorf("Reason = %q, want it to mention the goal-active defer", recs[0].Reason)
 	}
 }
 
 func TestPipeline_IdlePrompt_DedupeWindow_Silent(t *testing.T) {
 	var stdout bytes.Buffer
 	p, logPath := newTestPipeline(t, &stdout, writeStubClaude(t), neverPresent)
+	ds := newMemDedupeState()
+	p.State = ds
 
 	sessionID := "sess-7"
-	state := SessionState{Dir: filepath.Join(p.StateBase, sessionID)}
-	if err := state.MarkNotified(time.Now().Add(-30*time.Second), "prior"); err != nil {
+	if err := ds.MarkNotified(context.Background(), sessionID, time.Now().Add(-30*time.Second), "prior"); err != nil {
 		t.Fatalf("MarkNotified: %v", err)
 	}
 
@@ -515,6 +577,8 @@ func TestPipeline_PermissionPrompt_IdenticalRepeat_SecondIsSilent(t *testing.T) 
 	var sent []capturedRequest
 	p, logPath := newGoalTestPipeline(t, &stdout, stubBin, neverPresent)
 	p.Sender = stubSenderRecording(&sent)
+	ds := newMemDedupeState()
+	p.State = ds
 
 	sessionID := "sess-perm-repeat"
 	in := HookInput{
@@ -531,8 +595,7 @@ func TestPipeline_PermissionPrompt_IdenticalRepeat_SecondIsSilent(t *testing.T) 
 
 	// Backdate the recorded send to simulate the second identical ping
 	// arriving roughly a minute later — well inside blockedRepeatWindow.
-	state := SessionState{Dir: filepath.Join(p.StateBase, sessionID)}
-	if err := state.MarkNotified(time.Now().Add(-1*time.Minute), in.Message); err != nil {
+	if err := ds.MarkNotified(context.Background(), sessionID, time.Now().Add(-1*time.Minute), in.Message); err != nil {
 		t.Fatalf("backdating MarkNotified: %v", err)
 	}
 
@@ -641,11 +704,12 @@ func TestPipeline_Stop_ComposeJudgeError_SuppressedWithinFailOpenWindow(t *testi
 
 	var stdout bytes.Buffer
 	p, logPath := newTestPipeline(t, &stdout, stubBin, neverPresent)
+	ds := newMemDedupeState()
+	p.State = ds
 	transcript := copyFixture(t, "goal_none.jsonl")
 
 	sessionID := "sess-compose-suppressed"
-	state := SessionState{Dir: filepath.Join(p.StateBase, sessionID)}
-	if err := state.MarkNotified(time.Now().Add(-2*time.Minute), "prior"); err != nil {
+	if err := ds.MarkNotified(context.Background(), sessionID, time.Now().Add(-2*time.Minute), "prior"); err != nil {
 		t.Fatalf("MarkNotified: %v", err)
 	}
 
@@ -721,12 +785,15 @@ func TestPipeline_Stop_DecideJudgeError_SuppressedWithinFailOpenWindow_NoSend(t 
 	var sent []capturedRequest
 	p, logPath := newGoalTestPipeline(t, &stdout, stubBin, neverPresent)
 	p.Sender = stubSenderRecording(&sent)
+	wd := &fakeWatchdog{}
+	p.Watchdog = wd
+	ds := newMemDedupeState()
+	p.State = ds
 	transcript := copyFixture(t, "tasks_live.jsonl")
 
 	sessionID := "sess-decide-suppressed"
-	state := SessionState{Dir: filepath.Join(p.StateBase, sessionID)}
 	notifiedAt := time.Now().Add(-3 * time.Minute)
-	if err := state.MarkNotified(notifiedAt, "prior"); err != nil {
+	if err := ds.MarkNotified(context.Background(), sessionID, notifiedAt, "prior"); err != nil {
 		t.Fatalf("MarkNotified: %v", err)
 	}
 
@@ -740,10 +807,10 @@ func TestPipeline_Stop_DecideJudgeError_SuppressedWithinFailOpenWindow_NoSend(t 
 	if len(sent) != 0 {
 		t.Errorf("sent = %+v, want no notification (suppressed within failOpenWindow)", sent)
 	}
-	if _, err := os.Stat(filepath.Join(state.Dir, "watchdog.lock")); err != nil {
-		t.Errorf("watchdog.lock missing, want armed: %v", err)
+	if len(wd.armed) != 1 || wd.armed[0].SessionID != sessionID {
+		t.Errorf("armed = %+v, want exactly one arm for %s", wd.armed, sessionID)
 	}
-	if got := state.SinceLastNotify(time.Now()); got < 2*time.Minute {
+	if got := ds.SinceLastNotify(context.Background(), sessionID, time.Now()); got < 2*time.Minute {
 		t.Errorf("SinceLastNotify() = %v, want last-notify unchanged (suppressed path must not send)", got)
 	}
 
@@ -771,11 +838,12 @@ func TestPipeline_Stop_DecideJudgeError_AfterFailOpenWindow_SendsAgain(t *testin
 	var sent []capturedRequest
 	p, logPath := newGoalTestPipeline(t, &stdout, stubBin, neverPresent)
 	p.Sender = stubSenderRecording(&sent)
+	ds := newMemDedupeState()
+	p.State = ds
 	transcript := copyFixture(t, "tasks_live.jsonl")
 
 	sessionID := "sess-decide-after-window"
-	state := SessionState{Dir: filepath.Join(p.StateBase, sessionID)}
-	if err := state.MarkNotified(time.Now().Add(-11*time.Minute), "prior"); err != nil {
+	if err := ds.MarkNotified(context.Background(), sessionID, time.Now().Add(-11*time.Minute), "prior"); err != nil {
 		t.Fatalf("MarkNotified: %v", err)
 	}
 
@@ -872,6 +940,8 @@ func TestPipeline_Stop_GoalActive_LiveTasks_DefersSilentNoBlock(t *testing.T) {
 	var sent []capturedRequest
 	p, logPath := newGoalTestPipeline(t, &stdout, stubBin, neverPresent)
 	p.Sender = stubSenderRecording(&sent)
+	wd := &fakeWatchdog{}
+	p.Watchdog = wd
 	transcript := copyFixture(t, "goal_incident_daemon.jsonl")
 
 	sessionID := "sess-defer-keystone"
@@ -889,9 +959,8 @@ func TestPipeline_Stop_GoalActive_LiveTasks_DefersSilentNoBlock(t *testing.T) {
 		t.Errorf("sent = %+v, want no notification (silent defer)", sent)
 	}
 
-	state := SessionState{Dir: filepath.Join(p.StateBase, sessionID)}
-	if _, err := os.Stat(filepath.Join(state.Dir, "watchdog.lock")); err != nil {
-		t.Errorf("watchdog.lock missing, want armed: %v", err)
+	if len(wd.armed) != 1 || wd.armed[0].SessionID != sessionID {
+		t.Errorf("armed = %+v, want exactly one arm for %s", wd.armed, sessionID)
 	}
 
 	recs := readDecisionLog(t, logPath)

@@ -3,7 +3,6 @@ package notify
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -11,33 +10,6 @@ import (
 	"testing"
 	"time"
 )
-
-// fakeProcStartTicks is a scripted PID->ticks table for WatchdogDeps.
-// ProcStartTicks. An unset PID reports (0, false), matching the
-// "unavailable" fallback production sees on non-Linux or a vanished /proc
-// entry — so every existing test that never calls set() exercises that
-// fallback (Kill still called) by default.
-type fakeProcStartTicks struct {
-	mu    sync.Mutex
-	ticks map[int]int64
-}
-
-func newFakeProcStartTicks() *fakeProcStartTicks {
-	return &fakeProcStartTicks{ticks: make(map[int]int64)}
-}
-
-func (f *fakeProcStartTicks) set(pid int, ticks int64) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.ticks[pid] = ticks
-}
-
-func (f *fakeProcStartTicks) get(pid int) (int64, bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	t, ok := f.ticks[pid]
-	return t, ok
-}
 
 // --- fakes ---
 
@@ -77,11 +49,10 @@ func (c *fakeClock) sleepDurations() []time.Duration {
 	return out
 }
 
-// fakeProc is a counting fake for ProcAlive/Kill.
+// fakeProc is a counting fake for ProcAlive.
 type fakeProc struct {
-	mu     sync.Mutex
-	alive  map[int]bool
-	killed []int
+	mu    sync.Mutex
+	alive map[int]bool
 }
 
 func newFakeProc() *fakeProc {
@@ -92,22 +63,6 @@ func (f *fakeProc) ProcAlive(pid int) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.alive[pid]
-}
-
-func (f *fakeProc) Kill(pid int) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.killed = append(f.killed, pid)
-	f.alive[pid] = false
-	return nil
-}
-
-func (f *fakeProc) killedPIDs() []int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	out := make([]int, len(f.killed))
-	copy(out, f.killed)
-	return out
 }
 
 // judgeResult is one scripted answer for fakeJudge.
@@ -193,42 +148,35 @@ func (f *fakeLog) count() int {
 // --- test helpers ---
 
 const (
-	testSelfPID   = 4242
 	testParentPID = 1000
-	testOtherPID  = 9999
 )
 
 // testHarness bundles the fakes behind a WatchdogDeps for one test.
 type testHarness struct {
-	clock      *fakeClock
-	proc       *fakeProc
-	startTicks *fakeProcStartTicks
-	judge      *fakeJudge
-	send       *fakeSender
-	log        *fakeLog
-	deps       WatchdogDeps
+	clock *fakeClock
+	proc  *fakeProc
+	judge *fakeJudge
+	send  *fakeSender
+	log   *fakeLog
+	deps  WatchdogDeps
 }
 
 func newTestHarness(now time.Time, maxSleeps int, script []judgeResult) *testHarness {
 	h := &testHarness{
-		clock:      &fakeClock{now: now, maxSleeps: maxSleeps},
-		proc:       newFakeProc(),
-		startTicks: newFakeProcStartTicks(),
-		judge:      &fakeJudge{script: script},
-		send:       &fakeSender{},
-		log:        &fakeLog{},
+		clock: &fakeClock{now: now, maxSleeps: maxSleeps},
+		proc:  newFakeProc(),
+		judge: &fakeJudge{script: script},
+		send:  &fakeSender{},
+		log:   &fakeLog{},
 	}
 	h.proc.alive[testParentPID] = true
 	h.deps = WatchdogDeps{
-		Now:            h.clock.Now,
-		Sleep:          h.clock.Sleep,
-		ProcAlive:      h.proc.ProcAlive,
-		Kill:           h.proc.Kill,
-		SelfPID:        func() int { return testSelfPID },
-		ProcStartTicks: h.startTicks.get,
-		Judge:          h.judge.Evaluate,
-		Send:           h.send.Send,
-		Log:            h.log.Log,
+		Now:       h.clock.Now,
+		Sleep:     h.clock.Sleep,
+		ProcAlive: h.proc.ProcAlive,
+		Judge:     h.judge.Evaluate,
+		Send:      h.send.Send,
+		Log:       h.log.Log,
 	}
 	return h
 }
@@ -309,7 +257,7 @@ func copyFixture(t *testing.T, name string) string {
 }
 
 // scannedBytes returns ScanResult.BytesScanned for path, for constructing a
-// lock's Offset that matches the fixture's current content exactly (no
+// request's Offset that matches the fixture's current content exactly (no
 // spurious revival).
 func scannedBytes(t *testing.T, path string) int64 {
 	t.Helper()
@@ -325,84 +273,21 @@ func scannedBytes(t *testing.T, path string) int64 {
 	return res.BytesScanned
 }
 
-// writeLock writes lk as the watchdog lock for st, bypassing
-// WriteWatchdogLock (which is tested separately) so RunWatchdog tests can
-// arm a session directly.
-func writeLock(t *testing.T, st SessionState, lk WatchdogLock) {
-	t.Helper()
-	if err := os.MkdirAll(st.Dir, 0o750); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	data, err := json.Marshal(lk)
-	if err != nil {
-		t.Fatalf("marshaling lock: %v", err)
-	}
-	if writeErr := os.WriteFile(filepath.Join(st.Dir, "watchdog.lock"), data, 0o600); writeErr != nil {
-		t.Fatalf("writing lock: %v", writeErr)
-	}
-}
-
-func lockExists(st SessionState) bool {
-	_, err := os.Stat(filepath.Join(st.Dir, "watchdog.lock"))
-	return err == nil
-}
-
-// --- RunWatchdog: ownership/supersession ---
-
-func TestRunWatchdog_Superseded(t *testing.T) {
-	dir := t.TempDir()
-	st := SessionState{Dir: dir}
-	transcript := copyFixture(t, "goal_none.jsonl")
-	offset := scannedBytes(t, transcript)
-	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
-
-	lk := WatchdogLock{
-		PID: testOtherPID, ParentPID: testParentPID, Transcript: transcript, Offset: offset, ArmedAt: now,
-	}
-	writeLock(t, st, lk)
-	before, err := os.ReadFile(filepath.Join(dir, "watchdog.lock"))
-	if err != nil {
-		t.Fatalf("reading lock before run: %v", err)
-	}
-
-	h := newTestHarness(now, -1, nil)
-	meta := DigestMeta{Project: "proj"}
-
-	got := RunWatchdog(context.Background(), st, meta, h.deps, "sess-1")
-
-	if got != "superseded" {
-		t.Errorf("RunWatchdog() = %q, want %q", got, "superseded")
-	}
-	if h.log.count() != 1 {
-		t.Errorf("log entries = %d, want 1 (one exit record, no send)", h.log.count())
-	}
-	if h.send.sendCount() != 0 {
-		t.Errorf("sendCount = %d, want 0", h.send.sendCount())
-	}
-	after, err := os.ReadFile(filepath.Join(dir, "watchdog.lock"))
-	if err != nil {
-		t.Fatalf("reading lock after run: %v", err)
-	}
-	if string(before) != string(after) {
-		t.Errorf("lockfile was modified on superseded path:\nbefore: %s\nafter:  %s", before, after)
-	}
-}
+// --- RunWatchdog: dead-session / transcript checks ---
 
 func TestRunWatchdog_ParentDead(t *testing.T) {
-	dir := t.TempDir()
-	st := SessionState{Dir: dir}
 	transcript := copyFixture(t, "goal_none.jsonl")
 	offset := scannedBytes(t, transcript)
 	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
-
-	lk := WatchdogLock{PID: testSelfPID, ParentPID: testParentPID, Transcript: transcript, Offset: offset, ArmedAt: now}
-	writeLock(t, st, lk)
 
 	h := newTestHarness(now, -1, nil)
 	h.proc.alive[testParentPID] = false
-	meta := DigestMeta{Project: "proj"}
+	req := WatchdogArmRequest{
+		SessionID: "sess-1", Transcript: transcript, Offset: offset, ParentPID: testParentPID, ArmedAt: now,
+		Meta: DigestMeta{Project: "proj"},
+	}
 
-	got := RunWatchdog(context.Background(), st, meta, h.deps, "sess-1")
+	got := RunWatchdog(context.Background(), req, h.deps)
 
 	if got != "session process gone" {
 		t.Errorf("RunWatchdog() = %q, want %q", got, "session process gone")
@@ -410,41 +295,53 @@ func TestRunWatchdog_ParentDead(t *testing.T) {
 	if h.send.sendCount() != 0 {
 		t.Errorf("sendCount = %d, want 0", h.send.sendCount())
 	}
-	if lockExists(st) {
-		t.Error("lockfile still exists after parent-dead exit")
-	}
 }
 
-func TestRunWatchdog_Revival(t *testing.T) {
-	dir := t.TempDir()
-	st := SessionState{Dir: dir}
+// TestRunWatchdog_ZeroParentPID_NeverExitsSessionProcessGone proves a zero
+// ParentPID disables the dead-session probe entirely rather than ever being
+// treated as "gone": with ProcAlive never seeded for pid 0 (so it would
+// report false if it were ever consulted), a wake must still proceed past
+// the parent check. maxSleeps 1 lets exactly one wake happen, then forces
+// "canceled" on the second sleep — proving the first wake got past the
+// parent-alive gate rather than exiting "session process gone".
+func TestRunWatchdog_ZeroParentPID_NeverExitsSessionProcessGone(t *testing.T) {
 	transcript := copyFixture(t, "goal_none.jsonl")
 	offset := scannedBytes(t, transcript)
 	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
 
-	lk := WatchdogLock{PID: testSelfPID, ParentPID: testParentPID, Transcript: transcript, Offset: offset, ArmedAt: now}
-	writeLock(t, st, lk)
+	h := newTestHarness(now, 1, nil)
+	req := WatchdogArmRequest{
+		SessionID: "sess-1", Transcript: transcript, Offset: offset, ParentPID: 0, ArmedAt: now,
+		Meta: DigestMeta{Project: "proj"},
+	}
+
+	got := RunWatchdog(context.Background(), req, h.deps)
+
+	if got != "canceled" {
+		t.Errorf("RunWatchdog() = %q, want %q (proves the wake ran and was not exited by the parent check)",
+			got, "canceled")
+	}
+}
+
+func TestRunWatchdog_Revival(t *testing.T) {
+	transcript := copyFixture(t, "goal_none.jsonl")
+	offset := scannedBytes(t, transcript)
+	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
 
 	// Simulate the session reviving: new bytes land in the transcript after
 	// arming.
 	extra := []byte(
 		`{"type":"user","message":{"role":"user","content":"more"},"timestamp":"2026-07-05T12:05:00.000Z"}` + "\n",
 	)
-	f, err := os.OpenFile(transcript, os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		t.Fatalf("opening transcript for append: %v", err)
-	}
-	if _, writeErr := f.Write(extra); writeErr != nil {
-		t.Fatalf("appending to transcript: %v", writeErr)
-	}
-	if closeErr := f.Close(); closeErr != nil {
-		t.Fatalf("closing transcript: %v", closeErr)
-	}
+	appendLine(t, transcript, extra)
 
 	h := newTestHarness(now, -1, nil)
-	meta := DigestMeta{Project: "proj"}
+	req := WatchdogArmRequest{
+		SessionID: "sess-1", Transcript: transcript, Offset: offset, ParentPID: testParentPID, ArmedAt: now,
+		Meta: DigestMeta{Project: "proj"},
+	}
 
-	got := RunWatchdog(context.Background(), st, meta, h.deps, "sess-1")
+	got := RunWatchdog(context.Background(), req, h.deps)
 
 	if got != "session revived" {
 		t.Errorf("RunWatchdog() = %q, want %q", got, "session revived")
@@ -452,26 +349,19 @@ func TestRunWatchdog_Revival(t *testing.T) {
 	if h.send.sendCount() != 0 {
 		t.Errorf("sendCount = %d, want 0", h.send.sendCount())
 	}
-	if lockExists(st) {
-		t.Error("lockfile still exists after revival exit")
-	}
 }
 
 func TestRunWatchdog_TranscriptUnreadable(t *testing.T) {
 	dir := t.TempDir()
-	st := SessionState{Dir: dir}
 	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
 
-	lk := WatchdogLock{
-		PID: testSelfPID, ParentPID: testParentPID,
-		Transcript: filepath.Join(dir, "does-not-exist.jsonl"), Offset: 0, ArmedAt: now,
-	}
-	writeLock(t, st, lk)
-
 	h := newTestHarness(now, -1, nil)
-	meta := DigestMeta{Project: "proj"}
+	req := WatchdogArmRequest{
+		SessionID: "sess-1", Transcript: filepath.Join(dir, "does-not-exist.jsonl"), Offset: 0,
+		ParentPID: testParentPID, ArmedAt: now, Meta: DigestMeta{Project: "proj"},
+	}
 
-	got := RunWatchdog(context.Background(), st, meta, h.deps, "sess-1")
+	got := RunWatchdog(context.Background(), req, h.deps)
 
 	if got != "transcript unreadable" {
 		t.Errorf("RunWatchdog() = %q, want %q", got, "transcript unreadable")
@@ -479,8 +369,31 @@ func TestRunWatchdog_TranscriptUnreadable(t *testing.T) {
 	if h.send.sendCount() != 0 {
 		t.Errorf("sendCount = %d, want 0", h.send.sendCount())
 	}
-	if lockExists(st) {
-		t.Error("lockfile still exists after transcript-unreadable exit")
+}
+
+func TestRunWatchdog_TranscriptTruncated_ExitsUnreadable(t *testing.T) {
+	transcript := copyFixture(t, "goal_none.jsonl")
+	offset := scannedBytes(t, transcript)
+	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+
+	const truncateBy = 20
+	if err := os.Truncate(transcript, offset-truncateBy); err != nil {
+		t.Fatalf("truncating transcript: %v", err)
+	}
+
+	h := newTestHarness(now, -1, nil)
+	req := WatchdogArmRequest{
+		SessionID: "sess-1", Transcript: transcript, Offset: offset, ParentPID: testParentPID, ArmedAt: now,
+		Meta: DigestMeta{Project: "proj"},
+	}
+
+	got := RunWatchdog(context.Background(), req, h.deps)
+
+	if got != "transcript unreadable" {
+		t.Errorf("RunWatchdog() = %q, want %q", got, "transcript unreadable")
+	}
+	if h.send.sendCount() != 0 {
+		t.Errorf("sendCount = %d, want 0", h.send.sendCount())
 	}
 }
 
@@ -496,22 +409,20 @@ func TestRunWatchdog_TranscriptUnreadable(t *testing.T) {
 // transcript growth past the (unrealistic) full-file offset.
 
 func TestRunWatchdog_GoalMet(t *testing.T) {
-	dir := t.TempDir()
-	st := SessionState{Dir: dir}
 	transcript, metLine := activeOnlyTranscript(t, "goal_met.jsonl")
 	offset := scannedBytes(t, transcript)
 	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
 	appendLine(t, transcript, metLine)
 
-	lk := WatchdogLock{PID: testSelfPID, ParentPID: testParentPID, Transcript: transcript, Offset: offset, ArmedAt: now}
-	writeLock(t, st, lk)
-
 	h := newTestHarness(now, -1, []judgeResult{
 		{verdict: JudgeVerdict{Notify: true, Urgency: UrgencyDone, Task: "ship it", Body: "all done", Reason: "r"}},
 	})
-	meta := DigestMeta{Project: "proj"}
+	req := WatchdogArmRequest{
+		SessionID: "sess-1", Transcript: transcript, Offset: offset, ParentPID: testParentPID, ArmedAt: now,
+		Meta: DigestMeta{Project: "proj"},
+	}
 
-	got := RunWatchdog(context.Background(), st, meta, h.deps, "sess-1")
+	got := RunWatchdog(context.Background(), req, h.deps)
 
 	if got != "goal met" {
 		t.Errorf("RunWatchdog() = %q, want %q", got, "goal met")
@@ -536,31 +447,21 @@ func TestRunWatchdog_GoalMet(t *testing.T) {
 	if n.Title != wantTitle {
 		t.Errorf("Title = %q, want %q", n.Title, wantTitle)
 	}
-	if lockExists(st) {
-		t.Error("lockfile still exists after goal-met exit")
-	}
-	// The wake that actually notifies happens after the first scheduled
-	// sleep (now+5m), so query comfortably after that instant.
-	if since := st.SinceLastNotify(now.Add(time.Hour)); since < 0 {
-		t.Error("MarkNotified was not called")
-	}
 }
 
 func TestRunWatchdog_GoalMet_JudgeErrorFallsBack(t *testing.T) {
-	dir := t.TempDir()
-	st := SessionState{Dir: dir}
 	transcript, metLine := activeOnlyTranscript(t, "goal_met.jsonl")
 	offset := scannedBytes(t, transcript)
 	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
 	appendLine(t, transcript, metLine)
 
-	lk := WatchdogLock{PID: testSelfPID, ParentPID: testParentPID, Transcript: transcript, Offset: offset, ArmedAt: now}
-	writeLock(t, st, lk)
-
 	h := newTestHarness(now, -1, []judgeResult{{err: errors.New("judge exploded")}})
-	meta := DigestMeta{Project: "proj"}
+	req := WatchdogArmRequest{
+		SessionID: "sess-1", Transcript: transcript, Offset: offset, ParentPID: testParentPID, ArmedAt: now,
+		Meta: DigestMeta{Project: "proj"},
+	}
 
-	got := RunWatchdog(context.Background(), st, meta, h.deps, "sess-1")
+	got := RunWatchdog(context.Background(), req, h.deps)
 
 	if got != "goal met" {
 		t.Errorf("RunWatchdog() = %q, want %q", got, "goal met")
@@ -575,28 +476,23 @@ func TestRunWatchdog_GoalMet_JudgeErrorFallsBack(t *testing.T) {
 	if !contains(n.Title, "goal complete") {
 		t.Errorf("Title = %q, want it to contain %q", n.Title, "goal complete")
 	}
-	if lockExists(st) {
-		t.Error("lockfile still exists after fallback goal-met exit")
-	}
 }
 
 func TestRunWatchdog_GoalFailed(t *testing.T) {
-	dir := t.TempDir()
-	st := SessionState{Dir: dir}
 	transcript, failedLine := activeOnlyTranscript(t, "goal_failed.jsonl")
 	offset := scannedBytes(t, transcript)
 	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
 	appendLine(t, transcript, failedLine)
 
-	lk := WatchdogLock{PID: testSelfPID, ParentPID: testParentPID, Transcript: transcript, Offset: offset, ArmedAt: now}
-	writeLock(t, st, lk)
-
 	h := newTestHarness(now, -1, []judgeResult{
 		{verdict: JudgeVerdict{Notify: true, Urgency: UrgencyBlocked, Task: "stuck", Body: "gave up", Reason: "r"}},
 	})
-	meta := DigestMeta{Project: "proj"}
+	req := WatchdogArmRequest{
+		SessionID: "sess-1", Transcript: transcript, Offset: offset, ParentPID: testParentPID, ArmedAt: now,
+		Meta: DigestMeta{Project: "proj"},
+	}
 
-	got := RunWatchdog(context.Background(), st, meta, h.deps, "sess-1")
+	got := RunWatchdog(context.Background(), req, h.deps)
 
 	if got != "goal failed" {
 		t.Errorf("RunWatchdog() = %q, want %q", got, "goal failed")
@@ -607,26 +503,21 @@ func TestRunWatchdog_GoalFailed(t *testing.T) {
 	if n := h.send.notifications()[0]; n.Urgency != UrgencyBlocked {
 		t.Errorf("Urgency = %v, want UrgencyBlocked", n.Urgency)
 	}
-	if lockExists(st) {
-		t.Error("lockfile still exists after goal-failed exit")
-	}
 }
 
 func TestRunWatchdog_GoalCleared(t *testing.T) {
-	dir := t.TempDir()
-	st := SessionState{Dir: dir}
 	transcript, clearedLine := activeOnlyTranscript(t, "goal_cleared.jsonl")
 	offset := scannedBytes(t, transcript)
 	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
 	appendLine(t, transcript, clearedLine)
 
-	lk := WatchdogLock{PID: testSelfPID, ParentPID: testParentPID, Transcript: transcript, Offset: offset, ArmedAt: now}
-	writeLock(t, st, lk)
-
 	h := newTestHarness(now, -1, nil)
-	meta := DigestMeta{Project: "proj"}
+	req := WatchdogArmRequest{
+		SessionID: "sess-1", Transcript: transcript, Offset: offset, ParentPID: testParentPID, ArmedAt: now,
+		Meta: DigestMeta{Project: "proj"},
+	}
 
-	got := RunWatchdog(context.Background(), st, meta, h.deps, "sess-1")
+	got := RunWatchdog(context.Background(), req, h.deps)
 
 	if got != "goal cleared" {
 		t.Errorf("RunWatchdog() = %q, want %q", got, "goal cleared")
@@ -636,9 +527,6 @@ func TestRunWatchdog_GoalCleared(t *testing.T) {
 	}
 	if h.send.sendCount() != 0 {
 		t.Errorf("sendCount = %d, want 0", h.send.sendCount())
-	}
-	if lockExists(st) {
-		t.Error("lockfile still exists after goal-cleared exit")
 	}
 }
 
@@ -650,8 +538,6 @@ func TestRunWatchdog_GoalCleared(t *testing.T) {
 // fresh watchdog, so this (superseded) watchdog correctly treats the growth
 // as revival.
 func TestRunWatchdog_GoalStillActive_MidLoopGrowth_RevivesNotTransitions(t *testing.T) {
-	dir := t.TempDir()
-	st := SessionState{Dir: dir}
 	transcript, _ := activeOnlyTranscript(t, "goal_met.jsonl") // discard the transition line entirely
 	offset := scannedBytes(t, transcript)
 	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
@@ -661,13 +547,13 @@ func TestRunWatchdog_GoalStillActive_MidLoopGrowth_RevivesNotTransitions(t *test
 	extraLines := splitFixtureLines(t, "goal_none.jsonl")
 	appendLine(t, transcript, extraLines[0])
 
-	lk := WatchdogLock{PID: testSelfPID, ParentPID: testParentPID, Transcript: transcript, Offset: offset, ArmedAt: now}
-	writeLock(t, st, lk)
-
 	h := newTestHarness(now, -1, nil)
-	meta := DigestMeta{Project: "proj"}
+	req := WatchdogArmRequest{
+		SessionID: "sess-1", Transcript: transcript, Offset: offset, ParentPID: testParentPID, ArmedAt: now,
+		Meta: DigestMeta{Project: "proj"},
+	}
 
-	got := RunWatchdog(context.Background(), st, meta, h.deps, "sess-1")
+	got := RunWatchdog(context.Background(), req, h.deps)
 
 	if got != "session revived" {
 		t.Errorf("RunWatchdog() = %q, want %q", got, "session revived")
@@ -678,16 +564,11 @@ func TestRunWatchdog_GoalStillActive_MidLoopGrowth_RevivesNotTransitions(t *test
 	if h.send.sendCount() != 0 {
 		t.Errorf("sendCount = %d, want 0", h.send.sendCount())
 	}
-	if lockExists(st) {
-		t.Error("lockfile still exists after revival exit")
-	}
 }
 
 // --- RunWatchdog: staleness ---
 
 func TestRunWatchdog_StaleNotifyFalseTwice_ThenNoMoreJudgeCalls(t *testing.T) {
-	dir := t.TempDir()
-	st := SessionState{Dir: dir}
 	transcript := copyFixture(t, "tasks_live.jsonl")
 	offset := scannedBytes(t, transcript)
 	// Far past every LaunchedAt in the fixture (2026-07-05T05:xx) so every
@@ -695,18 +576,16 @@ func TestRunWatchdog_StaleNotifyFalseTwice_ThenNoMoreJudgeCalls(t *testing.T) {
 	// so staleness is judged off LaunchedAt).
 	armedAt := time.Date(2026, 7, 5, 6, 0, 0, 0, time.UTC)
 
-	lk := WatchdogLock{
-		PID: testSelfPID, ParentPID: testParentPID, Transcript: transcript, Offset: offset, ArmedAt: armedAt,
-	}
-	writeLock(t, st, lk)
-
 	h := newTestHarness(armedAt, 4, []judgeResult{
 		{verdict: JudgeVerdict{Notify: false, Reason: "still working"}},
 		{verdict: JudgeVerdict{Notify: false, Reason: "still working"}},
 	})
-	meta := DigestMeta{Project: "proj"}
+	req := WatchdogArmRequest{
+		SessionID: "sess-1", Transcript: transcript, Offset: offset, ParentPID: testParentPID, ArmedAt: armedAt,
+		Meta: DigestMeta{Project: "proj"},
+	}
 
-	got := RunWatchdog(context.Background(), st, meta, h.deps, "sess-1")
+	got := RunWatchdog(context.Background(), req, h.deps)
 
 	if got != "canceled" {
 		t.Errorf("RunWatchdog() = %q, want %q", got, "canceled")
@@ -732,32 +611,24 @@ func TestRunWatchdog_StaleNotifyFalseTwice_ThenNoMoreJudgeCalls(t *testing.T) {
 			t.Errorf("sleep[%d] = %v, want %v (full: %v)", i, gotSleeps[i], want, gotSleeps)
 		}
 	}
-	// "canceled" leaves the lock untouched (we may already be superseded).
-	if !lockExists(st) {
-		t.Error("lockfile was removed on canceled exit; it must be left alone")
-	}
 }
 
 func TestRunWatchdog_StaleNotifyTrue(t *testing.T) {
-	dir := t.TempDir()
-	st := SessionState{Dir: dir}
 	transcript := copyFixture(t, "tasks_live.jsonl")
 	offset := scannedBytes(t, transcript)
 	armedAt := time.Date(2026, 7, 5, 6, 0, 0, 0, time.UTC)
-
-	lk := WatchdogLock{
-		PID: testSelfPID, ParentPID: testParentPID, Transcript: transcript, Offset: offset, ArmedAt: armedAt,
-	}
-	writeLock(t, st, lk)
 
 	h := newTestHarness(armedAt, -1, []judgeResult{
 		{verdict: JudgeVerdict{
 			Notify: true, Urgency: UrgencyInfo, Task: "investigate", Body: "silent a while", Reason: "r",
 		}},
 	})
-	meta := DigestMeta{Project: "proj"}
+	req := WatchdogArmRequest{
+		SessionID: "sess-1", Transcript: transcript, Offset: offset, ParentPID: testParentPID, ArmedAt: armedAt,
+		Meta: DigestMeta{Project: "proj"},
+	}
 
-	got := RunWatchdog(context.Background(), st, meta, h.deps, "sess-1")
+	got := RunWatchdog(context.Background(), req, h.deps)
 
 	if got != "stalled ping" {
 		t.Errorf("RunWatchdog() = %q, want %q", got, "stalled ping")
@@ -768,29 +639,22 @@ func TestRunWatchdog_StaleNotifyTrue(t *testing.T) {
 	if h.send.sendCount() != 1 {
 		t.Fatalf("sendCount = %d, want 1", h.send.sendCount())
 	}
-	if lockExists(st) {
-		t.Error("lockfile still exists after stalled-ping exit")
-	}
 }
 
 func TestRunWatchdog_StaleJudgeError_ConsumesBudgetSilently(t *testing.T) {
-	dir := t.TempDir()
-	st := SessionState{Dir: dir}
 	transcript := copyFixture(t, "tasks_live.jsonl")
 	offset := scannedBytes(t, transcript)
 	armedAt := time.Date(2026, 7, 5, 6, 0, 0, 0, time.UTC)
 
-	lk := WatchdogLock{
-		PID: testSelfPID, ParentPID: testParentPID, Transcript: transcript, Offset: offset, ArmedAt: armedAt,
-	}
-	writeLock(t, st, lk)
-
 	h := newTestHarness(armedAt, 3, []judgeResult{
 		{err: errors.New("judge down")},
 	})
-	meta := DigestMeta{Project: "proj"}
+	req := WatchdogArmRequest{
+		SessionID: "sess-1", Transcript: transcript, Offset: offset, ParentPID: testParentPID, ArmedAt: armedAt,
+		Meta: DigestMeta{Project: "proj"},
+	}
 
-	got := RunWatchdog(context.Background(), st, meta, h.deps, "sess-1")
+	got := RunWatchdog(context.Background(), req, h.deps)
 
 	if got != "canceled" {
 		t.Errorf("RunWatchdog() = %q, want %q", got, "canceled")
@@ -808,22 +672,18 @@ func TestRunWatchdog_StaleJudgeError_ConsumesBudgetSilently(t *testing.T) {
 // --- RunWatchdog: ceiling ---
 
 func TestRunWatchdog_Ceiling(t *testing.T) {
-	dir := t.TempDir()
-	st := SessionState{Dir: dir}
 	transcript := copyFixture(t, "goal_none.jsonl")
 	offset := scannedBytes(t, transcript)
 	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
 	armedAt := now.Add(-5 * time.Hour) // already past the 4h ceiling
 
-	lk := WatchdogLock{
-		PID: testSelfPID, ParentPID: testParentPID, Transcript: transcript, Offset: offset, ArmedAt: armedAt,
-	}
-	writeLock(t, st, lk)
-
 	h := newTestHarness(now, -1, nil)
-	meta := DigestMeta{Project: "proj"}
+	req := WatchdogArmRequest{
+		SessionID: "sess-1", Transcript: transcript, Offset: offset, ParentPID: testParentPID, ArmedAt: armedAt,
+		Meta: DigestMeta{Project: "proj"},
+	}
 
-	got := RunWatchdog(context.Background(), st, meta, h.deps, "sess-1")
+	got := RunWatchdog(context.Background(), req, h.deps)
 
 	if got != "ceiling" {
 		t.Errorf("RunWatchdog() = %q, want %q", got, "ceiling")
@@ -837,44 +697,12 @@ func TestRunWatchdog_Ceiling(t *testing.T) {
 	if n := h.send.notifications()[0]; n.Urgency != UrgencyInfo {
 		t.Errorf("Urgency = %v, want UrgencyInfo", n.Urgency)
 	}
-	if lockExists(st) {
-		t.Error("lockfile still exists after ceiling exit")
-	}
-}
-
-// --- RunWatchdog: canceled leaves lock alone ---
-
-func TestRunWatchdog_Canceled_LeavesLockUntouched(t *testing.T) {
-	dir := t.TempDir()
-	st := SessionState{Dir: dir}
-	transcript := copyFixture(t, "goal_none.jsonl")
-	offset := scannedBytes(t, transcript)
-	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
-
-	lk := WatchdogLock{PID: testSelfPID, ParentPID: testParentPID, Transcript: transcript, Offset: offset, ArmedAt: now}
-	writeLock(t, st, lk)
-
-	// maxSleeps: 0 means even the very first Sleep call fails immediately.
-	h := newTestHarness(now, 0, nil)
-	meta := DigestMeta{Project: "proj"}
-
-	got := RunWatchdog(context.Background(), st, meta, h.deps, "sess-1")
-
-	if got != "canceled" {
-		t.Errorf("RunWatchdog() = %q, want %q", got, "canceled")
-	}
-	if !lockExists(st) {
-		t.Error("lockfile was removed on canceled exit; it must be left alone")
-	}
-	if h.send.sendCount() != 0 {
-		t.Errorf("sendCount = %d, want 0", h.send.sendCount())
-	}
 }
 
 // --- RunWatchdog: stat-first / cached scan (p2) ---
 
 // TestRunWatchdog_NoGrowthWake_ReusesCachedScan proves the "size ==
-// lock.Offset" wake reuses a cached scan rather than re-parsing: after a
+// req.Offset" wake reuses a cached scan rather than re-parsing: after a
 // first no-growth wake caches its scan, the transcript is made unreadable
 // (chmod 0000) and the clock advanced past the ceiling. A wake that
 // mistakenly re-parses would hit the permission error and exit "transcript
@@ -882,25 +710,20 @@ func TestRunWatchdog_Canceled_LeavesLockUntouched(t *testing.T) {
 // again and reaches the ceiling send instead, still reporting the 0 live
 // tasks the (untouched, cached) goal_none.jsonl scan produced.
 func TestRunWatchdog_NoGrowthWake_ReusesCachedScan(t *testing.T) {
-	dir := t.TempDir()
-	st := SessionState{Dir: dir}
 	transcript := copyFixture(t, "goal_none.jsonl")
 	offset := scannedBytes(t, transcript) // == full file size: no growth, ever
 	armedAt := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
 
-	lk := WatchdogLock{
-		PID: testSelfPID, ParentPID: testParentPID, Transcript: transcript, Offset: offset, ArmedAt: armedAt,
-	}
-	writeLock(t, st, lk)
-	lockPath := filepath.Join(dir, watchdogLockFile)
-
 	h := newTestHarness(armedAt, -1, nil)
-	meta := DigestMeta{Project: "proj"}
+	req := WatchdogArmRequest{
+		SessionID: "sess-1", Transcript: transcript, Offset: offset, ParentPID: testParentPID, ArmedAt: armedAt,
+		Meta: DigestMeta{Project: "proj"},
+	}
 	state := &wakeState{budget: initialStaleBudget}
 
 	// Wake 1: well before the ceiling, transcript still fully readable —
 	// the "first such wake" that must perform (and cache) a real scan.
-	got := runWatchdogWake(context.Background(), st, meta, h.deps, "sess-1", lockPath, state)
+	got := runWatchdogWake(context.Background(), req, h.deps, state)
 	if got != "" {
 		t.Fatalf("wake 1 = %q, want \"\" (no exit yet)", got)
 	}
@@ -910,7 +733,7 @@ func TestRunWatchdog_NoGrowthWake_ReusesCachedScan(t *testing.T) {
 
 	// Advance past the ceiling and strip all read permission from the
 	// transcript. The file's size is unchanged, so this wake still lands in
-	// the size == lock.Offset case.
+	// the size == req.Offset case.
 	h.clock.mu.Lock()
 	h.clock.now = h.clock.now.Add(watchdogCeiling + time.Minute)
 	h.clock.mu.Unlock()
@@ -922,7 +745,7 @@ func TestRunWatchdog_NoGrowthWake_ReusesCachedScan(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(transcript, 0o600) })
 
-	got = runWatchdogWake(context.Background(), st, meta, h.deps, "sess-1", lockPath, state)
+	got = runWatchdogWake(context.Background(), req, h.deps, state)
 	if got != "ceiling" {
 		t.Errorf("wake 2 = %q, want %q (cached scan must be reused, not a fresh parse)", got, "ceiling")
 	}
@@ -931,41 +754,6 @@ func TestRunWatchdog_NoGrowthWake_ReusesCachedScan(t *testing.T) {
 	}
 	if n := h.send.notifications()[0]; !contains(n.Body, "0 task(s)") {
 		t.Errorf("ceiling body = %q, want it to report 0 tasks (from the cached, no-live-task scan)", n.Body)
-	}
-}
-
-// TestRunWatchdog_TranscriptTruncated_ExitsUnreadable covers the size <
-// lock.Offset case: truncation or rotation is pathological (no coherent
-// growth to reason about), so it is treated like an unreadable transcript
-// rather than attempting to parse whatever remains.
-func TestRunWatchdog_TranscriptTruncated_ExitsUnreadable(t *testing.T) {
-	dir := t.TempDir()
-	st := SessionState{Dir: dir}
-	transcript := copyFixture(t, "goal_none.jsonl")
-	offset := scannedBytes(t, transcript)
-	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
-
-	const truncateBy = 20
-	if err := os.Truncate(transcript, offset-truncateBy); err != nil {
-		t.Fatalf("truncating transcript: %v", err)
-	}
-
-	lk := WatchdogLock{PID: testSelfPID, ParentPID: testParentPID, Transcript: transcript, Offset: offset, ArmedAt: now}
-	writeLock(t, st, lk)
-
-	h := newTestHarness(now, -1, nil)
-	meta := DigestMeta{Project: "proj"}
-
-	got := RunWatchdog(context.Background(), st, meta, h.deps, "sess-1")
-
-	if got != "transcript unreadable" {
-		t.Errorf("RunWatchdog() = %q, want %q", got, "transcript unreadable")
-	}
-	if h.send.sendCount() != 0 {
-		t.Errorf("sendCount = %d, want 0", h.send.sendCount())
-	}
-	if lockExists(st) {
-		t.Error("lockfile still exists after truncated-transcript exit")
 	}
 }
 
@@ -983,331 +771,4 @@ func indexOf(s, substr string) int {
 		}
 	}
 	return -1
-}
-
-// --- WriteWatchdogLock / ReapWatchdog ---
-
-func TestWriteWatchdogLock_NoPriorOwner_WritesLockNoKill(t *testing.T) {
-	dir := t.TempDir()
-	st := SessionState{Dir: dir}
-	h := newTestHarness(time.Now(), -1, nil)
-
-	lk := WatchdogLock{PID: 111, ParentPID: 222, Transcript: "/tmp/t.jsonl", Offset: 10, ArmedAt: time.Now()}
-	if err := WriteWatchdogLock(st, lk, h.deps); err != nil {
-		t.Fatalf("WriteWatchdogLock() error = %v", err)
-	}
-
-	if len(h.proc.killedPIDs()) != 0 {
-		t.Errorf("killed = %v, want none", h.proc.killedPIDs())
-	}
-	data, err := os.ReadFile(filepath.Join(dir, "watchdog.lock"))
-	if err != nil {
-		t.Fatalf("reading written lock: %v", err)
-	}
-	var got WatchdogLock
-	if unmarshalErr := json.Unmarshal(data, &got); unmarshalErr != nil {
-		t.Fatalf("unmarshaling written lock: %v", unmarshalErr)
-	}
-	sameLock := got.PID == lk.PID && got.ParentPID == lk.ParentPID &&
-		got.Transcript == lk.Transcript && got.Offset == lk.Offset
-	if !sameLock {
-		t.Errorf("written lock = %+v, want %+v", got, lk)
-	}
-}
-
-// TestWriteWatchdogLock_KillsLivePriorOwner also exercises s3's
-// dep-unavailable fallback: h.startTicks never gets a set() call for PID
-// 555, so deps.ProcStartTicks reports (0, false) — the same "unavailable"
-// answer production sees on a vanished /proc entry — and killIfOwnerMatches
-// falls back to the plain probe-only behavior (Kill called).
-func TestWriteWatchdogLock_KillsLivePriorOwner(t *testing.T) {
-	dir := t.TempDir()
-	st := SessionState{Dir: dir}
-	h := newTestHarness(time.Now(), -1, nil)
-
-	prior := WatchdogLock{PID: 555, ParentPID: 222, Transcript: "/tmp/old.jsonl", Offset: 1, ArmedAt: time.Now()}
-	writeLock(t, st, prior)
-	h.proc.alive[555] = true
-
-	next := WatchdogLock{PID: 666, ParentPID: 222, Transcript: "/tmp/new.jsonl", Offset: 2, ArmedAt: time.Now()}
-	if err := WriteWatchdogLock(st, next, h.deps); err != nil {
-		t.Fatalf("WriteWatchdogLock() error = %v", err)
-	}
-
-	killed := h.proc.killedPIDs()
-	if len(killed) != 1 || killed[0] != 555 {
-		t.Errorf("killed = %v, want [555]", killed)
-	}
-
-	data, err := os.ReadFile(filepath.Join(dir, "watchdog.lock"))
-	if err != nil {
-		t.Fatalf("reading written lock: %v", err)
-	}
-	var got WatchdogLock
-	if unmarshalErr := json.Unmarshal(data, &got); unmarshalErr != nil {
-		t.Fatalf("unmarshaling written lock: %v", unmarshalErr)
-	}
-	if got.PID != 666 {
-		t.Errorf("written lock PID = %d, want 666 (new owner)", got.PID)
-	}
-}
-
-// TestWriteWatchdogLock_MatchingStartTicks_KillsPriorOwner covers s3's
-// "matching ticks" case: the prior lock's StartTicks equals what
-// ProcStartTicks reports for that PID right now, so the live process really
-// is the one that wrote the lock, and Kill proceeds.
-func TestWriteWatchdogLock_MatchingStartTicks_KillsPriorOwner(t *testing.T) {
-	dir := t.TempDir()
-	st := SessionState{Dir: dir}
-	h := newTestHarness(time.Now(), -1, nil)
-
-	prior := WatchdogLock{
-		PID: 555, ParentPID: 222, Transcript: "/tmp/old.jsonl", Offset: 1, ArmedAt: time.Now(), StartTicks: 111,
-	}
-	writeLock(t, st, prior)
-	h.proc.alive[555] = true
-	h.startTicks.set(555, 111) // matches the recorded fingerprint
-
-	next := WatchdogLock{PID: 666, ParentPID: 222, Transcript: "/tmp/new.jsonl", Offset: 2, ArmedAt: time.Now()}
-	if err := WriteWatchdogLock(st, next, h.deps); err != nil {
-		t.Fatalf("WriteWatchdogLock() error = %v", err)
-	}
-
-	killed := h.proc.killedPIDs()
-	if len(killed) != 1 || killed[0] != 555 {
-		t.Errorf("killed = %v, want [555]", killed)
-	}
-}
-
-// TestWriteWatchdogLock_RecycledPriorOwnerPID_SkipsKill covers s3's
-// "recycled PID" case: a process is alive at the prior lock's PID, but its
-// current start ticks differ from what was recorded — it is not the
-// process that wrote the lock, so Kill must not be sent to it. The lock is
-// still overwritten with the new owner.
-func TestWriteWatchdogLock_RecycledPriorOwnerPID_SkipsKill(t *testing.T) {
-	dir := t.TempDir()
-	st := SessionState{Dir: dir}
-	h := newTestHarness(time.Now(), -1, nil)
-
-	prior := WatchdogLock{
-		PID: 555, ParentPID: 222, Transcript: "/tmp/old.jsonl", Offset: 1, ArmedAt: time.Now(), StartTicks: 111,
-	}
-	writeLock(t, st, prior)
-	h.proc.alive[555] = true
-	h.startTicks.set(555, 222) // a different process now holds PID 555
-
-	next := WatchdogLock{PID: 666, ParentPID: 222, Transcript: "/tmp/new.jsonl", Offset: 2, ArmedAt: time.Now()}
-	if err := WriteWatchdogLock(st, next, h.deps); err != nil {
-		t.Fatalf("WriteWatchdogLock() error = %v", err)
-	}
-
-	if killed := h.proc.killedPIDs(); len(killed) != 0 {
-		t.Errorf("killed = %v, want none (recycled PID must not be killed)", killed)
-	}
-
-	data, err := os.ReadFile(filepath.Join(dir, "watchdog.lock"))
-	if err != nil {
-		t.Fatalf("reading written lock: %v", err)
-	}
-	var got WatchdogLock
-	if unmarshalErr := json.Unmarshal(data, &got); unmarshalErr != nil {
-		t.Fatalf("unmarshaling written lock: %v", unmarshalErr)
-	}
-	if got.PID != 666 {
-		t.Errorf("written lock PID = %d, want 666 (new owner, lock still overwritten)", got.PID)
-	}
-}
-
-// TestWriteWatchdogLock_PopulatesStartTicksFromDeps proves the arming side
-// of s3: a written lock whose StartTicks was zero gets it filled in from
-// deps.ProcStartTicks, so a later Kill of that PID has a fingerprint to
-// check against.
-func TestWriteWatchdogLock_PopulatesStartTicksFromDeps(t *testing.T) {
-	dir := t.TempDir()
-	st := SessionState{Dir: dir}
-	h := newTestHarness(time.Now(), -1, nil)
-	h.startTicks.set(666, 123456)
-
-	next := WatchdogLock{PID: 666, ParentPID: 222, Transcript: "/tmp/new.jsonl", Offset: 2, ArmedAt: time.Now()}
-	if err := WriteWatchdogLock(st, next, h.deps); err != nil {
-		t.Fatalf("WriteWatchdogLock() error = %v", err)
-	}
-
-	data, err := os.ReadFile(filepath.Join(dir, "watchdog.lock"))
-	if err != nil {
-		t.Fatalf("reading written lock: %v", err)
-	}
-	var got WatchdogLock
-	if unmarshalErr := json.Unmarshal(data, &got); unmarshalErr != nil {
-		t.Fatalf("unmarshaling written lock: %v", unmarshalErr)
-	}
-	if got.StartTicks != 123456 {
-		t.Errorf("written lock StartTicks = %d, want 123456", got.StartTicks)
-	}
-}
-
-// TestWriteWatchdogLock_PreservesExplicitStartTicks proves WriteWatchdogLock
-// only populates StartTicks "when the field is zero": a caller-supplied
-// nonzero value is left alone even if deps.ProcStartTicks would report
-// something else.
-func TestWriteWatchdogLock_PreservesExplicitStartTicks(t *testing.T) {
-	dir := t.TempDir()
-	st := SessionState{Dir: dir}
-	h := newTestHarness(time.Now(), -1, nil)
-	h.startTicks.set(666, 999999)
-
-	next := WatchdogLock{
-		PID: 666, ParentPID: 222, Transcript: "/tmp/new.jsonl", Offset: 2, ArmedAt: time.Now(), StartTicks: 42,
-	}
-	if err := WriteWatchdogLock(st, next, h.deps); err != nil {
-		t.Fatalf("WriteWatchdogLock() error = %v", err)
-	}
-
-	data, err := os.ReadFile(filepath.Join(dir, "watchdog.lock"))
-	if err != nil {
-		t.Fatalf("reading written lock: %v", err)
-	}
-	var got WatchdogLock
-	if unmarshalErr := json.Unmarshal(data, &got); unmarshalErr != nil {
-		t.Fatalf("unmarshaling written lock: %v", unmarshalErr)
-	}
-	if got.StartTicks != 42 {
-		t.Errorf("written lock StartTicks = %d, want 42 (explicit value preserved)", got.StartTicks)
-	}
-}
-
-func TestWriteWatchdogLock_NeverKillsDeadPriorOwner(t *testing.T) {
-	dir := t.TempDir()
-	st := SessionState{Dir: dir}
-	h := newTestHarness(time.Now(), -1, nil)
-
-	prior := WatchdogLock{PID: 555, ParentPID: 222, Transcript: "/tmp/old.jsonl", Offset: 1, ArmedAt: time.Now()}
-	writeLock(t, st, prior)
-	h.proc.alive[555] = false // dead
-
-	next := WatchdogLock{PID: 666, ParentPID: 222, Transcript: "/tmp/new.jsonl", Offset: 2, ArmedAt: time.Now()}
-	if err := WriteWatchdogLock(st, next, h.deps); err != nil {
-		t.Fatalf("WriteWatchdogLock() error = %v", err)
-	}
-
-	if killed := h.proc.killedPIDs(); len(killed) != 0 {
-		t.Errorf("killed = %v, want none (prior owner was dead)", killed)
-	}
-}
-
-func TestReapWatchdog_NoLock_Succeeds(t *testing.T) {
-	dir := t.TempDir()
-	st := SessionState{Dir: dir}
-	h := newTestHarness(time.Now(), -1, nil)
-
-	if err := ReapWatchdog(st, h.deps); err != nil {
-		t.Errorf("ReapWatchdog() error = %v, want nil", err)
-	}
-}
-
-// TestReapWatchdog_KillsAliveOwnerAndRemovesLock_IdempotentTwice also
-// exercises s3's dep-unavailable fallback (see the analogous comment on
-// TestWriteWatchdogLock_KillsLivePriorOwner): h.startTicks never gets a
-// set() call for PID 777, so Kill falls back to the plain probe.
-func TestReapWatchdog_KillsAliveOwnerAndRemovesLock_IdempotentTwice(t *testing.T) {
-	dir := t.TempDir()
-	st := SessionState{Dir: dir}
-	h := newTestHarness(time.Now(), -1, nil)
-
-	lk := WatchdogLock{PID: 777, ParentPID: 222, Transcript: "/tmp/t.jsonl", Offset: 1, ArmedAt: time.Now()}
-	writeLock(t, st, lk)
-	h.proc.alive[777] = true
-
-	if err := ReapWatchdog(st, h.deps); err != nil {
-		t.Fatalf("ReapWatchdog() first call error = %v", err)
-	}
-	if killed := h.proc.killedPIDs(); len(killed) != 1 || killed[0] != 777 {
-		t.Errorf("killed = %v, want [777]", killed)
-	}
-	if lockExists(st) {
-		t.Error("lockfile still exists after ReapWatchdog")
-	}
-
-	// Idempotent: calling again on the now-lockless dir is still a success,
-	// and does not attempt to kill anything again.
-	if err := ReapWatchdog(st, h.deps); err != nil {
-		t.Fatalf("ReapWatchdog() second call error = %v", err)
-	}
-	if killed := h.proc.killedPIDs(); len(killed) != 1 {
-		t.Errorf("killed after second Reap = %v, want still just [777]", killed)
-	}
-}
-
-// TestReapWatchdog_MatchingStartTicks_KillsOwner covers s3's "matching
-// ticks" case for ReapWatchdog: the lock's StartTicks matches what
-// ProcStartTicks reports for that PID right now, so Kill proceeds.
-func TestReapWatchdog_MatchingStartTicks_KillsOwner(t *testing.T) {
-	dir := t.TempDir()
-	st := SessionState{Dir: dir}
-	h := newTestHarness(time.Now(), -1, nil)
-
-	lk := WatchdogLock{
-		PID: 777, ParentPID: 222, Transcript: "/tmp/t.jsonl", Offset: 1, ArmedAt: time.Now(), StartTicks: 111,
-	}
-	writeLock(t, st, lk)
-	h.proc.alive[777] = true
-	h.startTicks.set(777, 111)
-
-	if err := ReapWatchdog(st, h.deps); err != nil {
-		t.Fatalf("ReapWatchdog() error = %v", err)
-	}
-	if killed := h.proc.killedPIDs(); len(killed) != 1 || killed[0] != 777 {
-		t.Errorf("killed = %v, want [777]", killed)
-	}
-	if lockExists(st) {
-		t.Error("lockfile still exists after ReapWatchdog")
-	}
-}
-
-// TestReapWatchdog_RecycledOwnerPID_SkipsKillButRemovesLock covers s3's
-// "recycled PID" case for ReapWatchdog: a live process sits at the lock's
-// PID, but its start ticks don't match what was recorded, so it is not the
-// process that wrote the lock and must not be killed. The lockfile is still
-// removed (ReapWatchdog's unconditional cleanup).
-func TestReapWatchdog_RecycledOwnerPID_SkipsKillButRemovesLock(t *testing.T) {
-	dir := t.TempDir()
-	st := SessionState{Dir: dir}
-	h := newTestHarness(time.Now(), -1, nil)
-
-	lk := WatchdogLock{
-		PID: 777, ParentPID: 222, Transcript: "/tmp/t.jsonl", Offset: 1, ArmedAt: time.Now(), StartTicks: 111,
-	}
-	writeLock(t, st, lk)
-	h.proc.alive[777] = true
-	h.startTicks.set(777, 999) // a different process now holds PID 777
-
-	if err := ReapWatchdog(st, h.deps); err != nil {
-		t.Fatalf("ReapWatchdog() error = %v", err)
-	}
-	if killed := h.proc.killedPIDs(); len(killed) != 0 {
-		t.Errorf("killed = %v, want none (recycled PID must not be killed)", killed)
-	}
-	if lockExists(st) {
-		t.Error("lockfile still exists after ReapWatchdog on a recycled-PID owner")
-	}
-}
-
-func TestReapWatchdog_DeadOwner_RemovesLockNoKill(t *testing.T) {
-	dir := t.TempDir()
-	st := SessionState{Dir: dir}
-	h := newTestHarness(time.Now(), -1, nil)
-
-	lk := WatchdogLock{PID: 888, ParentPID: 222, Transcript: "/tmp/t.jsonl", Offset: 1, ArmedAt: time.Now()}
-	writeLock(t, st, lk)
-	h.proc.alive[888] = false
-
-	if err := ReapWatchdog(st, h.deps); err != nil {
-		t.Fatalf("ReapWatchdog() error = %v", err)
-	}
-	if killed := h.proc.killedPIDs(); len(killed) != 0 {
-		t.Errorf("killed = %v, want none", killed)
-	}
-	if lockExists(st) {
-		t.Error("lockfile still exists after ReapWatchdog on dead owner")
-	}
 }

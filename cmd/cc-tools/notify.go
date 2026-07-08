@@ -55,25 +55,14 @@ func runNotifyCommand() {
 	flags := flag.NewFlagSet("notify", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	dryRun := flags.Bool("dry-run", false, "print what would be sent instead of sending it")
-	recheck := flags.Bool("recheck", false, "run as a detached watchdog recheck instead of processing a hook payload")
-	session := flags.String("session", "", "session ID (required with --recheck)")
 	stateBase := flags.String("state-base", defaultNotifyStateBase(), "root directory for per-session notify state")
-	project := flags.String("project", "", "project name (used with --recheck)")
-	host := flags.String("host", "", "host name (used with --recheck)")
 	if err := flags.Parse(os.Args[2:]); err != nil {
 		os.Exit(exitUsageError)
 	}
 
 	log := notify.DecisionLog{Path: filepath.Join(*stateBase, decisionLogName)}
-	judgeModel := notify.ResolveJudgeModel(os.Environ(), notifyJudgeModel)
-	judge := notify.Judge{Bin: "claude", Model: judgeModel, Timeout: notifyJudgeTimeout}
 	sender, senderOK := notify.ResolveSenderEnv(os.Environ())
 	sender.Host = notify.ShortHostname()
-
-	if *recheck {
-		runNotifyRecheck(*session, *stateBase, *project, *host, judge, sender, log)
-		return
-	}
 
 	if !senderOK && !*dryRun {
 		_, _ = fmt.Fprintln(os.Stderr, "cc-tools notify: no ntfy URL configured, skipping")
@@ -116,14 +105,13 @@ type notifyClientConfig struct {
 	DialTimeout time.Duration
 }
 
-// dispatchNotify implements the hook client's primary (non-recheck) path:
-// parse the hook payload, try handing it to notifyd over the control
-// socket (fire-and-forget — see sendFrame), and fall back to running the
-// Pipeline inline, with the judge disabled, when the daemon is
-// unreachable. It always returns, never blocking past cfg.DialTimeout plus
-// whatever the fallback Pipeline itself takes — the hook's own exit-0
-// contract is the caller's responsibility (runNotifyCommand never exits
-// nonzero from this path).
+// dispatchNotify implements the hook client's primary path: parse the hook
+// payload, try handing it to notifyd over the control socket (fire-and-forget
+// — see sendFrame), and fall back to running the Pipeline inline, with the
+// judge disabled and no watchdog, when the daemon is unreachable. It always
+// returns, never blocking past cfg.DialTimeout plus whatever the fallback
+// Pipeline itself takes — the hook's own exit-0 contract is the caller's
+// responsibility (runNotifyCommand never exits nonzero from this path).
 func dispatchNotify(ctx context.Context, cfg notifyClientConfig, stdin io.Reader, stdout, stderr io.Writer) {
 	in, err := notify.ParseHookInput(stdin)
 	if err != nil {
@@ -132,7 +120,7 @@ func dispatchNotify(ctx context.Context, cfg notifyClientConfig, stdin io.Reader
 	}
 
 	workspace := notify.WorkspaceName(cfg.Environ, notify.RunCommand)
-	frame := notify.Frame{HookInput: in, Workspace: workspace, Environ: cfg.Environ}
+	frame := notify.Frame{HookInput: in, Workspace: workspace, Environ: cfg.Environ, ParentPID: os.Getppid()}
 	if sendFrame(ctx, cfg.SockPath, frame, cfg.DialTimeout) {
 		return
 	}
@@ -146,7 +134,11 @@ func dispatchNotify(ctx context.Context, cfg notifyClientConfig, stdin io.Reader
 		// NopState: notifyd holds the real dedupe state in memory now, so
 		// this single fallback invocation has no shared history to consult
 		// on disk — see NopState's doc comment for the reliability
-		// rationale (a duplicate ping beats a lost one).
+		// rationale (a duplicate ping beats a lost one). Watchdog is left
+		// nil (no field set below): this single invocation has no
+		// long-lived goroutine to arm one on, so it runs with no watchdog
+		// coverage — the documented degraded mode (see Watchdog's doc
+		// comment).
 		State:     notify.NopState{},
 		Environ:   cfg.Environ,
 		Stdout:    stdout,
@@ -176,24 +168,6 @@ func sendFrame(ctx context.Context, sockPath string, frame notify.Frame, timeout
 	defer func() { _ = conn.Close() }()
 
 	return notify.EncodeFrame(conn, frame) == nil
-}
-
-// runNotifyRecheck runs the detached watchdog loop for an already-armed
-// session. It requires --session; every other flag has a usable default or
-// is optional decoration for the decision log's DigestMeta.
-func runNotifyRecheck(
-	session, stateBase, project, host string, judge notify.Judge, sender notify.Sender, log notify.DecisionLog,
-) {
-	if session == "" {
-		_, _ = fmt.Fprintln(os.Stderr, "cc-tools notify --recheck: --session is required")
-		os.Exit(1)
-	}
-
-	state := notify.SessionState{Dir: filepath.Join(stateBase, session)}
-	meta := notify.DigestMeta{Project: project, Host: host, Event: "recheck"}
-	deps := notify.DefaultWatchdogDeps(judge, sender, log)
-
-	notify.RunWatchdog(context.Background(), state, meta, deps, session)
 }
 
 // defaultNotifyStateBase resolves the default notify state directory:

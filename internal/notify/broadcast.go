@@ -2,8 +2,6 @@ package notify
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -59,10 +57,6 @@ func claimWindowFor(notificationType string) time.Duration {
 	return broadcastClaimWindow
 }
 
-// broadcastClaimsDirName is the ledger directory inside StateBase, a
-// sibling of the per-session state directories.
-const broadcastClaimsDirName = "broadcast-claims"
-
 // The two broadcast notification types (see the package comment above):
 // harness-emitted, one per live session with agent view open.
 const (
@@ -117,71 +111,6 @@ func (p Pipeline) broadcastFacts(ctx context.Context, in HookInput, now time.Tim
 	key := in.NotificationType + "\n" + in.Message
 	facts.Duplicate = !p.dedupeState().ClaimBroadcast(ctx, key, claimWindowFor(in.NotificationType), now, p.DryRun)
 	return facts
-}
-
-// claimBroadcast atomically claims the broadcast identified by key and
-// reports whether this process won. The claim is a content-hash-named file
-// created with O_EXCL, so exactly one of N concurrent hook processes
-// succeeds; a claim older than window is stale (a previous, distinct event)
-// and is removed and re-claimed. dryRun observes without writing and wins
-// whenever no live claim exists.
-func claimBroadcast(stateBase, key string, window time.Duration, now time.Time, dryRun bool) bool {
-	sum := sha256.Sum256([]byte(key))
-	dir := filepath.Join(stateBase, broadcastClaimsDirName)
-	path := filepath.Join(dir, hex.EncodeToString(sum[:12]))
-
-	if dryRun {
-		fi, err := os.Stat(path)
-		return err != nil || now.Sub(fi.ModTime()) >= window
-	}
-
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		// Ledger unavailable: fail toward sending — a duplicate ping beats
-		// a lost one.
-		return true
-	}
-	sweepBroadcastClaims(dir, now)
-
-	for range 2 {
-		//nolint:gosec // path is a hash under our own state dir
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-		if err == nil {
-			_ = f.Close()
-			return true
-		}
-		fi, statErr := os.Stat(path)
-		if statErr != nil {
-			// The claim vanished between OpenFile and Stat (swept or
-			// removed by a peer); retry the create.
-			continue
-		}
-		if now.Sub(fi.ModTime()) < window {
-			return false
-		}
-		// Stale claim from an earlier event: remove and retry. If a peer
-		// races us to the re-create, the second loop iteration sees the
-		// fresh claim and yields.
-		_ = os.Remove(path)
-	}
-	return false
-}
-
-// sweepBroadcastClaims best-effort removes claim files older than
-// broadcastClaimTTL so the ledger directory stays a handful of entries.
-func sweepBroadcastClaims(dir string, now time.Time) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
-	for _, e := range entries {
-		info, infoErr := e.Info()
-		if infoErr != nil {
-			continue
-		}
-		if now.Sub(info.ModTime()) > broadcastClaimTTL {
-			_ = os.Remove(filepath.Join(dir, e.Name()))
-		}
-	}
 }
 
 // resolveBroadcastSource reports whether message belongs to a job running

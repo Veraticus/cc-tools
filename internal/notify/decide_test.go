@@ -29,12 +29,14 @@ func TestDecide(t *testing.T) {
 		},
 
 		// --- Gate 2: SessionEnd ---
+		// Watchdog reaping on SessionEnd is Pipeline.Run's own concern (see
+		// decide.go's SessionEnd case) — Decide itself just resolves silent.
 		{
-			name: "session end reaps watchdog",
+			name: "session end is silent",
 			in:   HookInput{HookEventName: "SessionEnd"},
 			scan: ScanResult{},
 			env:  Env{},
-			want: Decision{Outcome: OutcomeSilent, Reason: "session end", ReapWatchdog: true},
+			want: Decision{Outcome: OutcomeSilent, Reason: "session end"},
 		},
 
 		// --- Gate 3: Stop ---

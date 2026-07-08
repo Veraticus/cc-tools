@@ -55,9 +55,9 @@ import (
 const blockDecisionJSON = `"decision":"block"`
 
 // runCorpusStop drives one Stop hook invocation over fixture through a fresh
-// Pipeline built like newGoalTestPipeline (DryRun:false, real watchdog-arm
-// path), returning the accumulated stdout, the decision log path, and the
-// session's state dir for the caller to inspect.
+// Pipeline built like newGoalTestPipeline (DryRun:false; Watchdog left nil,
+// so any arm attempt no-ops), returning the accumulated stdout, the decision
+// log path, and the session's state dir for the caller to inspect.
 func runCorpusStop(
 	t *testing.T, stdout *bytes.Buffer, sent *[]capturedRequest, fixture, sessionID string,
 ) (string, string) {
@@ -108,8 +108,9 @@ func testActiveParkedTwoStops(t *testing.T, fixture, sessionID string) {
 	var sent []capturedRequest
 	p, logPath := newGoalTestPipeline(t, &stdout, stubBin, neverPresent)
 	p.Sender = stubSenderRecording(&sent)
+	wd := &fakeWatchdog{}
+	p.Watchdog = wd
 	transcript := copyFixture(t, fixture)
-	stateDir := filepath.Join(p.StateBase, sessionID)
 
 	for i := 1; i <= 2; i++ {
 		in := HookInput{
@@ -124,8 +125,8 @@ func testActiveParkedTwoStops(t *testing.T, fixture, sessionID string) {
 		if len(sent) != 0 {
 			t.Errorf("Run() #%d: sent = %+v, want no notification (silent defer)", i, sent)
 		}
-		if _, err := os.Stat(filepath.Join(stateDir, "watchdog.lock")); err != nil {
-			t.Errorf("Run() #%d: watchdog.lock missing, want armed: %v", i, err)
+		if len(wd.armed) != i {
+			t.Errorf("Run() #%d: armed count = %d, want %d", i, len(wd.armed), i)
 		}
 
 		recs := readDecisionLog(t, logPath)

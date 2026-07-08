@@ -36,146 +36,12 @@ func jsonString(s string) string {
 	return out + `"`
 }
 
-func TestClaimBroadcast_FirstClaimWinsSecondLoses(t *testing.T) {
-	base := t.TempDir()
-	now := time.Now()
-
-	if !claimBroadcast(base, "agent_needs_input\nmsg", broadcastClaimWindow, now, false) {
-		t.Fatal("first claim = false, want true")
-	}
-	if claimBroadcast(base, "agent_needs_input\nmsg", broadcastClaimWindow, now.Add(time.Second), false) {
-		t.Fatal("second claim within window = true, want false")
-	}
-}
-
-func TestClaimBroadcast_DistinctKeysBothWin(t *testing.T) {
-	base := t.TempDir()
-	now := time.Now()
-
-	if !claimBroadcast(base, "agent_needs_input\njob A asks", broadcastClaimWindow, now, false) {
-		t.Fatal("claim A = false, want true")
-	}
-	if !claimBroadcast(base, "agent_needs_input\njob B asks", broadcastClaimWindow, now, false) {
-		t.Fatal("claim B = false, want true")
-	}
-}
-
-func TestClaimBroadcast_StaleClaimIsReclaimed(t *testing.T) {
-	base := t.TempDir()
-	now := time.Now()
-
-	if !claimBroadcast(base, "k", broadcastClaimWindow, now, false) {
-		t.Fatal("initial claim = false, want true")
-	}
-	if !claimBroadcast(base, "k", broadcastClaimWindow, now.Add(broadcastClaimWindow+time.Second), false) {
-		t.Fatal("claim after window = false, want true (stale claim should be reclaimed)")
-	}
-}
-
-func TestClaimBroadcast_DryRunObservesWithoutWriting(t *testing.T) {
-	base := t.TempDir()
-	now := time.Now()
-
-	if !claimBroadcast(base, "k", broadcastClaimWindow, now, true) {
-		t.Fatal("dry-run claim with no live claim = false, want true")
-	}
-	// The dry run must not have written anything: a subsequent real claim
-	// still wins.
-	if !claimBroadcast(base, "k", broadcastClaimWindow, now, false) {
-		t.Fatal("real claim after dry run = false, want true (dry run must not write)")
-	}
-	// And a dry run against a live real claim reports the dedupe.
-	if claimBroadcast(base, "k", broadcastClaimWindow, now.Add(time.Second), true) {
-		t.Fatal("dry-run claim against live claim = true, want false")
-	}
-}
-
-func TestClaimBroadcast_AgentCompletedWindowOutlivesAgentNeedsInputWindow(t *testing.T) {
-	base := t.TempDir()
-	now := time.Now()
-
-	if !claimBroadcast(base, "agent_completed\nfinished", claimWindowFor(notifTypeAgentCompleted), now, false) {
-		t.Fatal("initial claim = false, want true")
-	}
-	// Past the agent_needs_input window (2m) but still well inside the
-	// agent_completed window (30m): a re-broadcast of the same "job
-	// finished" message must still be suppressed.
-	past := now.Add(broadcastClaimWindow + time.Minute)
-	if claimBroadcast(base, "agent_completed\nfinished", claimWindowFor(notifTypeAgentCompleted), past, false) {
-		t.Fatal("reclaim at 3m = true, want false (agent_completed window is 30m)")
-	}
-	// Past the agent_completed window: the claim is stale and reclaimed.
-	stale := now.Add(broadcastClaimWindowCompleted + time.Minute)
-	if !claimBroadcast(base, "agent_completed\nfinished", claimWindowFor(notifTypeAgentCompleted), stale, false) {
-		t.Fatal("reclaim past 30m = false, want true (stale claim should be reclaimed)")
-	}
-}
-
 func TestClaimWindowFor_PerNotificationType(t *testing.T) {
 	if got := claimWindowFor(notifTypeAgentCompleted); got != broadcastClaimWindowCompleted {
 		t.Errorf("claimWindowFor(agent_completed) = %v, want %v", got, broadcastClaimWindowCompleted)
 	}
 	if got := claimWindowFor(notifTypeAgentNeedsInput); got != broadcastClaimWindow {
 		t.Errorf("claimWindowFor(agent_needs_input) = %v, want %v", got, broadcastClaimWindow)
-	}
-}
-
-func TestSweepBroadcastClaims_NeverRemovesLiveAgentCompletedClaim(t *testing.T) {
-	base := t.TempDir()
-	now := time.Now()
-
-	if !claimBroadcast(base, "agent_completed\nfinished", claimWindowFor(notifTypeAgentCompleted), now, false) {
-		t.Fatal("claiming: want true")
-	}
-	dir := filepath.Join(base, broadcastClaimsDirName)
-	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) != 1 {
-		t.Fatalf("claims dir entries = %d (%v), want 1", len(entries), err)
-	}
-	claim := filepath.Join(dir, entries[0].Name())
-	// Backdate the claim to 20 minutes old: within the 30m agent_completed
-	// window but past a naive TTL, to prove the sweep TTL itself (not just
-	// the claim-window check) respects the longer window.
-	past := now.Add(-20 * time.Minute)
-	if chErr := os.Chtimes(claim, past, past); chErr != nil {
-		t.Fatalf("backdating claim: %v", chErr)
-	}
-
-	sweepBroadcastClaims(dir, now)
-
-	if _, statErr := os.Stat(claim); statErr != nil {
-		t.Fatalf("live agent_completed claim was swept early: %v", statErr)
-	}
-}
-
-func TestSweepBroadcastClaims_RemovesOnlyExpired(t *testing.T) {
-	base := t.TempDir()
-	now := time.Now()
-
-	if !claimBroadcast(base, "old", broadcastClaimWindow, now, false) {
-		t.Fatal("claiming old: want true")
-	}
-	dir := filepath.Join(base, broadcastClaimsDirName)
-	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) != 1 {
-		t.Fatalf("claims dir entries = %d (%v), want 1", len(entries), err)
-	}
-	stale := filepath.Join(dir, entries[0].Name())
-	past := now.Add(-broadcastClaimTTL - time.Minute)
-	if chErr := os.Chtimes(stale, past, past); chErr != nil {
-		t.Fatalf("backdating claim: %v", chErr)
-	}
-
-	// A fresh claim's sweep removes the expired one and keeps itself.
-	if !claimBroadcast(base, "new", broadcastClaimWindow, now, false) {
-		t.Fatal("claiming new: want true")
-	}
-	entries, err = os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("rereading claims dir: %v", err)
-	}
-	if len(entries) != 1 {
-		t.Fatalf("claims dir entries after sweep = %d, want 1 (expired claim swept)", len(entries))
 	}
 }
 
@@ -242,22 +108,43 @@ func TestBroadcastFacts_NonBroadcastEventsAreNil(t *testing.T) {
 	}
 }
 
+// claimBroadcastSpy is a DedupeState whose other methods report "never
+// notified" and whose ClaimBroadcast records whether it was ever called —
+// used to assert that a resolved-local broadcast never reaches the shared
+// claim ledger at all (see TestBroadcastFacts_LocalJobDoesNotWriteClaim).
+type claimBroadcastSpy struct {
+	called *bool
+}
+
+func (claimBroadcastSpy) SinceLastNotify(context.Context, string, time.Time) time.Duration {
+	return neverNotifiedDuration
+}
+
+func (claimBroadcastSpy) SinceLastNotifySame(context.Context, string, time.Time, string) time.Duration {
+	return neverNotifiedDuration
+}
+
+func (claimBroadcastSpy) MarkNotified(context.Context, string, time.Time, string) error { return nil }
+
+func (s claimBroadcastSpy) ClaimBroadcast(context.Context, string, time.Duration, time.Time, bool) bool {
+	*s.called = true
+	return true
+}
+
 // TestBroadcastFacts_LocalJobDefersRegardlessOfSourceSendTiming replaces the
 // deleted broadcastCoveredWindow heuristic's coverage: ownership of a
 // broadcast that resolves to a local job is structural, not a function of
-// when (or whether) the source session has sent its own notification yet.
-// This is the epic's 18s-judge-race scenario: a source session can still be
-// composing its own richer ping when the broadcast lands, and the receiver
-// must defer anyway, trusting the source's fail-open-to-send guarantee.
+// when (or whether) the source session has sent its own notification yet —
+// broadcastFacts never even consults dedupe state on the Local path (see
+// TestBroadcastFacts_LocalJobDoesNotWriteClaim), so there is nothing left to
+// seed here; this just pins that every notifyType still resolves Local.
 func TestBroadcastFacts_LocalJobDefersRegardlessOfSourceSendTiming(t *testing.T) {
 	tests := []struct {
-		name           string
-		notifyType     string
-		markSourceSent bool
+		name       string
+		notifyType string
 	}{
-		{name: "source sent moments ago", notifyType: "agent_needs_input", markSourceSent: true},
-		{name: "source never sent", notifyType: "agent_needs_input", markSourceSent: false},
-		{name: "agent_completed, source never sent", notifyType: "agent_completed", markSourceSent: false},
+		{name: "agent_needs_input", notifyType: "agent_needs_input"},
+		{name: "agent_completed", notifyType: "agent_completed"},
 	}
 
 	for _, tt := range tests {
@@ -266,13 +153,6 @@ func TestBroadcastFacts_LocalJobDefersRegardlessOfSourceSendTiming(t *testing.T)
 			cfg := t.TempDir()
 			now := time.Now()
 			writeJobState(t, cfg, "job00001", "deploy the widget", "job-session-id", "/projects/widget")
-
-			if tt.markSourceSent {
-				source := SessionState{Dir: filepath.Join(base, "job-session-id")}
-				if err := source.MarkNotified(now.Add(-2*time.Second), "deploying now"); err != nil {
-					t.Fatalf("marking source session notified: %v", err)
-				}
-			}
 
 			p := Pipeline{StateBase: base, Environ: []string{"CLAUDE_CONFIG_DIR=" + cfg}}
 			in := HookInput{
@@ -303,7 +183,10 @@ func TestBroadcastFacts_LocalJobDoesNotWriteClaim(t *testing.T) {
 	now := time.Now()
 	writeJobState(t, cfg, "job00001", "deploy the widget", "job-session-id", "/projects/widget")
 
-	p := Pipeline{StateBase: base, Environ: []string{"CLAUDE_CONFIG_DIR=" + cfg}}
+	var claimed bool
+	p := Pipeline{
+		StateBase: base, Environ: []string{"CLAUDE_CONFIG_DIR=" + cfg}, State: claimBroadcastSpy{called: &claimed},
+	}
 	in := HookInput{
 		HookEventName: "Notification", NotificationType: "agent_needs_input",
 		Message: "deploy the widget needs your input: proceed?",
@@ -312,10 +195,8 @@ func TestBroadcastFacts_LocalJobDoesNotWriteClaim(t *testing.T) {
 		t.Fatalf("broadcastFacts() = %+v, want Local", facts)
 	}
 
-	claimsDir := filepath.Join(base, broadcastClaimsDirName)
-	entries, err := os.ReadDir(claimsDir)
-	if err == nil && len(entries) != 0 {
-		t.Fatalf("claims dir entries = %d, want 0 (a local broadcast must not write a claim)", len(entries))
+	if claimed {
+		t.Error("ClaimBroadcast was called for a resolved-local broadcast, want it never reached")
 	}
 }
 
@@ -328,7 +209,7 @@ func TestBroadcastFacts_UnresolvedBroadcastStillUsesClaimPath(t *testing.T) {
 	cfg := t.TempDir()
 	now := time.Now()
 
-	p := Pipeline{StateBase: base, Environ: []string{"CLAUDE_CONFIG_DIR=" + cfg}}
+	p := Pipeline{StateBase: base, Environ: []string{"CLAUDE_CONFIG_DIR=" + cfg}, State: newMemDedupeState()}
 	in := HookInput{
 		HookEventName: "Notification", NotificationType: "agent_needs_input",
 		Message: "deploy the widget needs your input: proceed?",

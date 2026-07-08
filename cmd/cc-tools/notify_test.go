@@ -129,44 +129,48 @@ func TestDispatchNotify_UnreachableSocket_OutcomeSend_DeterministicFallback(t *t
 	}
 }
 
-// TestDispatchNotify_UnreachableSocket_NopState_IgnoresStaleFileDedupe pins
-// the fallback Pipeline's State: notify.NopState{} wiring: notifyd now
-// holds the real dedupe state in memory, so the client's inline fallback
-// must never consult on-disk state left over from some earlier daemon-side
-// (or pre-epic) run — a duplicate ping beats a lost one. It seeds a
-// session state dir with a last-notify file recording the *same* message
-// this event carries, moments ago: under the old file-based fallback that
-// dedupe.go SinceLastNotifySame gate would have silenced this as an
-// identical repeat within blockedRepeatWindow. With NopState, the fallback
-// must still send.
-func TestDispatchNotify_UnreachableSocket_NopState_IgnoresStaleFileDedupe(t *testing.T) {
+// TestDispatchNotify_UnreachableSocket_GoalActive_NoWatchdogArmAttempt pins
+// the client fallback's degraded mode: its inline Pipeline sets no Watchdog,
+// so an ArmWatchdog decision (a goal-active Stop, here) must resolve exactly
+// as it always has — logged with the same Reason, no panic — with no
+// watchdog coverage attempted, since a single hook invocation has no
+// long-lived goroutine to arm one on.
+func TestDispatchNotify_UnreachableSocket_GoalActive_NoWatchdogArmAttempt(t *testing.T) {
 	sockPath := filepath.Join(t.TempDir(), "no-daemon-here.sock")
 	cfg := testNotifyClientConfig(t, sockPath)
+	cfg.DryRun = false
 
-	const sessionID = "sess-nopstate"
-	const message = "May I run rm?"
-	state := notify.SessionState{Dir: filepath.Join(cfg.StateBase, sessionID)}
-	if err := state.MarkNotified(time.Now(), message); err != nil {
-		t.Fatalf("seeding stale file-based state: %v", err)
+	transcriptPath := filepath.Join(t.TempDir(), "goal_active.jsonl")
+	goalActiveLine := `{"parentUuid":"00000000-0000-0000-0000-000000000020","isSidechain":false,` +
+		`"type":"attachment","uuid":"00000000-0000-0000-0000-000000000021",` +
+		`"timestamp":"2026-05-25T17:45:43.950Z","attachment":{"type":"goal_status","met":false,` +
+		`"sentinel":true,"condition":"keep going"},"userType":"external","entrypoint":"cli",` +
+		`"cwd":"/home/user/project","sessionId":"anon-session-0002","version":"2.1.150","gitBranch":"main"}` + "\n"
+	if err := os.WriteFile(transcriptPath, []byte(goalActiveLine), 0o600); err != nil {
+		t.Fatalf("writing transcript: %v", err)
 	}
 
 	stdin := strings.NewReader(
-		`{"session_id":"` + sessionID + `","cwd":"/home/user/proj","hook_event_name":"Notification",` +
-			`"notification_type":"permission_prompt","message":"` + message + `"}`,
+		`{"session_id":"sess-goalactive","cwd":"/home/user/project","hook_event_name":"Stop",` +
+			`"transcript_path":"` + transcriptPath + `"}`,
 	)
 	var stdout, stderr bytes.Buffer
 
+	// Must not panic: Pipeline.Watchdog is nil in the fallback.
 	dispatchNotify(context.Background(), cfg, stdin, &stdout, &stderr)
 
-	if !strings.Contains(stdout.String(), "[blocked]") {
-		t.Errorf(
-			"stdout = %q, want a blocked-urgency send despite the fresh file-based dedupe state "+
-				"(fallback must use NopState, not consult the file)",
-			stdout.String(),
-		)
+	data, err := os.ReadFile(cfg.Log.Path)
+	if err != nil {
+		t.Fatalf("reading decision log: %v", err)
 	}
-	if !strings.Contains(stdout.String(), message) {
-		t.Errorf("stdout = %q, want it to contain the message", stdout.String())
+	logLine := string(data)
+	if !strings.Contains(logLine, "goal active") {
+		t.Errorf("decision log = %q, want it to mention the goal-active defer", logLine)
+	}
+	if strings.Contains(logLine, "arm failed") {
+		t.Errorf(
+			"decision log = %q, want no arm-failed record (arm is a nil-Watchdog no-op, not a failure)", logLine,
+		)
 	}
 }
 

@@ -17,6 +17,11 @@ type Frame struct {
 	HookInput HookInput `json:"hook_input"`
 	Workspace string    `json:"workspace"`
 	Environ   []string  `json:"environ"`
+	// ParentPID is the claude process that invoked the hook (os.Getppid() at
+	// the client), forwarded so an armed watchdog's dead-session probe works
+	// from the daemon, which has no parent-process relationship of its own
+	// to the session.
+	ParentPID int `json:"parent_pid"`
 }
 
 // EncodeFrame writes f to w as a single JSON object. The client sends

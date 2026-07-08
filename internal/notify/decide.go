@@ -99,8 +99,6 @@ type Decision struct {
 	// outcome is silence and there is live/active work (goal active or
 	// pending tasks) to keep checking on.
 	ArmWatchdog bool
-	// ReapWatchdog is true on SessionEnd: kill this session's watchdog.
-	ReapWatchdog bool
 }
 
 // Env carries environment facts the caller computed, since Decide itself
@@ -114,7 +112,7 @@ type Env struct {
 	// SinceLastNotifySame is how long ago this session last sent the
 	// current Notification event's message verbatim (negative when never,
 	// or the last send differed) — computed by the pipeline via
-	// SessionState.SinceLastNotifySame against the raw incoming message.
+	// DedupeState.SinceLastNotifySame against the raw incoming message.
 	// Consumed by the blocked-tier identical-repeat gates.
 	SinceLastNotifySame time.Duration
 	Broadcast           *BroadcastFacts
@@ -134,7 +132,11 @@ func Decide(in HookInput, scan ScanResult, env Env) Decision {
 
 	switch in.HookEventName {
 	case "SessionEnd":
-		return Decision{Outcome: OutcomeSilent, Reason: "session end", ReapWatchdog: true}
+		// Watchdog reaping on SessionEnd is Pipeline.Run's own concern (it
+		// intercepts SessionEnd and calls Watchdog.Reap before Decide is ever
+		// reached) — this case exists only so Decide, called directly, still
+		// resolves SessionEnd to a sensible silent decision.
+		return Decision{Outcome: OutcomeSilent, Reason: "session end"}
 	case "Stop":
 		return decideStop(scan, env)
 	case eventNotification:

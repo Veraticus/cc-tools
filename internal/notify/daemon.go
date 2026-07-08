@@ -29,12 +29,13 @@ const connReadDeadline = 5 * time.Second
 // every access to its in-memory dedupe state through a single event-loop
 // goroutine (see Serve/loop). Pipeline is a template: StateBase, DryRun,
 // Judge, Sender, Log, SelfBin, Host, and Present are the daemon's own fixed
-// config, resolved once at startup — Environ and Workspace are overwritten
-// per connection from the client's Frame, since those carry the hook
-// invocation's own process context (see Frame's doc comment) that the
-// daemon's single long-lived environment cannot supply. Pipeline.State is
-// also overwritten per connection, with a loopState bound to the loop's
-// channel — any State the caller sets on the template is discarded.
+// config, resolved once at startup — Environ, Workspace, and ParentPID are
+// overwritten per connection from the client's Frame, since those carry the
+// hook invocation's own process context (see Frame's doc comment) that the
+// daemon's single long-lived environment cannot supply. Pipeline.State and
+// Pipeline.Watchdog are also overwritten per connection, bound to the loop's
+// channel (loopState and daemonWatchdog respectively) — any State or
+// Watchdog the caller sets on the template is discarded.
 type Daemon struct {
 	Pipeline Pipeline
 	// Logger receives malformed-frame and per-connection diagnostics. A nil
@@ -43,13 +44,16 @@ type Daemon struct {
 }
 
 // loopMsg is the sum type flowing through the event loop's single channel:
-// either a newly accepted connection's frame, ready to start a Pipeline
-// run, or a state operation queued by some Pipeline run (already off the
-// loop, in its own goroutine) that needs to read or write the daemon's
-// in-memory dedupe state. Exactly one of frame/op is set.
+// a newly accepted connection's frame, ready to start a Pipeline run; a
+// state operation queued by some Pipeline run (already off the loop, in its
+// own goroutine) that needs to read or write the daemon's in-memory dedupe
+// state; or a watchdog operation touching the loop's watchdog registry
+// (arming, reaping, or a watchdog goroutine's own exit cleanup). Exactly one
+// of frame/op/watchdogOp is set.
 type loopMsg struct {
-	frame *Frame
-	op    func(*MemoryState)
+	frame      *Frame
+	op         func(*MemoryState)
+	watchdogOp func(*watchdogRegistry)
 }
 
 // Serve accepts connections on ln until ctx is canceled. Each connection is
@@ -89,13 +93,17 @@ func (d Daemon) Serve(ctx context.Context, ln net.Listener) error {
 }
 
 // loop is the daemon's single event-loop goroutine: the sole owner of the
-// MemoryState it constructs, and the only goroutine ever allowed to touch
-// it — see MemoryState's doc comment for why that means no mutex is
-// needed. It drains ch until ctx is canceled, handling each loopMsg
-// synchronously: a frame starts a new Pipeline run (in its own goroutine,
-// off the loop); a state op is applied to mem and returns immediately (a
-// map read/write, never I/O), so the loop is never blocked waiting on a
-// judge call, a notification send, or another frame's Pipeline run.
+// MemoryState it constructs and of reg, its watchdog registry — and the only
+// goroutine ever allowed to touch either, so neither needs a mutex (see
+// MemoryState's doc comment). It drains ch until ctx is canceled, handling
+// each loopMsg synchronously: a frame starts a new Pipeline run (in its own
+// goroutine, off the loop); a state op is applied to mem and returns
+// immediately (a map read/write, never I/O); a watchdogOp is applied to reg
+// the same way — arming/reaping cancels and updates an entry, and starting a
+// watchdog's own goroutine is a bare `go` statement, not a blocking call —
+// so the loop is never blocked waiting on a judge call, a notification send,
+// or another frame's Pipeline run. On ctx cancellation (daemon shutdown),
+// every still-live watchdog is canceled before the loop returns.
 //
 // Same-session races: while one frame's judge call for session S is in
 // flight (off-loop), a second frame for S can arrive and be dispatched
@@ -108,15 +116,22 @@ func (d Daemon) Serve(ctx context.Context, ln net.Listener) error {
 // the same session.
 func (d Daemon) loop(ctx context.Context, ch chan loopMsg) {
 	mem := NewMemoryState()
+	reg := &watchdogRegistry{entries: make(map[string]watchdogEntry)}
 	for {
 		select {
 		case <-ctx.Done():
+			for _, e := range reg.entries {
+				e.cancel()
+			}
 			return
 		case msg := <-ch:
-			if msg.frame != nil {
+			switch {
+			case msg.frame != nil:
 				d.runFrame(ctx, *msg.frame, ch)
-			} else {
+			case msg.op != nil:
 				msg.op(mem)
+			case msg.watchdogOp != nil:
+				msg.watchdogOp(reg)
 			}
 		}
 	}
@@ -133,7 +148,11 @@ func (d Daemon) runFrame(ctx context.Context, frame Frame, ch chan<- loopMsg) {
 	p := d.Pipeline
 	p.Environ = frame.Environ
 	p.Workspace = frame.Workspace
+	p.ParentPID = frame.ParentPID
 	p.State = loopState{ch: ch}
+	p.Watchdog = daemonWatchdog{
+		ch: ch, done: ctx.Done(), judge: p.Judge, sender: p.Sender, log: p.Log,
+	}
 
 	go func() {
 		if runErr := p.Run(ctx, frame.HookInput); runErr != nil {
@@ -216,6 +235,140 @@ func (l loopState) ClaimBroadcast(
 	var won bool
 	l.call(ctx, func(m *MemoryState) { won = m.ClaimBroadcast(key, window, now, dryRun) })
 	return won
+}
+
+// watchdogEntry is one session's live watchdog registration in the loop's
+// registry (see watchdogRegistry): cancel stops its goroutine, on Reap or on
+// supersession by a later Arm. gen distinguishes this registration from a
+// later one for the same session, so the goroutine's own exit-cleanup op
+// (see cleanupWatchdog) only removes itself from the map if nothing has
+// since re-armed the session — otherwise it would delete the newer entry a
+// superseding Arm just installed.
+type watchdogEntry struct {
+	cancel context.CancelFunc
+	gen    uint64
+}
+
+// watchdogRegistry is Daemon.loop's watchdog bookkeeping, loop-confined like
+// the MemoryState it sits alongside: entries maps each live session to its
+// current watchdogEntry, and nextGen assigns every Arm a generation number
+// unique for the loop's entire lifetime — never derived from (and so never
+// reset by) a map entry, which Reap or a watchdog's own exit can delete out
+// from under it. Deriving gen from the entry itself (old.gen + 1) was
+// previously incorrect: Reap-then-re-Arm restarts at gen 1 with no entry to
+// derive from, so the reaped watchdog's delayed exit-cleanup op (captured
+// gen 1) could match the successor's freshly-registered gen 1 and delete
+// it — leaking a live watchdog past the shutdown-cancel branch and
+// permitting two concurrent watchdogs for one session. A counter that only
+// ever increases closes that: no later Arm can ever reuse an earlier one's
+// generation, deleted entry or not.
+type watchdogRegistry struct {
+	entries map[string]watchdogEntry
+	nextGen uint64
+}
+
+// daemonWatchdog is Pipeline.Watchdog's daemon-side implementation. Arm and
+// Reap each queue a closure onto the event loop's channel, so the
+// loop-confined cancel map in Daemon.loop is only ever touched by the loop
+// goroutine itself — the same discipline MemoryState relies on. done is
+// ctx.Done() rather than a stored context.Context: a struct field can't hold
+// a context.Context (see loopState, which has the same constraint), and a
+// bare receive-only channel gives Arm/Reap the same shutdown-aware,
+// non-blocking-forever send loopState.call already relies on.
+type daemonWatchdog struct {
+	ch     chan<- loopMsg
+	done   <-chan struct{}
+	judge  Judge
+	sender Sender
+	log    DecisionLog
+}
+
+// Arm implements Watchdog: it queues armWatchdog onto the loop.
+func (w daemonWatchdog) Arm(req WatchdogArmRequest) {
+	select {
+	case w.ch <- loopMsg{watchdogOp: func(reg *watchdogRegistry) {
+		armWatchdog(reg, req, w)
+	}}:
+	case <-w.done:
+	}
+}
+
+// Reap implements Watchdog: it queues a closure that cancels and removes
+// sessionID's watchdog entry, if one exists. Idempotent: no entry is a
+// no-op.
+func (w daemonWatchdog) Reap(sessionID string) {
+	select {
+	case w.ch <- loopMsg{watchdogOp: func(reg *watchdogRegistry) {
+		if e, ok := reg.entries[sessionID]; ok {
+			e.cancel()
+			delete(reg.entries, sessionID)
+		}
+	}}:
+	case <-w.done:
+	}
+}
+
+// armWatchdog is loop-confined: called only from the watchdogOp Arm queues,
+// so it is the loop goroutine itself that ever touches reg. It cancels any
+// existing watchdog for req.SessionID (supersession), then starts exactly
+// one new watchdog goroutine running RunWatchdog against a fresh, standalone
+// cancelable context — standalone rather than a child of the daemon's own
+// ctx, since Daemon.loop's shutdown branch already cancels every entry
+// directly when its ctx is done, achieving the same effect without
+// daemonWatchdog needing to store that ctx (see its doc comment). gen comes
+// from reg.nextGen, not the entry being replaced — see watchdogRegistry's
+// doc comment for why that distinction is load-bearing.
+func armWatchdog(reg *watchdogRegistry, req WatchdogArmRequest, w daemonWatchdog) {
+	if old, existed := reg.entries[req.SessionID]; existed {
+		old.cancel()
+	}
+	reg.nextGen++
+	gen := reg.nextGen
+	wctx, cancel := context.WithCancel(context.Background())
+	reg.entries[req.SessionID] = watchdogEntry{cancel: cancel, gen: gen}
+
+	deps := DefaultWatchdogDeps(w.judge, w.sender, w.log)
+	deps.Send = watchdogSendWithDedupe(req.SessionID, deps, w.ch)
+
+	go func() {
+		RunWatchdog(wctx, req, deps)
+		select {
+		case w.ch <- loopMsg{watchdogOp: func(reg *watchdogRegistry) {
+			cleanupWatchdog(reg, req.SessionID, gen)
+		}}:
+		case <-w.done:
+		}
+	}()
+}
+
+// cleanupWatchdog is loop-confined, queued by a watchdog goroutine on its
+// own exit: it removes sessionID's entry from reg only if that entry's gen
+// still matches the generation this watchdog was armed with — otherwise a
+// later Arm has already superseded it, and removing the entry would delete
+// that (live) successor instead of this (now-exited) watchdog's own stale
+// registration. Factored out from armWatchdog's goroutine so a test can
+// drive this exact interleaving deterministically (see
+// TestArmWatchdog_ReapThenReArm_DelayedCleanupDoesNotDeleteSuccessor).
+func cleanupWatchdog(reg *watchdogRegistry, sessionID string, gen uint64) {
+	if cur, ok := reg.entries[sessionID]; ok && cur.gen == gen {
+		delete(reg.entries, sessionID)
+	}
+}
+
+// watchdogSendWithDedupe wraps deps.Send so a watchdog's one notification
+// also marks the session notified through the loop's own DedupeState
+// (loopState) — exactly as an ordinary hook invocation's send does — even
+// though the send itself happens off-loop, in the watchdog's own goroutine.
+func watchdogSendWithDedupe(
+	sessionID string, deps WatchdogDeps, ch chan<- loopMsg,
+) func(context.Context, Notification) error {
+	send, now := deps.Send, deps.Now
+	ds := loopState{ch: ch}
+	return func(ctx context.Context, n Notification) error {
+		err := send(ctx, n)
+		_ = ds.MarkNotified(ctx, sessionID, now(), n.Body)
+		return err
+	}
 }
 
 // handleConn decodes exactly one Frame off conn and hands it to the event
