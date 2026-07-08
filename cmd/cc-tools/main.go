@@ -59,6 +59,8 @@ func main() {
 		runPreviewCommand()
 	case "notify":
 		runNotifyCommand()
+	case "notifyd":
+		runNotifydCommand()
 	case "version":
 		// Print version to stdout as intended output
 		out.Raw(fmt.Sprintf("cc-tools %s\n", version))
@@ -87,6 +89,7 @@ Commands:
   subagent-statusline  Render per-row chip decorations for the claude agents view
   preview       Render every statusline/subagent-statusline scenario, labeled
   notify        Turn-aware hook notifier (Stop/Notification/SessionEnd)
+  notifyd       Long-running daemon that runs the notify pipeline over a control socket
   version       Print version information
   help          Show this help message
 
