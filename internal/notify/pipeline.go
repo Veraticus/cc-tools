@@ -47,6 +47,19 @@ type DedupeState interface {
 	SinceLastNotifySame(ctx context.Context, sessionID string, now time.Time, message string) time.Duration
 	// MarkNotified records t/message as sessionID's last notification.
 	MarkNotified(ctx context.Context, sessionID string, t time.Time, message string) error
+	// ClaimSend atomically resolves whether a send for sessionID may
+	// proceed at now — losing when the session already notified within
+	// window, winning (and recording now/message as the last notification
+	// in the same step) otherwise. Check and mark being one operation is
+	// the point: the pre-judge SinceLastNotify snapshot goes stale during
+	// the judge call, so two hook events racing through concurrent judge
+	// evaluations would otherwise both pass the gate and double-ping. The
+	// returned duration is how long before now the session last notified
+	// (negative when never), for the caller's decision-log reason. dryRun
+	// observes without recording.
+	ClaimSend(
+		ctx context.Context, sessionID string, now time.Time, message string, window time.Duration, dryRun bool,
+	) (bool, time.Duration)
 	// ClaimBroadcast atomically claims key for a window starting at now,
 	// reporting whether this call won; see MemoryState.ClaimBroadcast's
 	// first-claimant contract. dryRun observes without claiming.
@@ -80,10 +93,11 @@ type Pipeline struct {
 	Environ []string
 	Stdout  io.Writer
 	SelfBin string
-	// Workspace is the tmux session name this hook's pane lives in
-	// (WorkspaceName), or "" outside tmux — background jobs included.
-	// Notification titles use it as the where-to-go segment, falling back
-	// to Host.
+	// Workspace is the tmux locator (session:window-index, see
+	// WorkspaceName) this hook's pane lives in, or "" outside tmux —
+	// background jobs included. Notification titles use it as the
+	// where-to-go segment, falling back to Host; judged and watchdog
+	// bodies carry it as a locatorSuffix trailer.
 	Workspace string
 	// Host is the short hostname for titles and falls back to
 	// ShortHostname() when empty; tests inject a fixed value.
@@ -319,16 +333,83 @@ func (p Pipeline) handleComposeVerdict(
 		}
 		n = Notification{Title: project + " · " + locus, Body: body, Urgency: UrgencyDone}
 	}
+	n.Body += locatorSuffix(p.Workspace, host)
+
+	claim := judgedClaim{
+		in: in, res: res, now: now, project: project, host: host,
+		d: d, mode: JudgeModeCompose, jerr: jerr, digest: digest, judgeMs: judgeMs,
+		reasonSuffix: reasonSuffix + retriedWithoutModelSuffix(verdict.RetriedWithoutModel),
+	}
+	if !p.claimJudgedSend(ctx, claim, n.Body) {
+		return
+	}
 
 	sendSuffix := p.deliver(ctx, n)
-	if !p.DryRun {
-		_ = p.dedupeState().MarkNotified(ctx, in.SessionID, now, n.Body)
-	}
 	p.logJudged(
 		in, now, OutcomeSend.String(),
 		d.Reason+reasonSuffix+sendSuffix+retriedWithoutModelSuffix(verdict.RetriedWithoutModel),
 		n, JudgeModeCompose, jerr, digest, judgeMs,
 	)
+}
+
+// judgedClaim carries the context claimJudgedSend needs to log a suppressed
+// judged send and keep watchdog coverage on it — everything its handler
+// already had in scope, bundled because Go has no keyword arguments.
+type judgedClaim struct {
+	in            HookInput
+	res           ScanResult
+	now           time.Time
+	project, host string
+	d             Decision
+	mode          JudgeMode
+	jerr          error
+	digest        string
+	judgeMs       int64
+	reasonSuffix  string
+}
+
+// claimJudgedSend runs the pre-delivery ClaimSend gate shared by every
+// judged send path and reports whether the send may proceed. A lost claim
+// means some other send for this session landed within dedupeWindow — most
+// often while this evaluation's judge call was in flight (a racing hook
+// event or watchdog), which the pre-judge SinceLastNotify snapshot cannot
+// see. The suppression is logged as a silent outcome, and — exactly like the
+// pre-judge silent branches — still arms the watchdog when the decision
+// wanted one, so suppressing the ping never drops coverage of the live work
+// behind it.
+func (p Pipeline) claimJudgedSend(ctx context.Context, c judgedClaim, body string) bool {
+	won, since := p.dedupeState().ClaimSend(ctx, c.in.SessionID, c.now, body, dedupeWindow, p.DryRun)
+	if won {
+		return true
+	}
+
+	reason := fmt.Sprintf("dedupe: notified %s ago (post-judge)", humanDuration(since)) + c.reasonSuffix
+	if c.d.ArmWatchdog {
+		if p.DryRun {
+			reason += dryRunWouldArmWatchdogSuffix
+		} else {
+			p.arm(c.in, c.res, c.now, c.project, c.host)
+		}
+	}
+	p.logJudged(c.in, c.now, OutcomeSilent.String(), reason, Notification{}, c.mode, c.jerr, c.digest, c.judgeMs)
+	return false
+}
+
+// locatorSuffix renders the where-did-this-come-from trailer appended to
+// judged and watchdog notification bodies, whose titles carry the judge's
+// task label rather than a location: the tmux locator (session:window-index,
+// see WorkspaceName) plus the host, whichever of the two are known.
+func locatorSuffix(workspace, host string) string {
+	switch {
+	case workspace != "" && host != "":
+		return "\n\n— " + workspace + " @ " + host
+	case workspace != "":
+		return "\n\n— " + workspace
+	case host != "":
+		return "\n\n— " + host
+	default:
+		return ""
+	}
 }
 
 // failOpenSuppressed reports whether a compose/decide-mode judge error
@@ -397,10 +478,15 @@ func (p Pipeline) handleDecideVerdict(
 			body = "session has running background work"
 		}
 		n := Notification{Title: project + " · " + locus, Body: body, Urgency: UrgencyInfo}
-		sendSuffix := p.deliver(ctx, n)
-		if !p.DryRun {
-			_ = p.dedupeState().MarkNotified(ctx, in.SessionID, now, n.Body)
+		n.Body += locatorSuffix(p.Workspace, host)
+		claim := judgedClaim{
+			in: in, res: res, now: now, project: project, host: host,
+			d: d, mode: JudgeModeDecide, jerr: jerr, digest: digest, judgeMs: judgeMs, reasonSuffix: reasonSuffix,
 		}
+		if !p.claimJudgedSend(ctx, claim, n.Body) {
+			return
+		}
+		sendSuffix := p.deliver(ctx, n)
 		p.logJudged(
 			in, now, OutcomeSend.String(), d.Reason+reasonSuffix+sendSuffix, n, JudgeModeDecide, jerr, digest, judgeMs,
 		)
@@ -445,10 +531,16 @@ func (p Pipeline) handleDecideVerdict(
 	}
 
 	n := Notification{Title: project + " · " + verdict.Task, Body: verdict.Body, Urgency: verdict.Urgency}
-	sendSuffix := p.deliver(ctx, n)
-	if !p.DryRun {
-		_ = p.dedupeState().MarkNotified(ctx, in.SessionID, now, n.Body)
+	n.Body += locatorSuffix(p.Workspace, host)
+	claim := judgedClaim{
+		in: in, res: res, now: now, project: project, host: host,
+		d: d, mode: JudgeModeDecide, digest: digest, judgeMs: judgeMs,
+		reasonSuffix: reasonSuffix + retriedWithoutModelSuffix(verdict.RetriedWithoutModel),
 	}
+	if !p.claimJudgedSend(ctx, claim, n.Body) {
+		return
+	}
+	sendSuffix := p.deliver(ctx, n)
 	p.logJudged(
 		in, now, OutcomeSend.String(),
 		d.Reason+reasonSuffix+sendSuffix+retriedWithoutModelSuffix(verdict.RetriedWithoutModel),
@@ -485,6 +577,7 @@ func (p Pipeline) arm(in HookInput, res ScanResult, now time.Time, project, host
 		Transcript: in.TranscriptPath,
 		Offset:     res.BytesScanned,
 		ParentPID:  p.ParentPID,
+		Workspace:  p.Workspace,
 		Meta:       DigestMeta{Project: project, Host: host, Event: "recheck"},
 		ArmedAt:    now,
 	})

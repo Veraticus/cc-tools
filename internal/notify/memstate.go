@@ -62,6 +62,25 @@ func (m *MemoryState) MarkNotified(sessionID string, t time.Time, message string
 	return nil
 }
 
+// ClaimSend atomically resolves whether a send for sessionID may proceed:
+// it loses when the session already notified within window of now, and
+// otherwise wins and records now/message as the session's last notification
+// in the same step — check and mark are one operation, so two Pipeline runs
+// racing through their (off-loop) judge calls can never both win for the
+// same quiet period. The returned duration is how long before now the
+// session last notified (negative when never), for the caller's decision-log
+// reason. dryRun observes without recording, mirroring ClaimBroadcast.
+func (m *MemoryState) ClaimSend(
+	sessionID string, now time.Time, message string, window time.Duration, dryRun bool,
+) (bool, time.Duration) {
+	since := m.SinceLastNotify(sessionID, now)
+	won := since < 0 || since >= window
+	if won && !dryRun {
+		_ = m.MarkNotified(sessionID, now, message)
+	}
+	return won, since
+}
+
 // ClaimBroadcast atomically claims key for a window starting at now,
 // reporting whether this call won: exactly one of N concurrent claims for
 // the same key succeeds, and a claim older than window is stale (a

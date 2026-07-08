@@ -107,15 +107,17 @@ func TestWorkspaceName_ResolvesPaneSession(t *testing.T) {
 	var gotArgs []string
 	run := func(_ string, args ...string) (string, error) {
 		gotArgs = args
-		return "mercury\n", nil
+		return "mercury:3\n", nil
 	}
 	got := WorkspaceName([]string{"TMUX_PANE=%42", "TMUX=/tmp/tmux-1000/default,1,0"}, run)
-	if got != "mercury" {
-		t.Errorf("WorkspaceName() = %q, want %q", got, "mercury")
+	if got != "mercury:3" {
+		t.Errorf("WorkspaceName() = %q, want %q", got, "mercury:3")
 	}
 	// The pane must be targeted explicitly: an empty -t falls back to the
 	// most recently used attached session — some other workspace entirely.
-	want := []string{"display-message", "-pt", "%42", "#{session_name}"}
+	// The window index rides along because auto-renamed window names can't
+	// tell two claude windows in one session apart.
+	want := []string{"display-message", "-pt", "%42", "#{session_name}:#{window_index}"}
 	if len(gotArgs) != len(want) {
 		t.Fatalf("tmux args = %v, want %v", gotArgs, want)
 	}

@@ -5,13 +5,16 @@ import (
 	"time"
 )
 
-// dedupeWindow suppresses a second idle_prompt notification sent within this
-// long of the previous one for the same session. It exists specifically to
-// kill the Stop→idle_prompt double-ping: a session going idle can produce a
-// composed notification at Stop and then, moments later, an idle_prompt
-// Notification event for that same silence — without this window the user
-// would get pinged twice for one idle turn.
-const dedupeWindow = 90 * time.Second
+// dedupeWindow suppresses a second non-blocked notification sent within this
+// long of the previous one for the same session. It gates two places: the
+// idle_prompt pre-judge check here (killing the Stop→idle_prompt double-ping
+// for one idle turn), and every judged/watchdog send's pre-delivery
+// ClaimSend claim. Originally 90s, widened to 5 minutes after an observed
+// double ping 115s apart (Stop send, then an idle_prompt re-announcing the
+// same finished work) and a watchdog goal-met send 4m16s after an idle
+// backstop ping — one ping per session per five quiet minutes is the
+// contract, with blocked-tier permission/needs-input events exempt as ever.
+const dedupeWindow = 5 * time.Minute
 
 // blockedRepeatWindow suppresses a second permission_prompt or
 // agent_needs_input notification within this long of an identical previous

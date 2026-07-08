@@ -126,6 +126,12 @@ func (claimBroadcastSpy) SinceLastNotifySame(context.Context, string, time.Time,
 
 func (claimBroadcastSpy) MarkNotified(context.Context, string, time.Time, string) error { return nil }
 
+func (claimBroadcastSpy) ClaimSend(
+	context.Context, string, time.Time, string, time.Duration, bool,
+) (bool, time.Duration) {
+	return true, neverNotifiedDuration
+}
+
 func (s claimBroadcastSpy) ClaimBroadcast(context.Context, string, time.Duration, time.Time, bool) bool {
 	*s.called = true
 	return true

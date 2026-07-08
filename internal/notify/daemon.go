@@ -229,6 +229,18 @@ func (l loopState) MarkNotified(ctx context.Context, sessionID string, t time.Ti
 	return nil
 }
 
+// ClaimSend implements DedupeState via the loop's MemoryState. The default
+// (a shutdown-canceled ctx skips the loop round trip) is a win with no
+// history: failing open to a possible duplicate rather than eating a ping,
+// matching NopState.
+func (l loopState) ClaimSend(
+	ctx context.Context, sessionID string, now time.Time, message string, window time.Duration, dryRun bool,
+) (bool, time.Duration) {
+	won, since := true, neverNotifiedDuration
+	l.call(ctx, func(m *MemoryState) { won, since = m.ClaimSend(sessionID, now, message, window, dryRun) })
+	return won, since
+}
+
 // ClaimBroadcast implements DedupeState via the loop's MemoryState.
 func (l loopState) ClaimBroadcast(
 	ctx context.Context, key string, window time.Duration, now time.Time, dryRun bool,
@@ -334,7 +346,7 @@ func armWatchdog(reg *watchdogRegistry, req WatchdogArmRequest, w daemonWatchdog
 	reg.entries[req.SessionID] = watchdogEntry{cancel: cancel, gen: gen}
 
 	deps := DefaultWatchdogDeps(w.judge, w.sender, w.log)
-	deps.Send = watchdogSendWithDedupe(req.SessionID, deps, w.ch)
+	deps.ClaimSend = watchdogClaimSend(w.ch)
 
 	go func() {
 		RunWatchdog(wctx, req, deps)
@@ -361,19 +373,19 @@ func cleanupWatchdog(reg *watchdogRegistry, sessionID string, gen uint64) {
 	}
 }
 
-// watchdogSendWithDedupe wraps deps.Send so a watchdog's one notification
-// also marks the session notified through the loop's own DedupeState
-// (loopState) — exactly as an ordinary hook invocation's send does — even
-// though the send itself happens off-loop, in the watchdog's own goroutine.
-func watchdogSendWithDedupe(
-	sessionID string, deps WatchdogDeps, ch chan<- loopMsg,
-) func(context.Context, Notification) error {
-	send, now := deps.Send, deps.Now
+// watchdogClaimSend builds WatchdogDeps.ClaimSend against the loop's own
+// DedupeState (loopState): the watchdog's one send claims the session with
+// the same atomic check-and-mark an ordinary hook invocation's judged send
+// runs, even though the send itself happens off-loop, in the watchdog's own
+// goroutine — so a watchdog never re-pings a session a hook event pinged
+// within dedupeWindow, and its own send is visible to later hook events'
+// dedupe reads.
+func watchdogClaimSend(
+	ch chan<- loopMsg,
+) func(ctx context.Context, sessionID string, now time.Time, message string) (bool, time.Duration) {
 	ds := loopState{ch: ch}
-	return func(ctx context.Context, n Notification) error {
-		err := send(ctx, n)
-		_ = ds.MarkNotified(ctx, sessionID, now(), n.Body)
-		return err
+	return func(ctx context.Context, sessionID string, now time.Time, message string) (bool, time.Duration) {
+		return ds.ClaimSend(ctx, sessionID, now, message, dedupeWindow, false)
 	}
 }
 

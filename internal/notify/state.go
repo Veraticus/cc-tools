@@ -47,6 +47,15 @@ func (NopState) SinceLastNotifySame(_ context.Context, _ string, _ time.Time, _ 
 // MarkNotified is a no-op: there is nothing to record without a store.
 func (NopState) MarkNotified(_ context.Context, _ string, _ time.Time, _ string) error { return nil }
 
+// ClaimSend always reports a win with no prior notification: without a
+// store there is no history to lose against, and per the reliability
+// invariant a duplicate ping beats a lost one.
+func (NopState) ClaimSend(
+	_ context.Context, _ string, _ time.Time, _ string, _ time.Duration, _ bool,
+) (bool, time.Duration) {
+	return true, neverNotifiedDuration
+}
+
 // ClaimBroadcast always reports a win: there is no shared ledger to check.
 func (NopState) ClaimBroadcast(_ context.Context, _ string, _ time.Duration, _ time.Time, _ bool) bool {
 	return true

@@ -38,6 +38,11 @@ type WatchdogArmRequest struct {
 	// silently once this process is gone. Zero disables the check entirely
 	// (see parentAlive) rather than ever being probed as alive or dead.
 	ParentPID int
+	// Workspace is the arming session's tmux locator (Pipeline.Workspace),
+	// carried so a watchdog notification's body can say where the session
+	// lives — the watchdog fires long after the hook that armed it, with no
+	// process context of its own to resolve one from.
+	Workspace string
 	Meta      DigestMeta
 	ArmedAt   time.Time
 }
@@ -68,6 +73,14 @@ type WatchdogDeps struct {
 	// Log records a decision. Implementations must swallow their own
 	// errors — logging must never be able to kill the watchdog loop.
 	Log func(rec DecisionRecord)
+	// ClaimSend atomically resolves whether the watchdog's one send may
+	// proceed at now, recording it as the session's last notification when
+	// it wins — the same check-and-mark the pipeline's judged sends run
+	// (DedupeState.ClaimSend), so a watchdog can never re-ping a session
+	// some hook event already pinged within the dedupe window. The returned
+	// duration is how long before now the session last notified. nil means
+	// always allowed (no shared state to consult).
+	ClaimSend func(ctx context.Context, sessionID string, now time.Time, message string) (bool, time.Duration)
 }
 
 // DefaultWatchdogDeps wires WatchdogDeps for production use: a real clock, a
@@ -301,7 +314,7 @@ func finishGoalOutcome(
 	n, digest, judgeErr := composeGoalNotification(
 		ctx, deps, req.Meta, res, tasks, now, event, fallbackTitle, fallbackBody, fallbackUrgency,
 	)
-	return finishSend(ctx, deps, req.SessionID, n, JudgeModeCompose, judgeErr, digest, exitReason)
+	return finishSend(ctx, deps, req, n, JudgeModeCompose, judgeErr, digest, exitReason)
 }
 
 // composeGoalNotification builds the recheck digest for a goal transition
@@ -371,7 +384,7 @@ func handleStaleness(
 		return ""
 	case verdict.Notify:
 		n := Notification{Title: req.Meta.Project + " · " + verdict.Task, Body: verdict.Body, Urgency: verdict.Urgency}
-		return finishSend(ctx, deps, req.SessionID, n, JudgeModeDecide, nil, digest, "stalled ping")
+		return finishSend(ctx, deps, req, n, JudgeModeDecide, nil, digest, "stalled ping")
 	default:
 		state.doubleNext = true
 		return ""
@@ -392,23 +405,32 @@ func handleCeiling(
 			len(tasks), humanDuration(now.Sub(req.ArmedAt))),
 		Urgency: UrgencyInfo,
 	}
-	return finishSend(ctx, deps, req.SessionID, n, JudgeModeNone, nil, "", "ceiling")
+	return finishSend(ctx, deps, req, n, JudgeModeNone, nil, "", "ceiling")
 }
 
-// finishSend sends n, logs it, and logs+returns exitReason. Shared by every
-// path that both sends a notification and exits: a Send failure does not
-// change this sequence — RunWatchdog has at most one shot at notifying and
-// no error channel to surface a delivery failure through. Marking the
-// session notified is not this function's job: it rides deps.Send itself
-// (see the daemon's watchdogSendWithDedupe), which routes it through the
-// Pipeline's DedupeState rather than any state this package owns directly.
+// finishSend appends the session's locator to n, claims the send against the
+// session's dedupe state, then sends, logs the send, and logs+returns
+// exitReason. Shared by every path that both sends a notification and exits:
+// a Send failure does not change this sequence — RunWatchdog has at most one
+// shot at notifying and no error channel to surface a delivery failure
+// through. A lost claim (some hook event pinged this session within the
+// dedupe window, possibly during this wake's own judge call) skips the send
+// and exits with a suppression reason instead: the watchdog is a backstop,
+// and a user already summoned to the session does not need it to fire twice.
 func finishSend(
-	ctx context.Context, deps WatchdogDeps, sessionID string,
+	ctx context.Context, deps WatchdogDeps, req WatchdogArmRequest,
 	n Notification, mode JudgeMode, judgeErr error, digest string, exitReason string,
 ) string {
+	n.Body += locatorSuffix(req.Workspace, req.Meta.Host)
+	if deps.ClaimSend != nil {
+		if won, since := deps.ClaimSend(ctx, req.SessionID, deps.Now(), n.Body); !won {
+			return logWatchdogExit(deps, req.SessionID,
+				fmt.Sprintf("suppressed: notified %s ago", humanDuration(since)))
+		}
+	}
 	_ = deps.Send(ctx, n)
-	logWatchdogSend(deps, sessionID, n, mode, judgeErr, digest)
-	return logWatchdogExit(deps, sessionID, exitReason)
+	logWatchdogSend(deps, req.SessionID, n, mode, judgeErr, digest)
+	return logWatchdogExit(deps, req.SessionID, exitReason)
 }
 
 // eventWatchdog is the DecisionRecord.Event value for any record logged by

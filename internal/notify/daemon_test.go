@@ -604,12 +604,13 @@ func TestDaemonLoop_ShutdownCancelsAllLiveWatchdogs(t *testing.T) {
 	waitForCanceledCount(t, logPath, "sess-shutdown-b", 1)
 }
 
-// TestWatchdogSendWithDedupe_MarksNotifiedThroughLoopState proves a
-// watchdog's send routes MarkNotified through the loop's own DedupeState
-// (loopState/MemoryState), not any state this package owns directly: a
-// following idle_prompt for the same session within dedupeWindow must
-// dedupe against it, exactly as an ordinary hook invocation's send would.
-func TestWatchdogSendWithDedupe_MarksNotifiedThroughLoopState(t *testing.T) {
+// TestWatchdogClaimSend_MarksNotifiedThroughLoopState proves a watchdog's
+// winning ClaimSend records the notification through the loop's own
+// DedupeState (loopState/MemoryState), not any state this package owns
+// directly: a following idle_prompt for the same session within
+// dedupeWindow must dedupe against it, exactly as an ordinary hook
+// invocation's send would.
+func TestWatchdogClaimSend_MarksNotifiedThroughLoopState(t *testing.T) {
 	ch := make(chan loopMsg)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -617,14 +618,11 @@ func TestWatchdogSendWithDedupe_MarksNotifiedThroughLoopState(t *testing.T) {
 	go d.loop(ctx, ch)
 
 	const sessionID = "sess-watchdog-dedupe"
-	deps := WatchdogDeps{
-		Now:  time.Now,
-		Send: func(_ context.Context, _ Notification) error { return nil },
-	}
-	deps.Send = watchdogSendWithDedupe(sessionID, deps, ch)
+	claim := watchdogClaimSend(ch)
 
-	if err := deps.Send(context.Background(), Notification{Title: "t", Body: "watchdog said hi"}); err != nil {
-		t.Fatalf("Send() error = %v", err)
+	won, since := claim(context.Background(), sessionID, time.Now(), "watchdog said hi")
+	if !won || since >= 0 {
+		t.Fatalf("first claim = (%v, %v), want a win with no prior notification", won, since)
 	}
 
 	logPath := filepath.Join(t.TempDir(), "notify-decisions.jsonl")

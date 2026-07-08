@@ -757,3 +757,77 @@ func TestRunWatchdog_NoGrowthWake_ReusesCachedScan(t *testing.T) {
 		t.Errorf("ceiling body = %q, want it to report 0 tasks (from the cached, no-live-task scan)", n.Body)
 	}
 }
+
+// TestRunWatchdog_GoalMet_LostClaimSuppressesSend reproduces the observed
+// watchdog double-ping (an idle-backstop ping at T, then the armed watchdog's
+// goal-met send 4m16s later, 2026-07-08): a ClaimSend that reports the
+// session already notified within the dedupe window must skip the send
+// entirely and exit with a suppression reason instead.
+func TestRunWatchdog_GoalMet_LostClaimSuppressesSend(t *testing.T) {
+	transcript, metLine := activeOnlyTranscript(t, "goal_met.jsonl")
+	offset := scannedBytes(t, transcript)
+	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	appendLine(t, transcript, metLine)
+
+	h := newTestHarness(now, -1, []judgeResult{
+		{verdict: JudgeVerdict{Notify: true, Urgency: UrgencyDone, Task: "ship it", Body: "all done", Reason: "r"}},
+	})
+	h.deps.ClaimSend = func(context.Context, string, time.Time, string) (bool, time.Duration) {
+		return false, 4 * time.Minute
+	}
+	req := WatchdogArmRequest{
+		SessionID: "sess-1", Transcript: transcript, Offset: offset, ParentPID: testParentPID, ArmedAt: now,
+		Meta: DigestMeta{Project: "proj"},
+	}
+
+	got := RunWatchdog(context.Background(), req, h.deps)
+
+	if !strings.Contains(got, "suppressed") {
+		t.Errorf("RunWatchdog() = %q, want a suppression exit reason", got)
+	}
+	if h.send.sendCount() != 0 {
+		t.Fatalf("sendCount = %d, want 0 (lost claim must skip the send)", h.send.sendCount())
+	}
+	if h.log.count() != 1 {
+		t.Errorf("log entries = %d, want 1 (exit record only, no send record)", h.log.count())
+	}
+}
+
+// TestRunWatchdog_GoalMet_ClaimWinSendsBodyWithLocator pins two contracts at
+// once: a winning claim proceeds to exactly one send, and the body it claims
+// with is the final body actually sent — locator trailer included — so the
+// dedupe hash a later identical-repeat check compares against matches what
+// the user received.
+func TestRunWatchdog_GoalMet_ClaimWinSendsBodyWithLocator(t *testing.T) {
+	transcript, metLine := activeOnlyTranscript(t, "goal_met.jsonl")
+	offset := scannedBytes(t, transcript)
+	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	appendLine(t, transcript, metLine)
+
+	h := newTestHarness(now, -1, []judgeResult{
+		{verdict: JudgeVerdict{Notify: true, Urgency: UrgencyDone, Task: "ship it", Body: "all done", Reason: "r"}},
+	})
+	var claimedMsg string
+	h.deps.ClaimSend = func(_ context.Context, _ string, _ time.Time, message string) (bool, time.Duration) {
+		claimedMsg = message
+		return true, neverNotifiedDuration
+	}
+	req := WatchdogArmRequest{
+		SessionID: "sess-1", Transcript: transcript, Offset: offset, ParentPID: testParentPID, ArmedAt: now,
+		Workspace: "earth:3", Meta: DigestMeta{Project: "proj", Host: "vermissian"},
+	}
+
+	if got := RunWatchdog(context.Background(), req, h.deps); got != "goal met" {
+		t.Errorf("RunWatchdog() = %q, want %q", got, "goal met")
+	}
+	if h.send.sendCount() != 1 {
+		t.Fatalf("sendCount = %d, want 1", h.send.sendCount())
+	}
+	wantBody := "all done\n\n— earth:3 @ vermissian"
+	if n := h.send.notifications()[0]; n.Body != wantBody {
+		t.Errorf("Body = %q, want %q", n.Body, wantBody)
+	}
+	if claimedMsg != wantBody {
+		t.Errorf("claimed message = %q, want the final sent body %q", claimedMsg, wantBody)
+	}
+}

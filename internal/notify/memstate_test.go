@@ -56,6 +56,63 @@ func TestMemoryState_SessionsAreIndependent(t *testing.T) {
 	}
 }
 
+// TestMemoryState_ClaimSend_CheckAndMarkAreAtomic pins ClaimSend's whole
+// contract in one sequence: a first claim wins (and records itself, so a
+// racing second claim within the window loses), a claim past the window wins
+// again, and the winning claim's message is what SinceLastNotifySame now
+// compares against.
+func TestMemoryState_ClaimSend_CheckAndMarkAreAtomic(t *testing.T) {
+	m := NewMemoryState()
+	now := time.Now()
+	const sessionID = "sess-claim"
+	window := 5 * time.Minute
+
+	won, since := m.ClaimSend(sessionID, now, "first ping", window, false)
+	if !won || since >= 0 {
+		t.Fatalf("first claim = (%v, %v), want a win with negative (never-notified) duration", won, since)
+	}
+
+	// A second claim 10s later — the two-Stops-racing-through-the-judge shape
+	// — must lose against the first claim's own mark.
+	won, since = m.ClaimSend(sessionID, now.Add(10*time.Second), "second ping", window, false)
+	if won {
+		t.Fatal("second claim within window = won, want lost")
+	}
+	if since != 10*time.Second {
+		t.Errorf("second claim since = %v, want 10s", since)
+	}
+
+	// The losing claim must not have overwritten the winner's record.
+	if got := m.SinceLastNotifySame(sessionID, now.Add(time.Minute), "first ping"); got != time.Minute {
+		t.Errorf("SinceLastNotifySame(first ping) = %v, want 1m0s (loser must not overwrite)", got)
+	}
+
+	// Past the window the session is quiet again and a new claim wins.
+	won, _ = m.ClaimSend(sessionID, now.Add(window+time.Second), "third ping", window, false)
+	if !won {
+		t.Fatal("claim past window = lost, want won")
+	}
+}
+
+func TestMemoryState_ClaimSend_DryRunObservesWithoutWriting(t *testing.T) {
+	m := NewMemoryState()
+	now := time.Now()
+	const sessionID = "sess-claim-dry"
+	window := 5 * time.Minute
+
+	if won, _ := m.ClaimSend(sessionID, now, "msg", window, true); !won {
+		t.Fatal("dry-run claim on a quiet session = lost, want won")
+	}
+	// The dry run must not have recorded anything: a real claim still wins.
+	if won, _ := m.ClaimSend(sessionID, now, "msg", window, false); !won {
+		t.Fatal("real claim after dry run = lost, want won (dry run must not write)")
+	}
+	// And a dry run against the live record reports the loss.
+	if won, _ := m.ClaimSend(sessionID, now.Add(time.Second), "msg", window, true); won {
+		t.Fatal("dry-run claim within window = won, want lost")
+	}
+}
+
 // TestMemoryState_ClaimBroadcast_FirstWinsSecondLosesThenExpires is the
 // direct-unit-test analog of TestClaimBroadcast_FirstClaimWinsSecondLoses
 // (broadcast.go's file-backed claimBroadcast), pinning the same

@@ -121,6 +121,12 @@ func (d memDedupeState) MarkNotified(_ context.Context, sessionID string, t time
 	return d.m.MarkNotified(sessionID, t, message)
 }
 
+func (d memDedupeState) ClaimSend(
+	_ context.Context, sessionID string, now time.Time, message string, window time.Duration, dryRun bool,
+) (bool, time.Duration) {
+	return d.m.ClaimSend(sessionID, now, message, window, dryRun)
+}
+
 func (d memDedupeState) ClaimBroadcast(
 	_ context.Context, key string, window time.Duration, now time.Time, dryRun bool,
 ) bool {
@@ -1001,5 +1007,135 @@ func TestPackageSource_NeverProducesBlockDecision(t *testing.T) {
 		if strings.Contains(src, structLiteral) {
 			t.Errorf("%s contains a block-decision struct literal %q", name, structLiteral)
 		}
+	}
+}
+
+// TestPipeline_TwoJudgedStops_SecondLosesClaimAndArms reproduces the
+// double-ping the ClaimSend gate exists to kill (two Stop events seconds
+// apart, both judged notify=true — observed 2026-07-08 as two "Awaiting …
+// decision" pings 10s apart): the first Run's send claims the session, so
+// the second Run's identical verdict must resolve silent with a post-judge
+// dedupe reason — and still arm the watchdog, since the live work behind the
+// suppressed ping is uncovered otherwise.
+func TestPipeline_TwoJudgedStops_SecondLosesClaimAndArms(t *testing.T) {
+	stubBin := writeStubClaude(t)
+	t.Setenv(
+		"STUB_STDOUT",
+		`{"notify":true,"urgency":"blocked","task":"needs a decision","body":"which approach?","reason":"r"}`,
+	)
+
+	var stdout bytes.Buffer
+	var sent []capturedRequest
+	p, logPath := newGoalTestPipeline(t, &stdout, stubBin, neverPresent)
+	p.Sender = stubSenderRecording(&sent)
+	p.State = newMemDedupeState()
+	wd := &fakeWatchdog{}
+	p.Watchdog = wd
+	transcript := copyFixture(t, "tasks_live.jsonl")
+
+	sessionID := "sess-claim-race"
+	in := HookInput{
+		SessionID: sessionID, CWD: "/home/user/project", TranscriptPath: transcript, HookEventName: "Stop",
+	}
+	for i := 1; i <= 2; i++ {
+		if err := p.Run(context.Background(), in); err != nil {
+			t.Fatalf("Run() #%d error = %v", i, err)
+		}
+	}
+
+	if len(sent) != 1 {
+		t.Fatalf("sent %d notifications, want exactly 1 (second Stop must lose the claim)", len(sent))
+	}
+	recs := readDecisionLog(t, logPath)
+	if len(recs) != 2 {
+		t.Fatalf("records = %+v, want 2", recs)
+	}
+	if recs[0].Outcome != OutcomeSend.String() {
+		t.Errorf("first outcome = %q, want send", recs[0].Outcome)
+	}
+	if recs[1].Outcome != OutcomeSilent.String() || !strings.Contains(recs[1].Reason, "post-judge") {
+		t.Errorf("second record = %+v, want silent with a post-judge dedupe reason", recs[1])
+	}
+	// The suppressed decide-mode send must keep watchdog coverage on the
+	// live tasks, exactly as a pre-judge silent outcome would.
+	if len(wd.armed) != 1 || wd.armed[0].SessionID != sessionID {
+		t.Fatalf("armed = %+v, want exactly one arm for %s (from the suppressed second Stop)", wd.armed, sessionID)
+	}
+}
+
+// TestPipeline_JudgedSend_BodyCarriesLocator pins the where-did-this-come-from
+// trailer on judged sends: their title carries the judge's task label, so the
+// body must end with the tmux locator and host.
+func TestPipeline_JudgedSend_BodyCarriesLocator(t *testing.T) {
+	stubBin := writeStubClaude(t)
+	t.Setenv(
+		"STUB_STDOUT",
+		`{"notify":true,"urgency":"done","task":"dev server ready","body":"parked on :3000","reason":"r"}`,
+	)
+
+	var stdout bytes.Buffer
+	var sent []capturedRequest
+	p, _ := newGoalTestPipeline(t, &stdout, stubBin, neverPresent)
+	p.Sender = stubSenderRecording(&sent)
+	p.Workspace = "earth:3"
+	p.Host = "vermissian"
+	transcript := copyFixture(t, "tasks_live.jsonl")
+
+	in := HookInput{
+		SessionID: "sess-locator", CWD: "/home/user/project", TranscriptPath: transcript, HookEventName: "Stop",
+	}
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if len(sent) != 1 {
+		t.Fatalf("sent %d notifications, want 1", len(sent))
+	}
+	if want := "parked on :3000\n\n— earth:3 @ vermissian"; sent[0].Body != want {
+		t.Errorf("Body = %q, want %q", sent[0].Body, want)
+	}
+}
+
+// TestLocatorSuffix covers the trailer's fallback shapes: both segments,
+// workspace only, host only, neither.
+func TestLocatorSuffix(t *testing.T) {
+	tests := []struct {
+		name, workspace, host, want string
+	}{
+		{name: "workspace and host", workspace: "earth:3", host: "vermissian", want: "\n\n— earth:3 @ vermissian"},
+		{name: "workspace only", workspace: "earth:3", want: "\n\n— earth:3"},
+		{name: "host only", host: "vermissian", want: "\n\n— vermissian"},
+		{name: "neither", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := locatorSuffix(tt.workspace, tt.host); got != tt.want {
+				t.Errorf("locatorSuffix(%q, %q) = %q, want %q", tt.workspace, tt.host, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestPipeline_Arm_ForwardsWorkspace pins the Workspace plumbing into
+// WatchdogArmRequest: the watchdog fires long after the arming hook, so a
+// dropped Workspace would silently produce locator-less watchdog pings.
+func TestPipeline_Arm_ForwardsWorkspace(t *testing.T) {
+	var stdout bytes.Buffer
+	p, _ := newTestPipeline(t, &stdout, writeStubClaude(t), neverPresent)
+	p.DryRun = false
+	p.Workspace = "earth:3"
+	wd := &fakeWatchdog{}
+	p.Watchdog = wd
+	transcript := copyFixture(t, "goal_active_set.jsonl")
+
+	in := HookInput{
+		SessionID: "sess-arm-ws", CWD: "/home/user/project", TranscriptPath: transcript, HookEventName: "Stop",
+	}
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if len(wd.armed) != 1 || wd.armed[0].Workspace != "earth:3" {
+		t.Fatalf("armed = %+v, want one arm carrying Workspace earth:3", wd.armed)
 	}
 }
