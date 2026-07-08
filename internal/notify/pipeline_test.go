@@ -284,7 +284,12 @@ func TestPipeline_Stop_Clean_ComposeVerdict_DryRunLine(t *testing.T) {
 	}
 }
 
-func TestPipeline_Stop_Clean_ComposeJudgeError_FallbackSessionIdle(t *testing.T) {
+// TestPipeline_Stop_ComposeJudgeError_FallbackUsesLastAssistantMessage pins
+// the Stop-event compose fallback: when the judge errors, the deterministic
+// body must come from LastAssistantMessage (the field Stop actually
+// populates), describing the turn that just ended — never a hardcoded
+// "turn ended" when there's real content to report.
+func TestPipeline_Stop_ComposeJudgeError_FallbackUsesLastAssistantMessage(t *testing.T) {
 	stubBin := writeStubClaude(t)
 	t.Setenv("STUB_EXIT", "1")
 	t.Setenv("STUB_STDERR", "boom")
@@ -306,6 +311,103 @@ func TestPipeline_Stop_Clean_ComposeJudgeError_FallbackSessionIdle(t *testing.T)
 	}
 	if !strings.Contains(stdout.String(), "All done here.") {
 		t.Errorf("stdout = %q, want it to contain last assistant message tail", stdout.String())
+	}
+}
+
+// TestPipeline_Stop_ComposeJudgeError_FallbackEmptyMessage_TurnEnded pins the
+// Stop-event compose fallback's last resort: when LastAssistantMessage is
+// empty (a Stop with nothing to quote), the body falls back to the literal
+// "turn ended" — this is the one case where that text is truthful.
+func TestPipeline_Stop_ComposeJudgeError_FallbackEmptyMessage_TurnEnded(t *testing.T) {
+	stubBin := writeStubClaude(t)
+	t.Setenv("STUB_EXIT", "1")
+	t.Setenv("STUB_STDERR", "boom")
+
+	var stdout bytes.Buffer
+	p, _ := newTestPipeline(t, &stdout, stubBin)
+	transcript := copyFixture(t, "goal_none.jsonl")
+
+	in := HookInput{
+		SessionID: "sess-4b", CWD: "/home/user/project", TranscriptPath: transcript,
+		HookEventName: "Stop",
+	}
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "project · testhost") {
+		t.Errorf("stdout = %q, want fallback title located by host", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "turn ended") {
+		t.Errorf("stdout = %q, want it to contain the turn-ended fallback body", stdout.String())
+	}
+}
+
+// TestPipeline_Notification_IdlePrompt_ComposeJudgeError_FallbackUsesMessage
+// pins the Notification-event compose fallback: an idle_prompt reaching the
+// compose backstop (no goal, no live tasks — the goal_none fixture) with a
+// judge error must build its body from in.Message, the field Notification
+// events actually populate — never from LastAssistantMessage, which is
+// always empty on this event and would silently produce the wrong text.
+func TestPipeline_Notification_IdlePrompt_ComposeJudgeError_FallbackUsesMessage(t *testing.T) {
+	stubBin := writeStubClaude(t)
+	t.Setenv("STUB_EXIT", "1")
+	t.Setenv("STUB_STDERR", "boom")
+
+	var stdout bytes.Buffer
+	p, _ := newTestPipeline(t, &stdout, stubBin)
+	transcript := copyFixture(t, "goal_none.jsonl")
+
+	in := HookInput{
+		SessionID: "sess-5", CWD: "/home/user/project", TranscriptPath: transcript,
+		HookEventName: eventNotification, NotificationType: "idle_prompt",
+		Message: "Waiting on you to review the diff.",
+	}
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "project · testhost") {
+		t.Errorf("stdout = %q, want fallback title located by host", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "Waiting on you to review the diff.") {
+		t.Errorf("stdout = %q, want it to contain the notification message tail", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "turn ended") {
+		t.Errorf("stdout = %q, must never claim a turn ended on a Notification event", stdout.String())
+	}
+}
+
+// TestPipeline_Notification_IdlePrompt_ComposeJudgeError_FallbackEmptyMessage_SessionIdle
+// pins the Notification-event compose fallback's last resort: when in.Message
+// is empty, the body must describe an idle session waiting for input — never
+// the Stop-only "turn ended" text, which would misdescribe a session that
+// never stopped.
+func TestPipeline_Notification_IdlePrompt_ComposeJudgeError_FallbackEmptyMessage_SessionIdle(t *testing.T) {
+	stubBin := writeStubClaude(t)
+	t.Setenv("STUB_EXIT", "1")
+	t.Setenv("STUB_STDERR", "boom")
+
+	var stdout bytes.Buffer
+	p, _ := newTestPipeline(t, &stdout, stubBin)
+	transcript := copyFixture(t, "goal_none.jsonl")
+
+	in := HookInput{
+		SessionID: "sess-5b", CWD: "/home/user/project", TranscriptPath: transcript,
+		HookEventName: eventNotification, NotificationType: "idle_prompt",
+	}
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "project · testhost") {
+		t.Errorf("stdout = %q, want fallback title located by host", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "session idle — waiting for input") {
+		t.Errorf("stdout = %q, want the session-idle fallback body", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "turn ended") {
+		t.Errorf("stdout = %q, must never claim a turn ended on a Notification event", stdout.String())
 	}
 }
 

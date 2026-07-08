@@ -304,6 +304,26 @@ func (p Pipeline) handleJudge(
 	}
 }
 
+// composeFallbackBody picks the judge-error fallback text by event: a Stop
+// describes the turn that just ended (from LastAssistantMessage, the field
+// Stop populates), a Notification describes the idle session it fired on
+// (from Message, the field Notification populates) — so the fallback never
+// claims a turn ended on an event that never stopped one.
+func composeFallbackBody(in HookInput) string {
+	if in.HookEventName == eventNotification {
+		body := truncateHeadWords(in.Message, maxNotificationTailLen)
+		if body == "" {
+			body = "session idle — waiting for input"
+		}
+		return body
+	}
+	body := truncateHeadWords(in.LastAssistantMessage, maxNotificationTailLen)
+	if body == "" {
+		body = "turn ended"
+	}
+	return body
+}
+
 // handleComposeVerdict implements the compose route: the send is already
 // decided, the judge only writes better text. A judge error falls back to
 // a deterministic notification titled by locus (where to go — a generic
@@ -323,11 +343,7 @@ func (p Pipeline) handleComposeVerdict(
 	if jerr == nil {
 		n = Notification{Title: project + " · " + verdict.Task, Body: verdict.Body, Urgency: verdict.Urgency}
 	} else {
-		body := truncateHeadWords(in.LastAssistantMessage, maxNotificationTailLen)
-		if body == "" {
-			body = "turn ended"
-		}
-		n = Notification{Title: project + " · " + locus, Body: body, Urgency: UrgencyDone}
+		n = Notification{Title: project + " · " + locus, Body: composeFallbackBody(in), Urgency: UrgencyDone}
 	}
 	n.Body += locatorSuffix(p.Workspace, host)
 
