@@ -44,7 +44,9 @@ type Input struct {
 	CWD string `json:"cwd"`
 	// RateLimits is nil when Claude Code sends no rate_limits object,
 	// meaning the session is not a subscription session — that nil/non-nil
-	// distinction drives whether rate-limit chips or a cost chip render.
+	// distinction drives whether rate-limit chips or a cost chip render,
+	// and (see costSource) whether transcript-derived anthropic-backend
+	// rows price at $0.
 	RateLimits *RateLimitsInput `json:"rate_limits"`
 	Effort     *EffortInput     `json:"effort"`
 	PR         *PRInput         `json:"pr"`
@@ -346,8 +348,12 @@ func (s *Statusline) costSource() func(transcriptPath string) (float64, float64,
 	if s.deps != nil && s.deps.CostSource != nil {
 		return s.deps.CostSource
 	}
+	// RateLimits is stdin's ground truth for a flat-subscription session
+	// (see Input.RateLimits' doc comment): present means anthropic-backend
+	// transcript rows price at $0, absent means real dollars.
+	subscribed := s.input.RateLimits != nil
 	return func(transcriptPath string) (float64, float64, bool) {
-		state, ok := transcriptCosts(s.deps.CacheDir, s.deps.CacheDuration, transcriptPath, s.now())
+		state, ok := transcriptCosts(s.deps.CacheDir, s.deps.CacheDuration, transcriptPath, s.now(), subscribed)
 		return state.SessionUSD, state.DailyUSD, ok
 	}
 }

@@ -15,17 +15,6 @@ import (
 
 // --- fixtures -----------------------------------------------------------
 
-// writeCredentials writes a .credentials.json fixture at profileDir with
-// the given subscriptionType ("" omits the claudeAiOauth.subscriptionType
-// field's meaningful value but still writes a well-formed file).
-func writeCredentials(t *testing.T, profileDir, subscriptionType string) {
-	t.Helper()
-	content := fmt.Sprintf(`{"claudeAiOauth":{"subscriptionType":%q}}`, subscriptionType)
-	if err := os.WriteFile(filepath.Join(profileDir, credentialsFileName), []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // bedrockRowMsgID is the fixed message.id every bedrockRow fixture uses:
 // its "msg_bdrk" prefix is what internal/cost's row-cost logic reads to
 // select bedrock (always-priced) rates over anthropic list rates.
@@ -49,6 +38,30 @@ func bedrockRow(timestamp string) string {
 	)
 }
 
+// plainRowMsgID is the fixed message.id every plainRow fixture uses: no
+// "msg_bdrk" prefix, so internal/cost's row-cost logic treats it as an
+// anthropic-backend row — priced only when the subscribed flag passed to
+// transcriptCosts/computeTranscriptCosts is false.
+const plainRowMsgID = "msg_01plain"
+
+// plainRowInputTokens is the fixed input-token count every plainRow
+// fixture uses; only the amount's positivity (when priced) is asserted by
+// these tests, not its exact value.
+const plainRowInputTokens = 1000
+
+// plainRow renders one minimal billable anthropic-backend transcript
+// JSONL row (no "msg_bdrk" prefix): its cost is nonzero when subscribed
+// is false and exactly zero when subscribed is true. timestamp must be
+// an RFC3339 string.
+func plainRow(timestamp string) string {
+	return fmt.Sprintf(
+		`{"type":"assistant","timestamp":%q,"requestId":%q,`+
+			`"message":{"id":%q,"model":"claude-fable-5",`+
+			`"usage":{"input_tokens":%d,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}`,
+		timestamp, plainRowMsgID, plainRowMsgID, plainRowInputTokens,
+	)
+}
+
 // writeTranscript writes one JSONL row to path, terminated by a newline.
 func writeTranscript(t *testing.T, path string, lines ...string) {
 	t.Helper()
@@ -59,8 +72,7 @@ func writeTranscript(t *testing.T, path string, lines ...string) {
 }
 
 // setupTranscriptFixture builds <tmp>/profile/projects/slug/session.jsonl
-// plus a sibling .credentials.json (subscriptionType "max") at
-// <tmp>/profile, and returns the transcript path.
+// and returns the transcript path.
 func setupTranscriptFixture(t *testing.T, rows ...string) string {
 	t.Helper()
 	tmp := t.TempDir()
@@ -69,46 +81,10 @@ func setupTranscriptFixture(t *testing.T, rows ...string) string {
 	if err := os.MkdirAll(projectDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	writeCredentials(t, profileDir, "max")
 
 	transcriptPath := filepath.Join(projectDir, "session.jsonl")
 	writeTranscript(t, transcriptPath, rows...)
 	return transcriptPath
-}
-
-// --- subscription detection ---------------------------------------------
-
-func TestReadSubscribed_PresentSubscriptionType(t *testing.T) {
-	tmp := t.TempDir()
-	writeCredentials(t, tmp, "max")
-	if !readSubscribed(tmp) {
-		t.Error("expected subscribed=true when subscriptionType is set")
-	}
-}
-
-func TestReadSubscribed_MissingFile(t *testing.T) {
-	tmp := t.TempDir()
-	if readSubscribed(tmp) {
-		t.Error("expected subscribed=false when .credentials.json is missing")
-	}
-}
-
-func TestReadSubscribed_MalformedFile(t *testing.T) {
-	tmp := t.TempDir()
-	if err := os.WriteFile(filepath.Join(tmp, credentialsFileName), []byte("not json {"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if readSubscribed(tmp) {
-		t.Error("expected subscribed=false for a malformed credentials file")
-	}
-}
-
-func TestReadSubscribed_EmptySubscriptionType(t *testing.T) {
-	tmp := t.TempDir()
-	writeCredentials(t, tmp, "")
-	if readSubscribed(tmp) {
-		t.Error("expected subscribed=false when subscriptionType is an empty string")
-	}
 }
 
 // --- path derivation + end-to-end compute --------------------------------
@@ -118,7 +94,7 @@ func TestTranscriptCosts_ComputesFromRealFixture(t *testing.T) {
 	timestamp := now.Format(time.RFC3339)
 	transcriptPath := setupTranscriptFixture(t, bedrockRow(timestamp))
 
-	state, ok := transcriptCosts("", 0, transcriptPath, now)
+	state, ok := transcriptCosts("", 0, transcriptPath, now, false)
 	if !ok {
 		t.Fatal("expected ok=true for a well-formed fixture")
 	}
@@ -137,14 +113,78 @@ func TestTranscriptCosts_UnreadableTranscriptFails(t *testing.T) {
 	if err := os.MkdirAll(projectDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	writeCredentials(t, profileDir, "max")
 
 	// No transcript file written at all.
 	transcriptPath := filepath.Join(projectDir, "session.jsonl")
 
-	_, ok := transcriptCosts("", 0, transcriptPath, time.Now())
+	_, ok := transcriptCosts("", 0, transcriptPath, time.Now(), false)
 	if ok {
 		t.Error("expected ok=false when the transcript file doesn't exist")
+	}
+}
+
+// --- subscribed pricing ---------------------------------------------------
+
+// TestComputeTranscriptCosts_SubscribedPricesBedrockZeroesPlainRows reuses
+// internal/cost/testdata/real_shape.jsonl (two msg_bdrk rows plus one
+// plain msg_ row) to prove the subscribed flag now threaded through from
+// stdin's rate_limits presence, not a credentials file, is what decides
+// pricing: with subscribed=false every row (including the plain one)
+// prices, so the total is higher than with subscribed=true, where only
+// the two msg_bdrk rows still price.
+func TestComputeTranscriptCosts_SubscribedPricesBedrockZeroesPlainRows(t *testing.T) {
+	now := time.Now()
+	transcriptPath := filepath.Join("..", "cost", "testdata", "real_shape.jsonl")
+
+	unsubscribed, ok := transcriptCosts("", 0, transcriptPath, now, false)
+	if !ok {
+		t.Fatal("expected ok=true computing subscribed=false")
+	}
+	if unsubscribed.SessionUSD <= 0 {
+		t.Errorf("expected positive SessionUSD under subscribed=false, got %v", unsubscribed.SessionUSD)
+	}
+
+	subscribed, ok := transcriptCosts("", 0, transcriptPath, now, true)
+	if !ok {
+		t.Fatal("expected ok=true computing subscribed=true")
+	}
+	if subscribed.SessionUSD <= 0 {
+		t.Errorf("expected msg_bdrk rows to remain priced under subscribed=true, got %v", subscribed.SessionUSD)
+	}
+	if subscribed.SessionUSD >= unsubscribed.SessionUSD {
+		t.Errorf(
+			"expected subscribed=true to zero the plain msg_ row's contribution, lowering session cost: "+
+				"subscribed=%v unsubscribed=%v",
+			subscribed.SessionUSD, unsubscribed.SessionUSD,
+		)
+	}
+}
+
+// TestComputeTranscriptCosts_SubscribedZeroesPlainRow isolates the plain-row
+// case with its own single-row fixture: subscribed=true must price it at
+// exactly $0, not merely "less than before".
+func TestComputeTranscriptCosts_SubscribedZeroesPlainRow(t *testing.T) {
+	now := time.Now()
+	timestamp := now.Format(time.RFC3339)
+	transcriptPath := setupTranscriptFixture(t, plainRow(timestamp))
+
+	unsubscribed, ok := transcriptCosts("", 0, transcriptPath, now, false)
+	if !ok {
+		t.Fatal("expected ok=true computing subscribed=false")
+	}
+	if unsubscribed.SessionUSD <= 0 {
+		t.Errorf("expected positive SessionUSD under subscribed=false, got %v", unsubscribed.SessionUSD)
+	}
+
+	subscribed, ok := transcriptCosts("", 0, transcriptPath, now, true)
+	if !ok {
+		t.Fatal("expected ok=true computing subscribed=true")
+	}
+	if subscribed.SessionUSD != 0 {
+		t.Errorf(
+			"expected exactly $0 SessionUSD for a plain-row transcript under subscribed=true, got %v",
+			subscribed.SessionUSD,
+		)
 	}
 }
 
@@ -156,7 +196,7 @@ func TestTranscriptCosts_CacheHitSkipsRecompute(t *testing.T) {
 	timestamp := now.Format(time.RFC3339)
 	transcriptPath := setupTranscriptFixture(t, bedrockRow(timestamp))
 
-	first, ok := transcriptCosts(cacheDir, time.Minute, transcriptPath, now)
+	first, ok := transcriptCosts(cacheDir, time.Minute, transcriptPath, now, false)
 	if !ok {
 		t.Fatal("expected ok=true on first (cold-cache) call")
 	}
@@ -168,7 +208,7 @@ func TestTranscriptCosts_CacheHitSkipsRecompute(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	second, ok := transcriptCosts(cacheDir, time.Minute, transcriptPath, now.Add(time.Second))
+	second, ok := transcriptCosts(cacheDir, time.Minute, transcriptPath, now.Add(time.Second), false)
 	if !ok {
 		t.Fatal("expected a cache hit (ok=true) even though the transcript file was deleted")
 	}
@@ -183,7 +223,7 @@ func TestTranscriptCosts_StaleCacheRecomputes(t *testing.T) {
 	timestamp := now.Format(time.RFC3339)
 	transcriptPath := setupTranscriptFixture(t, bedrockRow(timestamp))
 
-	if _, ok := transcriptCosts(cacheDir, time.Minute, transcriptPath, now); !ok {
+	if _, ok := transcriptCosts(cacheDir, time.Minute, transcriptPath, now, false); !ok {
 		t.Fatal("expected ok=true on first call")
 	}
 
@@ -193,7 +233,7 @@ func TestTranscriptCosts_StaleCacheRecomputes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, ok := transcriptCosts(cacheDir, time.Minute, transcriptPath, now.Add(2*time.Minute))
+	_, ok := transcriptCosts(cacheDir, time.Minute, transcriptPath, now.Add(2*time.Minute), false)
 	if ok {
 		t.Error("expected a stale cache to trigger a recompute, which should fail with the transcript gone")
 	}
@@ -208,7 +248,7 @@ func TestTranscriptCosts_SessionAndDailyCachedUnderSeparateKeys(t *testing.T) {
 	transcriptPath := setupTranscriptFixture(t, bedrockRow(timestamp))
 	projectsDir := filepath.Dir(filepath.Dir(transcriptPath))
 
-	if _, ok := transcriptCosts(cacheDir, time.Minute, transcriptPath, now); !ok {
+	if _, ok := transcriptCosts(cacheDir, time.Minute, transcriptPath, now, false); !ok {
 		t.Fatal("expected ok=true on first (cold-cache) call")
 	}
 
@@ -218,10 +258,10 @@ func TestTranscriptCosts_SessionAndDailyCachedUnderSeparateKeys(t *testing.T) {
 	}
 	defer func() { _ = root.Close() }()
 
-	if _, err := root.Stat(costSessionCacheName(transcriptPath)); err != nil {
+	if _, err := root.Stat(costSessionCacheName(transcriptPath, false)); err != nil {
 		t.Errorf("expected a session cache entry keyed by transcriptPath: %v", err)
 	}
-	if _, err := root.Stat(costDailyCacheName(projectsDir)); err != nil {
+	if _, err := root.Stat(costDailyCacheName(projectsDir, false)); err != nil {
 		t.Errorf("expected a daily cache entry keyed by projectsDir: %v", err)
 	}
 }
@@ -240,14 +280,13 @@ func TestTranscriptCosts_ConcurrentSessionSharesDailyCacheEntry(t *testing.T) {
 	if err := os.MkdirAll(projectDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	writeCredentials(t, profileDir, "max")
 
 	transcriptA := filepath.Join(projectDir, "session-a.jsonl")
 	transcriptB := filepath.Join(projectDir, "session-b.jsonl")
 	writeTranscript(t, transcriptA, bedrockRow(timestamp))
 	writeTranscript(t, transcriptB, bedrockRow(timestamp))
 
-	if _, ok := transcriptCosts(cacheDir, time.Minute, transcriptA, now); !ok {
+	if _, ok := transcriptCosts(cacheDir, time.Minute, transcriptA, now, false); !ok {
 		t.Fatal("expected ok=true computing session A")
 	}
 
@@ -259,10 +298,10 @@ func TestTranscriptCosts_ConcurrentSessionSharesDailyCacheEntry(t *testing.T) {
 	// it), but the point under test is the daily cache FILE's identity —
 	// verified directly below via costDailyCacheName equality, which is
 	// what actually proves session A and session B share one entry.
-	sessionAName := costSessionCacheName(transcriptA)
-	sessionBName := costSessionCacheName(transcriptB)
-	dailyNameA := costDailyCacheName(filepath.Dir(filepath.Dir(transcriptA)))
-	dailyNameB := costDailyCacheName(filepath.Dir(filepath.Dir(transcriptB)))
+	sessionAName := costSessionCacheName(transcriptA, false)
+	sessionBName := costSessionCacheName(transcriptB, false)
+	dailyNameA := costDailyCacheName(filepath.Dir(filepath.Dir(transcriptA)), false)
+	dailyNameB := costDailyCacheName(filepath.Dir(filepath.Dir(transcriptB)), false)
 
 	if sessionAName == sessionBName {
 		t.Fatal("test setup invariant broken: distinct transcript paths must not share a session cache key")
@@ -281,7 +320,7 @@ func TestTranscriptCosts_SessionHitDailyMissRecomputesBoth(t *testing.T) {
 	timestamp := now.Format(time.RFC3339)
 	transcriptPath := setupTranscriptFixture(t, bedrockRow(timestamp))
 
-	if _, ok := transcriptCosts(cacheDir, time.Minute, transcriptPath, now); !ok {
+	if _, ok := transcriptCosts(cacheDir, time.Minute, transcriptPath, now, false); !ok {
 		t.Fatal("expected ok=true on first (cold-cache) call")
 	}
 
@@ -293,7 +332,7 @@ func TestTranscriptCosts_SessionHitDailyMissRecomputesBoth(t *testing.T) {
 		t.Fatal("expected the cache root to verify as trusted")
 	}
 	projectsDir := filepath.Dir(filepath.Dir(transcriptPath))
-	if err := root.Remove(costDailyCacheName(projectsDir)); err != nil {
+	if err := root.Remove(costDailyCacheName(projectsDir, false)); err != nil {
 		t.Fatal(err)
 	}
 	_ = root.Close()
@@ -305,9 +344,45 @@ func TestTranscriptCosts_SessionHitDailyMissRecomputesBoth(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, ok := transcriptCosts(cacheDir, time.Minute, transcriptPath, now.Add(time.Second))
+	_, ok := transcriptCosts(cacheDir, time.Minute, transcriptPath, now.Add(time.Second), false)
 	if ok {
 		t.Error("expected a daily-cache miss to force a full recompute, which must fail with the transcript gone")
+	}
+}
+
+// --- subscribed cache isolation --------------------------------------
+
+// TestTranscriptCosts_SubscribedCacheEntryNotServedToUnsubscribedCaller
+// proves the cache-key decision documented on transcriptCosts: folding
+// subscribed into the cache key (rather than TTL-tolerance) means a
+// subscribed=true entry (correctly $0 for a plain-row transcript) is
+// never read back by a subsequent subscribed=false call. The transcript
+// file is deliberately left in place (not deleted) — if the two
+// subscribed values wrongly shared a cache entry, the second call would
+// silently return the first's $0 result instead of recomputing.
+func TestTranscriptCosts_SubscribedCacheEntryNotServedToUnsubscribedCaller(t *testing.T) {
+	cacheDir := t.TempDir()
+	now := time.Now()
+	timestamp := now.Format(time.RFC3339)
+	transcriptPath := setupTranscriptFixture(t, plainRow(timestamp))
+
+	subscribedState, ok := transcriptCosts(cacheDir, time.Minute, transcriptPath, now, true)
+	if !ok {
+		t.Fatal("expected ok=true computing subscribed=true")
+	}
+	if subscribedState.SessionUSD != 0 {
+		t.Fatalf("test setup invariant broken: expected $0 under subscribed=true, got %v", subscribedState.SessionUSD)
+	}
+
+	unsubscribedState, ok := transcriptCosts(cacheDir, time.Minute, transcriptPath, now.Add(time.Second), false)
+	if !ok {
+		t.Fatal("expected ok=true computing subscribed=false")
+	}
+	if unsubscribedState.SessionUSD <= 0 {
+		t.Errorf(
+			"expected a nonzero session cost under subscribed=false even though a subscribed=true cache entry exists, got %v",
+			unsubscribedState.SessionUSD,
+		)
 	}
 }
 
@@ -316,7 +391,7 @@ func TestTranscriptCosts_EmptyCacheDirNeverCaches(t *testing.T) {
 	timestamp := now.Format(time.RFC3339)
 	transcriptPath := setupTranscriptFixture(t, bedrockRow(timestamp))
 
-	if _, ok := transcriptCosts("", time.Minute, transcriptPath, now); !ok {
+	if _, ok := transcriptCosts("", time.Minute, transcriptPath, now, false); !ok {
 		t.Fatal("expected ok=true on first call")
 	}
 
@@ -326,7 +401,7 @@ func TestTranscriptCosts_EmptyCacheDirNeverCaches(t *testing.T) {
 
 	// cacheDir=="" must always compute fresh (mirroring gitStatus's
 	// contract) -- with the transcript gone, this must now fail.
-	_, ok := transcriptCosts("", time.Minute, transcriptPath, now.Add(time.Second))
+	_, ok := transcriptCosts("", time.Minute, transcriptPath, now.Add(time.Second), false)
 	if ok {
 		t.Error("expected cacheDir=\"\" to always recompute rather than cache, but got a stale success")
 	}
@@ -334,18 +409,81 @@ func TestTranscriptCosts_EmptyCacheDirNeverCaches(t *testing.T) {
 
 // --- fallback + rendering through Generate -------------------------------
 
-func statuslineDeps(width int) *Dependencies {
+// statuslineDepsWidth is the fixed terminal width every statuslineDeps
+// fixture uses: wide enough that none of this file's cost-chip tests
+// need to reason about width-driven degradation.
+const statuslineDepsWidth = 200
+
+func statuslineDeps() *Dependencies {
 	return &Dependencies{
 		FileReader:    NewMockFileReader(),
 		CommandRunner: NewMockCommandRunner(),
 		EnvReader:     NewMockEnvReader(),
-		TerminalWidth: &MockTerminalWidth{width: width},
+		TerminalWidth: &MockTerminalWidth{width: statuslineDepsWidth},
 		IconIndex:     func(int) int { return 0 },
 	}
 }
 
+// TestComputeData_RateLimitsPresence_TogglesTranscriptSubscribedPricing
+// drives the real (non-injected) costSource path end to end — no
+// Dependencies.CostSource fixture, so this exercises the actual
+// RateLimits-derived subscribed flag threaded through transcriptCosts.
+// A plain-row transcript prices nonzero when stdin carries no rate_limits
+// object and exactly $0 when it does, matching the same subscribed
+// semantics TestComputeTranscriptCosts_SubscribedZeroesPlainRow pins at
+// the transcriptCosts level.
+func TestComputeData_RateLimitsPresence_TogglesTranscriptSubscribedPricing(t *testing.T) {
+	now := time.Now()
+	timestamp := now.Format(time.RFC3339)
+	transcriptPath := setupTranscriptFixture(t, plainRow(timestamp))
+
+	deps := statuslineDeps()
+	deps.Now = func() time.Time { return now }
+	// CacheDir left empty: transcriptCosts always computes fresh, so this
+	// test never touches the on-disk cache.
+
+	buildInput := func(withRateLimits bool) *Input {
+		input := &Input{}
+		input.Model.DisplayName = scenarioModelDisplay
+		input.Workspace.ProjectDir = scenarioProjectDir
+		input.TranscriptPath = transcriptPath
+		if withRateLimits {
+			input.RateLimits = &RateLimitsInput{
+				FiveHour: &RateLimitWindow{UsedPercentage: 1, ResetsAt: now.Unix()},
+			}
+		}
+		return input
+	}
+
+	withoutRL := CreateStatusline(deps)
+	withoutRL.input = buildInput(false)
+	dataWithoutRL := withoutRL.computeData(withoutRL.getCurrentDir())
+	if !dataWithoutRL.CostFromTranscript {
+		t.Fatal("expected transcript-derived cost to succeed without rate_limits")
+	}
+	if dataWithoutRL.SessionCostUSD <= 0 {
+		t.Errorf(
+			"expected nonzero session cost without rate_limits (subscribed=false), got %v",
+			dataWithoutRL.SessionCostUSD,
+		)
+	}
+
+	withRL := CreateStatusline(deps)
+	withRL.input = buildInput(true)
+	dataWithRL := withRL.computeData(withRL.getCurrentDir())
+	if !dataWithRL.CostFromTranscript {
+		t.Fatal("expected transcript-derived cost to succeed with rate_limits present")
+	}
+	if dataWithRL.SessionCostUSD != 0 {
+		t.Errorf(
+			"expected exactly $0 session cost with rate_limits present (subscribed=true), got %v",
+			dataWithRL.SessionCostUSD,
+		)
+	}
+}
+
 func TestGenerate_CostSourceFallback_RendersStdinCost(t *testing.T) {
-	deps := statuslineDeps(200)
+	deps := statuslineDeps()
 	deps.CostSource = func(string) (float64, float64, bool) { return 0, 0, false }
 
 	input := Input{}
@@ -374,7 +512,7 @@ func TestGenerate_CostSourceFallback_RendersStdinCost(t *testing.T) {
 }
 
 func TestGenerate_CostSourceSuccess_RendersTwoPartBody(t *testing.T) {
-	deps := statuslineDeps(200)
+	deps := statuslineDeps()
 	deps.CostSource = func(string) (float64, float64, bool) { return 8.89, 48.27, true }
 
 	input := Input{}
@@ -400,7 +538,7 @@ func TestGenerate_CostSourceSuccess_RendersTwoPartBody(t *testing.T) {
 }
 
 func TestGenerate_EmptyTranscriptPath_NeverCallsCostSource(t *testing.T) {
-	deps := statuslineDeps(200)
+	deps := statuslineDeps()
 	called := false
 	deps.CostSource = func(string) (float64, float64, bool) {
 		called = true

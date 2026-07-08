@@ -3,20 +3,11 @@ package statusline
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
-	"io"
-	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/Veraticus/cc-tools/internal/cost"
 )
-
-// credentialsFileName is the OAuth credentials file that sits at the
-// profile root (the parent of the "projects" directory transcripts
-// live under). Its .claudeAiOauth.subscriptionType field is the only
-// signal used to decide anthropic-backend pricing (see readSubscribed).
-const credentialsFileName = ".credentials.json"
 
 // costCacheKeyPrefix distinguishes transcript-cost cache entries from
 // the git-status cache entries sharing the same cache root/subdir.
@@ -55,8 +46,13 @@ type dailyCacheEntry struct {
 //
 // transcriptPath is expected in the shape
 // "<profile>/projects/<slug>/<session>.jsonl": projectsDir is its
-// grandparent directory, and profileDir (projectsDir's parent) is
-// where the OAuth credentials file lives.
+// grandparent directory.
+//
+// subscribed is the caller's ground truth for whether anthropic-backend
+// rows price at $0 (see statusline.go's costSource, which derives it
+// from stdin's rate_limits presence) — it is folded into the cache key
+// (see costSessionCacheName/costDailyCacheName) so a cache entry
+// computed under one value is never served back under the other.
 //
 // The session and daily figures are cached under two separate keys —
 // session by transcriptPath, daily by projectsDir — rather than one
@@ -65,21 +61,23 @@ type dailyCacheEntry struct {
 // (there is no cheaper way to refresh just one side, since the
 // session-file scan feeds the daily total too) and (re)writes both
 // entries.
-func transcriptCosts(cacheDir string, ttl time.Duration, transcriptPath string, now time.Time) (costState, bool) {
+func transcriptCosts(
+	cacheDir string, ttl time.Duration, transcriptPath string, now time.Time, subscribed bool,
+) (costState, bool) {
 	projectsDir := filepath.Dir(filepath.Dir(transcriptPath))
 
 	if cacheDir == "" {
-		return computeTranscriptCosts(transcriptPath, projectsDir, now)
+		return computeTranscriptCosts(transcriptPath, projectsDir, now, subscribed)
 	}
 
 	root, trusted := openCacheRoot(cacheDir)
 	if !trusted {
-		return computeTranscriptCosts(transcriptPath, projectsDir, now)
+		return computeTranscriptCosts(transcriptPath, projectsDir, now, subscribed)
 	}
 	defer func() { _ = root.Close() }()
 
-	sessionName := costSessionCacheName(transcriptPath)
-	dailyName := costDailyCacheName(projectsDir)
+	sessionName := costSessionCacheName(transcriptPath, subscribed)
+	dailyName := costDailyCacheName(projectsDir, subscribed)
 
 	var cachedSession sessionCacheEntry
 	var cachedDaily dailyCacheEntry
@@ -89,7 +87,7 @@ func transcriptCosts(cacheDir string, ttl time.Duration, transcriptPath string, 
 		return costState{SessionUSD: cachedSession.SessionUSD, DailyUSD: cachedDaily.DailyUSD}, true
 	}
 
-	state, ok := computeTranscriptCosts(transcriptPath, projectsDir, now)
+	state, ok := computeTranscriptCosts(transcriptPath, projectsDir, now, subscribed)
 	if ok {
 		writeCache(root, sessionName, sessionCacheEntry{SessionUSD: state.SessionUSD})
 		writeCache(root, dailyName, dailyCacheEntry{DailyUSD: state.DailyUSD})
@@ -98,16 +96,12 @@ func transcriptCosts(cacheDir string, ttl time.Duration, transcriptPath string, 
 }
 
 // computeTranscriptCosts computes costState fresh (no cache) from
-// transcriptPath and its already-derived projectsDir: subscription
-// status is read from the profile's credentials file, then
-// cost.Costs computes both the session and daily totals in a single
-// pass under that subscribed flag. A scan failure is treated as a
+// transcriptPath and its already-derived projectsDir: cost.Costs
+// computes both the session and daily totals in a single pass under
+// the caller-supplied subscribed flag. A scan failure is treated as a
 // total failure (ok=false) — a partial session-only or daily-only
 // result would be confusing on a status bar.
-func computeTranscriptCosts(transcriptPath, projectsDir string, now time.Time) (costState, bool) {
-	profileDir := filepath.Dir(projectsDir)
-	subscribed := readSubscribed(profileDir)
-
+func computeTranscriptCosts(transcriptPath, projectsDir string, now time.Time, subscribed bool) (costState, bool) {
 	sessionUSD, dailyUSD, err := cost.Costs(transcriptPath, projectsDir, now, subscribed)
 	if err != nil {
 		return costState{}, false
@@ -116,54 +110,32 @@ func computeTranscriptCosts(transcriptPath, projectsDir string, now time.Time) (
 	return costState{SessionUSD: sessionUSD, DailyUSD: dailyUSD}, true
 }
 
-// readSubscribed reports whether profileDir's credentials file
-// carries a non-empty .claudeAiOauth.subscriptionType, meaning the
-// caller is on a Claude subscription (anthropic-backend rows are
-// free). Any failure to find or parse the file — missing, unreadable,
-// malformed — is treated as "not subscribed": conservative for a cost
-// display, since it means list-rate dollars are shown rather than
-// silently zeroed.
-func readSubscribed(profileDir string) bool {
-	root, err := os.OpenRoot(profileDir)
-	if err != nil {
-		return false
+// cacheKeyBytes appends a one-byte subscribed marker to key, so that
+// costSessionCacheName/costDailyCacheName hash subscribed=true and
+// subscribed=false inputs to different cache files even when key
+// itself (transcriptPath or projectsDir) is identical.
+func cacheKeyBytes(key string, subscribed bool) []byte {
+	b := []byte(key)
+	if subscribed {
+		return append(b, 1)
 	}
-	defer func() { _ = root.Close() }()
-
-	f, err := root.Open(credentialsFileName)
-	if err != nil {
-		return false
-	}
-	defer func() { _ = f.Close() }()
-
-	data, err := io.ReadAll(f)
-	if err != nil {
-		return false
-	}
-
-	var creds struct {
-		ClaudeAiOauth struct {
-			SubscriptionType string `json:"subscriptionType"`
-		} `json:"claudeAiOauth"`
-	}
-	if unmarshalErr := json.Unmarshal(data, &creds); unmarshalErr != nil {
-		return false
-	}
-	return creds.ClaudeAiOauth.SubscriptionType != ""
+	return append(b, 0)
 }
 
 // costSessionCacheName returns the cache file name for transcriptPath's
-// session entry: "cost-session-<hex sha256 prefix of transcriptPath>.json".
-func costSessionCacheName(transcriptPath string) string {
-	sum := sha256.Sum256([]byte(transcriptPath))
+// session entry under subscribed:
+// "cost-session-<hex sha256 prefix of transcriptPath+subscribed>.json".
+func costSessionCacheName(transcriptPath string, subscribed bool) string {
+	sum := sha256.Sum256(cacheKeyBytes(transcriptPath, subscribed))
 	return costSessionCacheKeyPrefix + hex.EncodeToString(sum[:cacheHashBytes]) + ".json"
 }
 
 // costDailyCacheName returns the cache file name for projectsDir's daily
-// entry: "cost-daily-<hex sha256 prefix of projectsDir>.json". Keying by
-// projectsDir (rather than transcriptPath) is what lets concurrent
+// entry under subscribed:
+// "cost-daily-<hex sha256 prefix of projectsDir+subscribed>.json". Keying
+// by projectsDir (rather than transcriptPath) is what lets concurrent
 // sessions within the same project share one daily-scan cache entry.
-func costDailyCacheName(projectsDir string) string {
-	sum := sha256.Sum256([]byte(projectsDir))
+func costDailyCacheName(projectsDir string, subscribed bool) string {
+	sum := sha256.Sum256(cacheKeyBytes(projectsDir, subscribed))
 	return costDailyCacheKeyPrefix + hex.EncodeToString(sum[:cacheHashBytes]) + ".json"
 }
