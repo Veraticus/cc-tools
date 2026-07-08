@@ -2,6 +2,7 @@ package notify
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -23,6 +24,12 @@ const (
 	// hoursPerDay names the 24 used in the days+hours tier of humanDuration,
 	// which golangci-lint's mnd check otherwise flags as a bare magic number.
 	hoursPerDay = 24
+
+	// maxDigestTeammates caps how many teammates buildTeammatesSection lists
+	// individually. The section is judge context, not a liveness signal, and
+	// an unbounded roster on a many-teammate session risks blowing the
+	// judge's 60s budget (a 20-teammate digest timed out on 2026-07-08).
+	maxDigestTeammates = 8
 )
 
 // DigestMeta is what the hook layer knows about the current stop event
@@ -165,19 +172,43 @@ func taskFreshnessLines(t TaskActivity, now time.Time) []string {
 	return lines
 }
 
-// buildTeammatesSection lists every spawned teammate with its spawn age and,
-// once it has sent one, the age and summary of its most recent message —
-// context for the judge, never a liveness signal (a teammate is never part
-// of STILL RUNNING or any liveness gate). Unlike STILL RUNNING, which always
-// renders even when empty so the judge can see the deterministic gate found
-// nothing, this section is omitted entirely when there are no teammates:
-// there is no gate here for an empty render to stand in for.
+// teammateLastActivity is the timestamp buildTeammatesSection ranks and
+// stales teammates by: the most recent message, or — before it has sent one
+// — the spawn time.
+func teammateLastActivity(tm TeammateActivity) time.Time {
+	if !tm.LastMessageAt.IsZero() {
+		return tm.LastMessageAt
+	}
+	return tm.SpawnedAt
+}
+
+// buildTeammatesSection lists the maxDigestTeammates most recently active
+// teammates with their spawn age and, once a teammate has sent one, the age
+// and summary of its most recent message — context for the judge, never a
+// liveness signal (a teammate is never part of STILL RUNNING or any
+// liveness gate). Unlike STILL RUNNING, which always renders even when
+// empty so the judge can see the deterministic gate found nothing, this
+// section is omitted entirely when there are no teammates: there is no gate
+// here for an empty render to stand in for. Teammates beyond the cap are
+// collapsed into one trailing summary line rather than dropped silently, so
+// the judge still knows a larger roster exists and roughly how stale it is.
 func buildTeammatesSection(teammates []TeammateActivity, now time.Time) string {
 	if len(teammates) == 0 {
 		return ""
 	}
+	sorted := make([]TeammateActivity, len(teammates))
+	copy(sorted, teammates)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return teammateLastActivity(sorted[i]).After(teammateLastActivity(sorted[j]))
+	})
+
+	shown, excluded := sorted, ([]TeammateActivity)(nil)
+	if len(sorted) > maxDigestTeammates {
+		shown, excluded = sorted[:maxDigestTeammates], sorted[maxDigestTeammates:]
+	}
+
 	lines := []string{"TEAMMATES"}
-	for _, tm := range teammates {
+	for _, tm := range shown {
 		// %q like LastSummary below: Name comes from the constrained
 		// teammate_spawned structured field today, but quoting keeps the
 		// section uniformly newline-safe against any future source change.
@@ -186,6 +217,14 @@ func buildTeammatesSection(teammates []TeammateActivity, now time.Time) string {
 			lines = append(lines, fmt.Sprintf("  last message %s ago: %q",
 				humanDuration(now.Sub(tm.LastMessageAt)), truncate(tm.LastSummary, maxTeammateSummaryLen)))
 		}
+	}
+	if len(excluded) > 0 {
+		// excluded is still sorted by descending recency, so its first entry
+		// is the newest of the excluded — the tightest (smallest) idle bound
+		// that still holds for all of them.
+		newestExcluded := excluded[0]
+		lines = append(lines, fmt.Sprintf("+%d more, idle >%s",
+			len(excluded), humanDuration(now.Sub(teammateLastActivity(newestExcluded)))))
 	}
 	return strings.Join(lines, "\n")
 }

@@ -1,6 +1,8 @@
 package notify
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -208,6 +210,93 @@ func TestBuildDigest_Teammates(t *testing.T) {
 
 	got := BuildDigest(meta, scan, nil, now)
 	assertDigestEqual(t, got, wantTeammatesDigest)
+}
+
+// makeTeammateAt returns a TeammateActivity whose last activity — the value
+// buildTeammatesSection sorts and stales by — is exactly idleFor before now:
+// spawned an hour before that, with a last message idleFor ago.
+func makeTeammateAt(name string, now time.Time, idleFor time.Duration) TeammateActivity {
+	return TeammateActivity{
+		Name:          name,
+		SpawnedAt:     now.Add(-idleFor - time.Hour),
+		LastMessageAt: now.Add(-idleFor),
+		LastSummary:   name + " summary",
+	}
+}
+
+// wantTeammateLines renders the two lines buildTeammatesSection emits for a
+// teammate built by makeTeammateAt, using the same humanDuration helper the
+// implementation uses — this test is exercising the sort/cap logic, not
+// humanDuration's formatting (which TestHumanDuration covers directly).
+func wantTeammateLines(name string, idleFor time.Duration) string {
+	return fmt.Sprintf("- %q spawned %s ago\n  last message %s ago: %q",
+		name, humanDuration(idleFor+time.Hour), humanDuration(idleFor), name+" summary")
+}
+
+// makeTeammates returns n teammates named tm1..tmN, tm1 the most recently
+// active (idle 1 hour) through tmN the least (idle N hours) — so the
+// recency order the cap must preserve is simply ascending name order.
+func makeTeammates(now time.Time, n int) []TeammateActivity {
+	teammates := make([]TeammateActivity, n)
+	for i := range teammates {
+		teammates[i] = makeTeammateAt(fmt.Sprintf("tm%d", i+1), now, time.Duration(i+1)*time.Hour)
+	}
+	return teammates
+}
+
+func TestBuildTeammatesSection_AtCapNoSummary(t *testing.T) {
+	now := time.Date(2026, 7, 5, 15, 0, 0, 0, time.UTC)
+	teammates := makeTeammates(now, maxDigestTeammates)
+
+	got := buildTeammatesSection(teammates, now)
+
+	var wantLines []string
+	wantLines = append(wantLines, "TEAMMATES")
+	for i := 1; i <= maxDigestTeammates; i++ {
+		wantLines = append(wantLines, wantTeammateLines(fmt.Sprintf("tm%d", i), time.Duration(i)*time.Hour))
+	}
+	want := strings.Join(wantLines, "\n")
+
+	if got != want {
+		t.Errorf("teammates section at cap mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+func TestBuildTeammatesSection_OverCapAddsSummary(t *testing.T) {
+	tests := []struct {
+		name        string
+		count       int
+		wantSummary string
+	}{
+		{"one over cap", maxDigestTeammates + 1, "+1 more, idle >9h0m"},
+		{"twenty teammates", 20, "+12 more, idle >9h0m"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			now := time.Date(2026, 7, 5, 15, 0, 0, 0, time.UTC)
+			teammates := makeTeammates(now, tt.count)
+
+			got := buildTeammatesSection(teammates, now)
+
+			var wantLines []string
+			wantLines = append(wantLines, "TEAMMATES")
+			for i := 1; i <= maxDigestTeammates; i++ {
+				wantLines = append(wantLines, wantTeammateLines(fmt.Sprintf("tm%d", i), time.Duration(i)*time.Hour))
+			}
+			wantLines = append(wantLines, tt.wantSummary)
+			want := strings.Join(wantLines, "\n")
+
+			if got != want {
+				t.Errorf("teammates section over cap mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)
+			}
+
+			excludedName := fmt.Sprintf("tm%d", maxDigestTeammates+1)
+			if strings.Contains(got, "\""+excludedName+"\"") {
+				t.Errorf("excluded teammate %q must not appear in the section, got:\n%s", excludedName, got)
+			}
+		})
+	}
 }
 
 func TestHumanDuration(t *testing.T) {
