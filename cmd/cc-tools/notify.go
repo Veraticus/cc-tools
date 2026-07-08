@@ -78,7 +78,6 @@ func runNotifyCommand() {
 	defer cancel()
 
 	dispatchNotify(ctx, notifyClientConfig{
-		StateBase:   *stateBase,
 		DryRun:      *dryRun,
 		Sender:      sender,
 		Log:         log,
@@ -95,7 +94,6 @@ func runNotifyCommand() {
 // can drive the socket-vs-fallback dispatch logic without touching process
 // globals.
 type notifyClientConfig struct {
-	StateBase   string
 	DryRun      bool
 	Sender      notify.Sender
 	Log         notify.DecisionLog
@@ -126,11 +124,10 @@ func dispatchNotify(ctx context.Context, cfg notifyClientConfig, stdin io.Reader
 	}
 
 	p := notify.Pipeline{
-		StateBase: cfg.StateBase,
-		DryRun:    cfg.DryRun,
-		Judge:     notify.Judge{Bin: disabledJudgeBin},
-		Sender:    cfg.Sender,
-		Log:       cfg.Log,
+		DryRun: cfg.DryRun,
+		Judge:  notify.Judge{Bin: disabledJudgeBin},
+		Sender: cfg.Sender,
+		Log:    cfg.Log,
 		// NopState: notifyd holds the real dedupe state in memory now, so
 		// this single fallback invocation has no shared history to consult
 		// on disk — see NopState's doc comment for the reliability
@@ -227,12 +224,11 @@ func runNotifydCommand() {
 
 	d := notify.Daemon{
 		Pipeline: notify.Pipeline{
-			StateBase: *stateBase,
-			DryRun:    *dryRun,
-			Judge:     judge,
-			Sender:    sender,
-			Log:       log,
-			SelfBin:   selfBin,
+			DryRun:  *dryRun,
+			Judge:   judge,
+			Sender:  sender,
+			Log:     log,
+			SelfBin: selfBin,
 			Present: func(environ []string, now time.Time) bool {
 				return notify.UserPresent(environ, now, notify.RunCommand)
 			},

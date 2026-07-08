@@ -56,11 +56,9 @@ const blockDecisionJSON = `"decision":"block"`
 
 // runCorpusStop drives one Stop hook invocation over fixture through a fresh
 // Pipeline built like newGoalTestPipeline (DryRun:false; Watchdog left nil,
-// so any arm attempt no-ops), returning the accumulated stdout, the decision
-// log path, and the session's state dir for the caller to inspect.
-func runCorpusStop(
-	t *testing.T, stdout *bytes.Buffer, sent *[]capturedRequest, fixture, sessionID string,
-) (string, string) {
+// so any arm attempt no-ops), returning the accumulated decision log path
+// for the caller to inspect.
+func runCorpusStop(t *testing.T, stdout *bytes.Buffer, sent *[]capturedRequest, fixture, sessionID string) string {
 	t.Helper()
 	stubBin := writeStubClaude(t)
 	p, logPath := newGoalTestPipeline(t, stdout, stubBin, neverPresent)
@@ -76,7 +74,7 @@ func runCorpusStop(
 	if strings.Contains(stdout.String(), blockDecisionJSON) {
 		t.Fatalf("stdout = %q, must never contain a block decision", stdout.String())
 	}
-	return logPath, filepath.Join(p.StateBase, sessionID)
+	return logPath
 }
 
 // TestCorpus_ActiveParkedGrailquest_TwoStops_SilentNoBlock replays the
@@ -244,7 +242,7 @@ func TestCorpus_AllShapes_NeverBlock(t *testing.T) {
 
 			var stdout bytes.Buffer
 			var sent []capturedRequest
-			logPath, _ := runCorpusStop(t, &stdout, &sent, fixture, "sess-corpus-sweep-"+fixture)
+			logPath := runCorpusStop(t, &stdout, &sent, fixture, "sess-corpus-sweep-"+fixture)
 
 			recs := readDecisionLog(t, logPath)
 			if len(recs) != 1 {

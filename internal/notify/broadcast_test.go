@@ -92,7 +92,7 @@ func TestResolveBroadcastSource_NoMatchAndBadInputs(t *testing.T) {
 }
 
 func TestBroadcastFacts_NonBroadcastEventsAreNil(t *testing.T) {
-	p := Pipeline{StateBase: t.TempDir()}
+	p := Pipeline{}
 	now := time.Now()
 
 	if got := p.broadcastFacts(context.Background(), HookInput{HookEventName: "Stop"}, now); got != nil {
@@ -131,6 +131,8 @@ func (s claimBroadcastSpy) ClaimBroadcast(context.Context, string, time.Duration
 	return true
 }
 
+func (claimBroadcastSpy) DeleteSession(context.Context, string) {}
+
 // TestBroadcastFacts_LocalJobDefersRegardlessOfSourceSendTiming replaces the
 // deleted broadcastCoveredWindow heuristic's coverage: ownership of a
 // broadcast that resolves to a local job is structural, not a function of
@@ -149,12 +151,11 @@ func TestBroadcastFacts_LocalJobDefersRegardlessOfSourceSendTiming(t *testing.T)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			base := t.TempDir()
 			cfg := t.TempDir()
 			now := time.Now()
 			writeJobState(t, cfg, "job00001", "deploy the widget", "job-session-id", "/projects/widget")
 
-			p := Pipeline{StateBase: base, Environ: []string{"CLAUDE_CONFIG_DIR=" + cfg}}
+			p := Pipeline{Environ: []string{"CLAUDE_CONFIG_DIR=" + cfg}}
 			in := HookInput{
 				HookEventName: "Notification", NotificationType: tt.notifyType,
 				Message: "deploy the widget needs your input: proceed?",
@@ -178,14 +179,13 @@ func TestBroadcastFacts_LocalJobDefersRegardlessOfSourceSendTiming(t *testing.T)
 // this session will never deliver is pointless state, so broadcastFacts must
 // resolve the source before it ever calls ClaimBroadcast.
 func TestBroadcastFacts_LocalJobDoesNotWriteClaim(t *testing.T) {
-	base := t.TempDir()
 	cfg := t.TempDir()
 	now := time.Now()
 	writeJobState(t, cfg, "job00001", "deploy the widget", "job-session-id", "/projects/widget")
 
 	var claimed bool
 	p := Pipeline{
-		StateBase: base, Environ: []string{"CLAUDE_CONFIG_DIR=" + cfg}, State: claimBroadcastSpy{called: &claimed},
+		Environ: []string{"CLAUDE_CONFIG_DIR=" + cfg}, State: claimBroadcastSpy{called: &claimed},
 	}
 	in := HookInput{
 		HookEventName: "Notification", NotificationType: "agent_needs_input",
@@ -205,11 +205,10 @@ func TestBroadcastFacts_LocalJobDoesNotWriteClaim(t *testing.T) {
 // job (no matching job state in this host's jobs dir) is unaffected by the
 // Local change and still runs the first-claimant-wins dedupe.
 func TestBroadcastFacts_UnresolvedBroadcastStillUsesClaimPath(t *testing.T) {
-	base := t.TempDir()
 	cfg := t.TempDir()
 	now := time.Now()
 
-	p := Pipeline{StateBase: base, Environ: []string{"CLAUDE_CONFIG_DIR=" + cfg}, State: newMemDedupeState()}
+	p := Pipeline{Environ: []string{"CLAUDE_CONFIG_DIR=" + cfg}, State: newMemDedupeState()}
 	in := HookInput{
 		HookEventName: "Notification", NotificationType: "agent_needs_input",
 		Message: "deploy the widget needs your input: proceed?",

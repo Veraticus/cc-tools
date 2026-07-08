@@ -53,11 +53,11 @@ func ParseHookInput(r io.Reader) (HookInput, error) {
 		return HookInput{}, fmt.Errorf("parsing hook input: %w", err)
 	}
 
-	// SessionID is used by the caller (Pipeline.Run) to compose a per-session
-	// state directory, StateBase/SessionID, that gets os.RemoveAll'd whole on
-	// SessionEnd. Reject anything that could steer that path (and its
-	// RemoveAll) outside the intended per-session location, rather than let
-	// a malformed or hostile session_id ever reach that composition.
+	// SessionID keys the daemon's in-memory dedupe state (MemoryState.sessions)
+	// and is written verbatim into every decision-log record. Reject anything
+	// that could carry a path separator or traversal sequence, rather than
+	// let a malformed or hostile session_id ever reach a future call site
+	// that joins it onto a filesystem path.
 	if !validSessionID(in.SessionID) {
 		return HookInput{}, fmt.Errorf("parsing hook input: invalid session_id %q", in.SessionID)
 	}
@@ -65,9 +65,10 @@ func ParseHookInput(r io.Reader) (HookInput, error) {
 	return in, nil
 }
 
-// validSessionID reports whether id is safe to join under a state base
-// directory. An empty id or "." would collapse filepath.Join(base, id) to
-// base itself; a path separator or ".." could steer it outside base.
+// validSessionID reports whether id is safe to use as a map key and to join
+// onto a filesystem path, should some future call site need to. An empty id
+// or "." would collapse filepath.Join(base, id) to base itself; a path
+// separator or ".." could steer it outside base.
 func validSessionID(id string) bool {
 	return id != "" && id != "." &&
 		!strings.ContainsRune(id, filepath.Separator) &&

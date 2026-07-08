@@ -79,17 +79,15 @@ func waitForDecisionRecords(t *testing.T, path string, n int, timeout time.Durat
 // at a fresh temp state base, mirroring newTestPipeline's fakes.
 func newTestDaemon(t *testing.T) (Daemon, string) {
 	t.Helper()
-	stateBase := t.TempDir()
-	logPath := filepath.Join(stateBase, "notify-decisions.jsonl")
+	logPath := filepath.Join(t.TempDir(), "notify-decisions.jsonl")
 	d := Daemon{
 		Pipeline: Pipeline{
-			StateBase: stateBase,
-			DryRun:    true,
-			Judge:     Judge{Bin: writeStubClaude(t), Model: "claude-haiku-4-5"},
-			Log:       DecisionLog{Path: logPath},
-			Stdout:    os.Stdout,
-			Host:      "testhost",
-			Present:   neverPresent,
+			DryRun:  true,
+			Judge:   Judge{Bin: writeStubClaude(t), Model: "claude-haiku-4-5"},
+			Log:     DecisionLog{Path: logPath},
+			Stdout:  os.Stdout,
+			Host:    "testhost",
+			Present: neverPresent,
 		},
 	}
 	return d, logPath
@@ -164,21 +162,19 @@ func dialAndSendFrame(t *testing.T, sockPath string, frame Frame) {
 // record must land almost immediately, proving the loop dispatched A's
 // judge call off itself instead of processing frames serially.
 func TestDaemon_Loop_SlowJudgeForOneSessionNeverDelaysAnother(t *testing.T) {
-	stateBase := t.TempDir()
-	logPath := filepath.Join(stateBase, "notify-decisions.jsonl")
+	logPath := filepath.Join(t.TempDir(), "notify-decisions.jsonl")
 	slowJudgeBin := writeStubClaude(t)
 	t.Setenv("STUB_SLEEP", "2")
 	t.Setenv("STUB_STDOUT", `{"notify":true,"urgency":"done","task":"t","body":"finished","reason":"r"}`)
 
 	d := Daemon{
 		Pipeline: Pipeline{
-			StateBase: stateBase,
-			DryRun:    true,
-			Judge:     Judge{Bin: slowJudgeBin, Model: "claude-haiku-4-5"},
-			Log:       DecisionLog{Path: logPath},
-			Stdout:    os.Stdout,
-			Host:      "testhost",
-			Present:   neverPresent,
+			DryRun:  true,
+			Judge:   Judge{Bin: slowJudgeBin, Model: "claude-haiku-4-5"},
+			Log:     DecisionLog{Path: logPath},
+			Stdout:  os.Stdout,
+			Host:    "testhost",
+			Present: neverPresent,
 		},
 	}
 	sockPath := filepath.Join(t.TempDir(), "notifyd.sock")
@@ -231,8 +227,9 @@ func TestDaemon_Loop_SlowJudgeForOneSessionNeverDelaysAnother(t *testing.T) {
 // dedupe now lives entirely in memory: a deterministic send for a session
 // followed by an idle_prompt for the same session inside dedupeWindow must
 // resolve silent with a dedupe reason, and the session's on-disk state
-// directory under StateBase must never have been created — the old
-// file-based dedupe would have created it via SessionState.MarkNotified.
+// directory (this test's own stateBase temp dir) must never have been
+// created — the old file-based dedupe would have created it via
+// SessionState.MarkNotified.
 func TestDaemon_Loop_IdlePromptDedupe_NeverTouchesFiles(t *testing.T) {
 	stateBase := t.TempDir()
 	logPath := filepath.Join(stateBase, "notify-decisions.jsonl")
@@ -240,14 +237,13 @@ func TestDaemon_Loop_IdlePromptDedupe_NeverTouchesFiles(t *testing.T) {
 
 	d := Daemon{
 		Pipeline: Pipeline{
-			StateBase: stateBase,
-			DryRun:    false,
-			Judge:     Judge{Bin: writeStubClaude(t), Model: "claude-haiku-4-5"},
-			Sender:    stubSenderRecording(&sent),
-			Log:       DecisionLog{Path: logPath},
-			Stdout:    os.Stdout,
-			Host:      "testhost",
-			Present:   neverPresent,
+			DryRun:  false,
+			Judge:   Judge{Bin: writeStubClaude(t), Model: "claude-haiku-4-5"},
+			Sender:  stubSenderRecording(&sent),
+			Log:     DecisionLog{Path: logPath},
+			Stdout:  os.Stdout,
+			Host:    "testhost",
+			Present: neverPresent,
 		},
 	}
 	sockPath := filepath.Join(t.TempDir(), "notifyd.sock")
@@ -290,6 +286,71 @@ func TestDaemon_Loop_IdlePromptDedupe_NeverTouchesFiles(t *testing.T) {
 	}
 }
 
+// TestDaemon_Loop_SessionEnd_EvictsDedupeState proves SessionEnd deletes a
+// session's dedupe record from the loop's MemoryState (see
+// MemoryState.DeleteSession): without eviction, every session the daemon
+// ever handles would leak a MemoryState entry for its entire uptime, since
+// each session_id is a fresh UUID. An identical permission_prompt sent
+// again after a SessionEnd frame must resolve as a fresh send, not the
+// suppressBlockedRepeat dedupe (decide.go) that an identical repeat within
+// blockedRepeatWindow would otherwise trigger — see
+// TestDaemon_Loop_IdlePromptDedupe_NeverTouchesFiles for that same dedupe
+// path with no SessionEnd in between.
+func TestDaemon_Loop_SessionEnd_EvictsDedupeState(t *testing.T) {
+	stateBase := t.TempDir()
+	logPath := filepath.Join(stateBase, "notify-decisions.jsonl")
+	var sent []capturedRequest
+
+	d := Daemon{
+		Pipeline: Pipeline{
+			DryRun:  false,
+			Judge:   Judge{Bin: writeStubClaude(t), Model: "claude-haiku-4-5"},
+			Sender:  stubSenderRecording(&sent),
+			Log:     DecisionLog{Path: logPath},
+			Stdout:  os.Stdout,
+			Host:    "testhost",
+			Present: neverPresent,
+		},
+	}
+	sockPath := filepath.Join(t.TempDir(), "notifyd.sock")
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("net.Listen() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = d.Serve(ctx, ln) }()
+
+	const sessionID = "sess-end-evicts"
+	dialAndSendFrame(t, sockPath, Frame{HookInput: HookInput{
+		SessionID: sessionID, CWD: "/home/user/project", TranscriptPath: "/nonexistent",
+		HookEventName: "Notification", NotificationType: "permission_prompt", Message: "allow rm?",
+	}})
+	waitForDecisionRecords(t, logPath, 1, 2*time.Second)
+
+	dialAndSendFrame(t, sockPath, Frame{HookInput: HookInput{SessionID: sessionID, HookEventName: "SessionEnd"}})
+	waitForDecisionRecords(t, logPath, 2, 2*time.Second)
+
+	dialAndSendFrame(t, sockPath, Frame{HookInput: HookInput{
+		SessionID: sessionID, CWD: "/home/user/project", TranscriptPath: "/nonexistent",
+		HookEventName: "Notification", NotificationType: "permission_prompt", Message: "allow rm?",
+	}})
+	recs := waitForDecisionRecords(t, logPath, 3, 2*time.Second)
+
+	if recs[0].Outcome != OutcomeSend.String() {
+		t.Fatalf("record[0] Outcome = %q, want send", recs[0].Outcome)
+	}
+	if recs[1].Outcome != OutcomeSilent.String() || recs[1].Reason != "session end" {
+		t.Fatalf("record[1] = %+v, want the session-end silent record", recs[1])
+	}
+	if recs[2].Outcome != OutcomeSend.String() {
+		t.Fatalf("record[2] = %+v, want send (SessionEnd must have evicted the dedupe record)", recs[2])
+	}
+	if len(sent) != 2 {
+		t.Fatalf("sent = %+v, want exactly two delivered notifications (SessionEnd evicts dedupe state)", sent)
+	}
+}
+
 // TestDaemon_Loop_SameSessionFramesProcessInArrivalOrder sends three
 // identical frames for the same session, each held back until the prior
 // one's decision record has landed, and confirms every repeat after the
@@ -304,20 +365,18 @@ func TestDaemon_Loop_IdlePromptDedupe_NeverTouchesFiles(t *testing.T) {
 // fixed by it. Run with -race, this also catches any concurrent,
 // unsynchronized map access in MemoryState.
 func TestDaemon_Loop_SameSessionFramesProcessInArrivalOrder(t *testing.T) {
-	stateBase := t.TempDir()
-	logPath := filepath.Join(stateBase, "notify-decisions.jsonl")
+	logPath := filepath.Join(t.TempDir(), "notify-decisions.jsonl")
 	var sent []capturedRequest
 
 	d := Daemon{
 		Pipeline: Pipeline{
-			StateBase: stateBase,
-			DryRun:    false,
-			Judge:     Judge{Bin: writeStubClaude(t), Model: "claude-haiku-4-5"},
-			Sender:    stubSenderRecording(&sent),
-			Log:       DecisionLog{Path: logPath},
-			Stdout:    os.Stdout,
-			Host:      "testhost",
-			Present:   neverPresent,
+			DryRun:  false,
+			Judge:   Judge{Bin: writeStubClaude(t), Model: "claude-haiku-4-5"},
+			Sender:  stubSenderRecording(&sent),
+			Log:     DecisionLog{Path: logPath},
+			Stdout:  os.Stdout,
+			Host:    "testhost",
+			Present: neverPresent,
 		},
 	}
 	sockPath := filepath.Join(t.TempDir(), "notifyd.sock")
@@ -568,17 +627,15 @@ func TestWatchdogSendWithDedupe_MarksNotifiedThroughLoopState(t *testing.T) {
 		t.Fatalf("Send() error = %v", err)
 	}
 
-	stateBase := t.TempDir()
-	logPath := filepath.Join(stateBase, "notify-decisions.jsonl")
+	logPath := filepath.Join(t.TempDir(), "notify-decisions.jsonl")
 	p := Pipeline{
-		StateBase: stateBase,
-		DryRun:    true,
-		Judge:     Judge{Bin: writeStubClaude(t)},
-		Log:       DecisionLog{Path: logPath},
-		Stdout:    new(strings.Builder),
-		Host:      "testhost",
-		Present:   neverPresent,
-		State:     loopState{ch: ch},
+		DryRun:  true,
+		Judge:   Judge{Bin: writeStubClaude(t)},
+		Log:     DecisionLog{Path: logPath},
+		Stdout:  new(strings.Builder),
+		Host:    "testhost",
+		Present: neverPresent,
+		State:   loopState{ch: ch},
 	}
 	in := HookInput{SessionID: sessionID, HookEventName: "Notification", NotificationType: "idle_prompt"}
 	if err := p.Run(context.Background(), in); err != nil {
@@ -709,10 +766,71 @@ func TestListen_SelfBind_CreatesDirAndSocketWithExpectedPerms(t *testing.T) {
 	}
 }
 
+// TestListen_SelfBind_RejectsSymlinkedSocketDir proves Listen refuses to
+// bind inside a socket directory that is actually a symlink: another local
+// user sharing /tmp (the XDG_RUNTIME_DIR-unset fallback) could otherwise
+// plant a symlink at the expected cc-tools-$UID path and redirect the
+// daemon's bind wherever they choose. os.MkdirAll is a no-op on a path that
+// already resolves to a directory (symlink or not), so the fix must reject
+// this after MkdirAll, not rely on it to fail.
+func TestListen_SelfBind_RejectsSymlinkedSocketDir(t *testing.T) {
+	t.Setenv("LISTEN_FDS", "")
+
+	root := t.TempDir()
+	realDir := filepath.Join(root, "real")
+	if err := os.Mkdir(realDir, 0o700); err != nil {
+		t.Fatalf("creating real dir: %v", err)
+	}
+	link := filepath.Join(root, "cc-tools-link")
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Fatalf("creating symlink: %v", err)
+	}
+	sockPath := filepath.Join(link, "notifyd.sock")
+
+	if _, err := Listen(sockPath); err == nil {
+		t.Fatal("Listen() error = nil, want an error for a symlinked socket dir")
+	}
+	if _, statErr := os.Stat(sockPath); !os.IsNotExist(statErr) {
+		t.Errorf("socket exists (err = %v), want no bind through a symlinked dir", statErr)
+	}
+}
+
+// TestListen_SelfBind_RejectsWorldWritableSocketDir proves Listen refuses to
+// bind inside a socket directory that is not owner-only (0700): MkdirAll
+// never changes an existing directory's mode, so a pre-planted
+// world-writable directory at the expected path would otherwise let any
+// other local user race the daemon for the socket file.
+func TestListen_SelfBind_RejectsWorldWritableSocketDir(t *testing.T) {
+	t.Setenv("LISTEN_FDS", "")
+
+	dir := filepath.Join(t.TempDir(), "cc-tools-777")
+	if err := os.Mkdir(dir, 0o777); err != nil {
+		t.Fatalf("creating dir: %v", err)
+	}
+	// Mkdir's requested mode is subject to umask; Chmod is not.
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatalf("chmod dir: %v", err)
+	}
+	sockPath := filepath.Join(dir, "notifyd.sock")
+
+	if _, err := Listen(sockPath); err == nil {
+		t.Fatal("Listen() error = nil, want an error for a world-writable socket dir")
+	}
+	if _, statErr := os.Stat(sockPath); !os.IsNotExist(statErr) {
+		t.Errorf("socket exists (err = %v), want no bind through a world-writable dir", statErr)
+	}
+}
+
 func TestListen_SelfBind_RemovesStaleSocket(t *testing.T) {
 	t.Setenv("LISTEN_FDS", "")
 
-	dir := t.TempDir()
+	// A fresh subdirectory, not t.TempDir() itself: t.TempDir() is 0755,
+	// and verifySocketDir now requires 0700 — exactly as a real crashed
+	// prior daemon's own MkdirAll(dir, 0700) would have left it.
+	dir := filepath.Join(t.TempDir(), "notifyd")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("creating socket dir: %v", err)
+	}
 	sockPath := filepath.Join(dir, "notifyd.sock")
 
 	// Simulate a crashed prior daemon: a socket file (well, any leftover
@@ -798,7 +916,9 @@ func TestListen_SystemdSocketActivation_BindsInheritedFD(t *testing.T) {
 func TestListen_LISTEN_FDS_Zero_FallsBackToSelfBind(t *testing.T) {
 	t.Setenv("LISTEN_FDS", "0")
 
-	sockPath := filepath.Join(t.TempDir(), "notifyd.sock")
+	// A nonexistent subdirectory, not t.TempDir() itself (0755): MkdirAll
+	// must create it fresh at 0700 for verifySocketDir to accept it.
+	sockPath := filepath.Join(t.TempDir(), "notifyd", "notifyd.sock")
 	ln, err := Listen(sockPath)
 	if err != nil {
 		t.Fatalf("Listen() error = %v", err)

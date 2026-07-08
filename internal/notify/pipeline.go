@@ -51,6 +51,13 @@ type DedupeState interface {
 	// reporting whether this call won; see MemoryState.ClaimBroadcast's
 	// first-claimant contract. dryRun observes without claiming.
 	ClaimBroadcast(ctx context.Context, key string, window time.Duration, now time.Time, dryRun bool) bool
+	// DeleteSession removes sessionID's dedupe record entirely, called on
+	// SessionEnd so a MemoryState-backed daemon does not accumulate one
+	// entry per session for its entire uptime — every session_id is a
+	// fresh UUID, so without eviction the map only grows. ctx lets the
+	// daemon's loopState implementation bail out of its loop round trip on
+	// shutdown, exactly as its other methods do.
+	DeleteSession(ctx context.Context, sessionID string)
 }
 
 // Pipeline is the top-level orchestrator for a single hook invocation: it
@@ -61,11 +68,10 @@ type DedupeState interface {
 // transcript scan, judge call, or notification send all degrade to a
 // documented fallback rather than losing the hook's exit code 0 contract.
 type Pipeline struct {
-	StateBase string
-	DryRun    bool
-	Judge     Judge
-	Sender    Sender
-	Log       DecisionLog
+	DryRun bool
+	Judge  Judge
+	Sender Sender
+	Log    DecisionLog
 	// State is where dedupe/broadcast-claim bookkeeping lives. The zero
 	// value (nil) defaults to NopState{} — every session reports "never
 	// notified" — so only callers that want real dedupe (notifyd's
@@ -134,6 +140,7 @@ func (p Pipeline) Run(ctx context.Context, in HookInput) error {
 		if p.Watchdog != nil {
 			p.Watchdog.Reap(in.SessionID)
 		}
+		p.dedupeState().DeleteSession(ctx, in.SessionID)
 		p.logRecord(in, now, DecisionRecord{Outcome: OutcomeSilent.String(), Reason: "session end"})
 		return nil
 	}

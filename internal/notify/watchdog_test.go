@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -473,7 +474,7 @@ func TestRunWatchdog_GoalMet_JudgeErrorFallsBack(t *testing.T) {
 	if n.Urgency != UrgencyDone {
 		t.Errorf("Urgency = %v, want UrgencyDone", n.Urgency)
 	}
-	if !contains(n.Title, "goal complete") {
+	if !strings.Contains(n.Title, "goal complete") {
 		t.Errorf("Title = %q, want it to contain %q", n.Title, "goal complete")
 	}
 }
@@ -752,23 +753,7 @@ func TestRunWatchdog_NoGrowthWake_ReusesCachedScan(t *testing.T) {
 	if h.send.sendCount() != 1 {
 		t.Fatalf("sendCount after wake 2 = %d, want 1", h.send.sendCount())
 	}
-	if n := h.send.notifications()[0]; !contains(n.Body, "0 task(s)") {
+	if n := h.send.notifications()[0]; !strings.Contains(n.Body, "0 task(s)") {
 		t.Errorf("ceiling body = %q, want it to report 0 tasks (from the cached, no-live-task scan)", n.Body)
 	}
-}
-
-// contains reports whether s contains substr (avoids importing strings just
-// for this one check spread across a couple of tests).
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && indexOf(s, substr) >= 0
-}
-
-func indexOf(s, substr string) int {
-	n, m := len(s), len(substr)
-	for i := 0; i+m <= n; i++ {
-		if s[i:i+m] == substr {
-			return i
-		}
-	}
-	return -1
 }

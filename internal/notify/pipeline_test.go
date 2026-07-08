@@ -45,16 +45,14 @@ func newTestPipeline(
 	present func([]string, time.Time) bool,
 ) (Pipeline, string) {
 	t.Helper()
-	stateBase := t.TempDir()
-	logPath := filepath.Join(stateBase, "notify-decisions.jsonl")
+	logPath := filepath.Join(t.TempDir(), "notify-decisions.jsonl")
 	p := Pipeline{
-		StateBase: stateBase,
-		DryRun:    true,
-		Judge:     Judge{Bin: judgeBin, Model: "claude-haiku-4-5"},
-		Log:       DecisionLog{Path: logPath},
-		Stdout:    stdout,
-		Host:      "testhost",
-		Present:   present,
+		DryRun:  true,
+		Judge:   Judge{Bin: judgeBin, Model: "claude-haiku-4-5"},
+		Log:     DecisionLog{Path: logPath},
+		Stdout:  stdout,
+		Host:    "testhost",
+		Present: present,
 	}
 	return p, logPath
 }
@@ -84,16 +82,14 @@ func newGoalTestPipeline(
 	present func([]string, time.Time) bool,
 ) (Pipeline, string) {
 	t.Helper()
-	stateBase := t.TempDir()
-	logPath := filepath.Join(stateBase, "notify-decisions.jsonl")
+	logPath := filepath.Join(t.TempDir(), "notify-decisions.jsonl")
 	p := Pipeline{
-		StateBase: stateBase,
-		DryRun:    false,
-		Judge:     Judge{Bin: judgeBin, Model: "claude-haiku-4-5"},
-		Log:       DecisionLog{Path: logPath},
-		Stdout:    stdout,
-		SelfBin:   judgeBin,
-		Present:   present,
+		DryRun:  false,
+		Judge:   Judge{Bin: judgeBin, Model: "claude-haiku-4-5"},
+		Log:     DecisionLog{Path: logPath},
+		Stdout:  stdout,
+		SelfBin: judgeBin,
+		Present: present,
 	}
 	return p, logPath
 }
@@ -129,6 +125,10 @@ func (d memDedupeState) ClaimBroadcast(
 	_ context.Context, key string, window time.Duration, now time.Time, dryRun bool,
 ) bool {
 	return d.m.ClaimBroadcast(key, window, now, dryRun)
+}
+
+func (d memDedupeState) DeleteSession(_ context.Context, sessionID string) {
+	d.m.DeleteSession(sessionID)
 }
 
 // fakeWatchdog is a spy Pipeline.Watchdog for tests that need to observe

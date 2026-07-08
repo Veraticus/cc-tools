@@ -53,7 +53,6 @@ func testNotifyClientConfig(t *testing.T, sockPath string) notifyClientConfig {
 	t.Helper()
 	stateBase := t.TempDir()
 	return notifyClientConfig{
-		StateBase:   stateBase,
 		DryRun:      true,
 		Sender:      notify.Sender{},
 		Log:         notify.DecisionLog{Path: filepath.Join(stateBase, "notify-decisions.jsonl")},
@@ -238,13 +237,12 @@ func TestDispatchNotify_ReachableSocket_ReturnsFastEvenWithSlowDaemonJudge(t *te
 
 	d := notify.Daemon{
 		Pipeline: notify.Pipeline{
-			StateBase: stateBase,
-			DryRun:    true,
-			Judge:     notify.Judge{Bin: slowJudgeBin, Model: "claude-haiku-4-5"},
-			Log:       notify.DecisionLog{Path: logPath},
-			Stdout:    os.Stdout,
-			Host:      "testhost",
-			Present:   func(_ []string, _ time.Time) bool { return false },
+			DryRun:  true,
+			Judge:   notify.Judge{Bin: slowJudgeBin, Model: "claude-haiku-4-5"},
+			Log:     notify.DecisionLog{Path: logPath},
+			Stdout:  os.Stdout,
+			Host:    "testhost",
+			Present: func(_ []string, _ time.Time) bool { return false },
 		},
 	}
 	sockPath := filepath.Join(t.TempDir(), "notifyd.sock")

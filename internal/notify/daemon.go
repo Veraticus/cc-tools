@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"time"
 )
 
@@ -27,9 +28,9 @@ const connReadDeadline = 5 * time.Second
 
 // Daemon runs the notify Pipeline once per accepted connection, serializing
 // every access to its in-memory dedupe state through a single event-loop
-// goroutine (see Serve/loop). Pipeline is a template: StateBase, DryRun,
-// Judge, Sender, Log, SelfBin, Host, and Present are the daemon's own fixed
-// config, resolved once at startup — Environ, Workspace, and ParentPID are
+// goroutine (see Serve/loop). Pipeline is a template: DryRun, Judge, Sender,
+// Log, SelfBin, Host, and Present are the daemon's own fixed config,
+// resolved once at startup — Environ, Workspace, and ParentPID are
 // overwritten per connection from the client's Frame, since those carry the
 // hook invocation's own process context (see Frame's doc comment) that the
 // daemon's single long-lived environment cannot supply. Pipeline.State and
@@ -235,6 +236,11 @@ func (l loopState) ClaimBroadcast(
 	var won bool
 	l.call(ctx, func(m *MemoryState) { won = m.ClaimBroadcast(key, window, now, dryRun) })
 	return won
+}
+
+// DeleteSession implements DedupeState via the loop's MemoryState.
+func (l loopState) DeleteSession(ctx context.Context, sessionID string) {
+	l.call(ctx, func(m *MemoryState) { m.DeleteSession(sessionID) })
 }
 
 // watchdogEntry is one session's live watchdog registration in the loop's
@@ -465,11 +471,20 @@ func systemdSocketInherited() bool {
 	return pidErr == nil && pid == os.Getpid()
 }
 
+// socketDirPerm is the permission mode required of the directory a
+// self-bound notifyd socket lives in — owner-only, mirroring cacheDirPerm
+// in statusline/cache.go.
+const socketDirPerm = 0o700
+
 // listenSelf binds a fresh unix socket at path, per Listen's self-bind
 // contract.
 func listenSelf(path string) (net.Listener, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, socketDirPerm); err != nil {
 		return nil, fmt.Errorf("notify: creating socket dir: %w", err)
+	}
+	if err := verifySocketDir(dir); err != nil {
+		return nil, fmt.Errorf("notify: socket dir %s: %w", dir, err)
 	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("notify: removing stale socket: %w", err)
@@ -485,4 +500,40 @@ func listenSelf(path string) (net.Listener, error) {
 		return nil, fmt.Errorf("notify: chmod socket: %w", chmodErr)
 	}
 	return ln, nil
+}
+
+// verifySocketDir rejects dir unless it is a real directory (not a
+// symlink), mode socketDirPerm, and owned by this process's uid — the same
+// three checks openCacheRoot applies to statusline's shared cache directory
+// (see statusline/cache.go), applied here because a self-bound socket's
+// parent can equally be a shared, world-writable location (/tmp, when
+// XDG_RUNTIME_DIR is unset) that another local user got to first.
+// os.MkdirAll does not change an existing directory's mode or owner, so
+// without this check a pre-planted world-writable directory — or a symlink
+// redirecting elsewhere — would let another local user unlink the 0600
+// socket this process binds and substitute their own, receiving every
+// client's Frame (including its full os.Environ() copy) instead. Fails
+// closed: any mismatch is an error, never a warning, so the caller's
+// listenErr path exits nonzero rather than binding inside an untrusted dir.
+func verifySocketDir(dir string) error {
+	// Lstat, not Stat: a planted symlink to a directory must be seen as a
+	// symlink (IsDir() false) and rejected, not resolved through.
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("stat: %w", err)
+	}
+	if !info.IsDir() {
+		return errors.New("not a real directory (possibly a symlink)")
+	}
+	if info.Mode().Perm() != socketDirPerm {
+		return fmt.Errorf("mode %o, want %o", info.Mode().Perm(), socketDirPerm)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return errors.New("cannot determine directory owner")
+	}
+	if int(stat.Uid) != os.Getuid() {
+		return errors.New("not owned by this user")
+	}
+	return nil
 }

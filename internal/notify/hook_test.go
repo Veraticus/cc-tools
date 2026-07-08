@@ -67,13 +67,11 @@ func TestParseHookInput(t *testing.T) {
 		}
 	})
 
-	// SessionID composes a state directory (StateBase/SessionID) that gets
-	// os.RemoveAll'd on SessionEnd. An empty, separator-carrying, or
-	// traversal-carrying session_id must never reach that point: an empty
-	// id collapses the directory to the state base itself (wiping every
-	// session's state on the next SessionEnd), and a separator or ".."
-	// could point the RemoveAll outside the intended per-session directory
-	// entirely. These three forms must all error rather than decode.
+	// SessionID keys the daemon's in-memory dedupe state and is written
+	// verbatim into every decision-log record, and validSessionID also
+	// guards a future filesystem-path use. An empty, separator-carrying, or
+	// traversal-carrying session_id must never reach any of that: these
+	// three forms must all error rather than decode.
 	t.Run("empty session_id errors", func(t *testing.T) {
 		_, err := ParseHookInput(strings.NewReader(`{"session_id": "", "hook_event_name": "Stop"}`))
 		if err == nil {
@@ -95,9 +93,9 @@ func TestParseHookInput(t *testing.T) {
 		}
 	})
 
-	// "." carries no separator and no "..", but filepath.Join(StateBase, ".")
-	// collapses to StateBase itself, so SessionEnd's reap would RemoveAll the
-	// entire state base. It must be rejected explicitly.
+	// "." carries no separator and no "..", but filepath.Join(base, ".")
+	// collapses to base itself, so a future path use keyed on session_id
+	// could collide across sessions. It must be rejected explicitly.
 	t.Run("session_id of dot errors", func(t *testing.T) {
 		_, err := ParseHookInput(strings.NewReader(`{"session_id": ".", "hook_event_name": "Stop"}`))
 		if err == nil {

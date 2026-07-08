@@ -51,3 +51,6 @@ func (NopState) MarkNotified(_ context.Context, _ string, _ time.Time, _ string)
 func (NopState) ClaimBroadcast(_ context.Context, _ string, _ time.Duration, _ time.Time, _ bool) bool {
 	return true
 }
+
+// DeleteSession is a no-op: there is nothing to evict without a store.
+func (NopState) DeleteSession(_ context.Context, _ string) {}

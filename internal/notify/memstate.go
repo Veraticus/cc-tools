@@ -78,6 +78,13 @@ func (m *MemoryState) ClaimBroadcast(key string, window time.Duration, now time.
 	return true
 }
 
+// DeleteSession removes sessionID's dedupe record, if any — called on
+// SessionEnd so the sessions map does not accumulate an entry per session
+// for the daemon's entire uptime (see MemoryState's doc comment).
+func (m *MemoryState) DeleteSession(sessionID string) {
+	delete(m.sessions, sessionID)
+}
+
 // sweepClaims removes claims older than broadcastClaimTTL so the claims map
 // stays a handful of entries.
 func (m *MemoryState) sweepClaims(now time.Time) {
