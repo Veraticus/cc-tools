@@ -94,6 +94,34 @@ func TestMemoryState_ClaimSend_CheckAndMarkAreAtomic(t *testing.T) {
 	}
 }
 
+// TestMemoryState_ClaimSend_OutOfOrderNowLoses pins the out-of-order race
+// observed in production 2026-07-08 (two sends 5s apart for one session):
+// each claim's now is its own event time, captured before the off-loop judge
+// call, so a claim can reach the loop with a now EARLIER than the lastNotify
+// a racing claim already recorded. Negative since must read as inside the
+// quiet period — only a session with no record at all wins on that path.
+func TestMemoryState_ClaimSend_OutOfOrderNowLoses(t *testing.T) {
+	m := NewMemoryState()
+	now := time.Now()
+	const sessionID = "sess-claim-race"
+	window := 5 * time.Minute
+
+	if won, _ := m.ClaimSend(sessionID, now, "later event claims first", window, false); !won {
+		t.Fatal("first claim = lost, want won")
+	}
+	won, since := m.ClaimSend(sessionID, now.Add(-5*time.Second), "earlier event claims second", window, false)
+	if won {
+		t.Fatal("out-of-order claim (now before recorded lastNotify) = won, want lost")
+	}
+	if since >= 0 {
+		t.Errorf("out-of-order claim since = %v, want negative (now precedes the recorded send)", since)
+	}
+	// The loser must not have overwritten the winner's record.
+	if got := m.SinceLastNotifySame(sessionID, now.Add(time.Minute), "later event claims first"); got != time.Minute {
+		t.Errorf("SinceLastNotifySame(winner) = %v, want 1m0s (loser must not overwrite)", got)
+	}
+}
+
 func TestMemoryState_ClaimSend_DryRunObservesWithoutWriting(t *testing.T) {
 	m := NewMemoryState()
 	now := time.Now()

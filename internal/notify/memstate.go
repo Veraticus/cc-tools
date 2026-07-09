@@ -67,14 +67,21 @@ func (m *MemoryState) MarkNotified(sessionID string, t time.Time, message string
 // otherwise wins and records now/message as the session's last notification
 // in the same step — check and mark are one operation, so two Pipeline runs
 // racing through their (off-loop) judge calls can never both win for the
-// same quiet period. The returned duration is how long before now the
-// session last notified (negative when never), for the caller's decision-log
-// reason. dryRun observes without recording, mirroring ClaimBroadcast.
+// same quiet period. A negative since only wins when the session truly has
+// no record: each claim's now is its own event time, captured before the
+// off-loop judge call, so a claim can arrive with a now EARLIER than the
+// lastNotify a racing claim just recorded — that is inside the quiet
+// period, not before it (observed 2026-07-08 as two sends 5s apart for one
+// session). The returned duration is how long before now the session last
+// notified (neverNotifiedDuration when no record), for the caller's
+// decision-log reason. dryRun observes without recording, mirroring
+// ClaimBroadcast.
 func (m *MemoryState) ClaimSend(
 	sessionID string, now time.Time, message string, window time.Duration, dryRun bool,
 ) (bool, time.Duration) {
+	_, exists := m.sessions[sessionID]
 	since := m.SinceLastNotify(sessionID, now)
-	won := since < 0 || since >= window
+	won := !exists || since >= window
 	if won && !dryRun {
 		_ = m.MarkNotified(sessionID, now, message)
 	}
