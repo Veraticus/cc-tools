@@ -86,6 +86,7 @@ func TestDispatchNotify_ReachableSocket_WritesFrameAndSkipsFallback(t *testing.T
 	}()
 
 	cfg := testNotifyClientConfig(t, sockPath)
+	cfg.DryRun = false
 	stdin := strings.NewReader(`{"session_id":"sess-1","hook_event_name":"SessionEnd"}`)
 	var stdout, stderr bytes.Buffer
 
@@ -95,6 +96,9 @@ func TestDispatchNotify_ReachableSocket_WritesFrameAndSkipsFallback(t *testing.T
 	case f := <-frameCh:
 		if f.HookInput.SessionID != "sess-1" || f.HookInput.HookEventName != "SessionEnd" {
 			t.Errorf("received frame HookInput = %+v, want session-end for sess-1", f.HookInput)
+		}
+		if f.DryRun {
+			t.Error("received frame DryRun = true, want normal client frame")
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("daemon never received a frame")
@@ -125,6 +129,30 @@ func TestDispatchNotify_UnreachableSocket_OutcomeSend_DeterministicFallback(t *t
 	}
 	if !strings.Contains(stdout.String(), "[blocked]") {
 		t.Errorf("stdout = %q, want blocked urgency", stdout.String())
+	}
+}
+
+func TestDispatchNotify_CodexTurnComplete_DeterministicFallback(t *testing.T) {
+	sockPath := filepath.Join(t.TempDir(), "no-daemon-here.sock")
+	cfg := testNotifyClientConfig(t, sockPath)
+
+	input := strings.NewReader(
+		`{"type":"agent-turn-complete","thread-id":"codex-thread-1","turn-id":"turn-1",` +
+			`"cwd":"/home/user/proj","input-messages":["fix it"],` +
+			`"last-assistant-message":"Fixed it and all tests pass."}`,
+	)
+	var stdout, stderr bytes.Buffer
+
+	dispatchNotify(context.Background(), cfg, input, &stdout, &stderr)
+
+	if !strings.Contains(stdout.String(), "Fixed it and all tests pass.") {
+		t.Errorf("stdout = %q, want Codex's last assistant message", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "[done]") {
+		t.Errorf("stdout = %q, want done urgency", stdout.String())
+	}
+	if stderr.String() != "" {
+		t.Errorf("stderr = %q, want empty", stderr.String())
 	}
 }
 
@@ -254,6 +282,7 @@ func TestDispatchNotify_ReachableSocket_ReturnsFastEvenWithSlowDaemonJudge(t *te
 	go func() { _ = d.Serve(ctx, ln) }()
 
 	cfg := testNotifyClientConfig(t, sockPath)
+	cfg.DryRun = false
 	stdin := strings.NewReader(
 		`{"session_id":"sess-4","cwd":"/home/user/proj","hook_event_name":"Stop",` +
 			`"transcript_path":"/nonexistent/transcript.jsonl","last_assistant_message":"ship it"}`,

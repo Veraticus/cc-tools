@@ -150,6 +150,7 @@ func (d Daemon) runFrame(ctx context.Context, frame Frame, ch chan<- loopMsg) {
 	p.Environ = frame.Environ
 	p.Workspace = frame.Workspace
 	p.ParentPID = frame.ParentPID
+	p.DryRun = p.DryRun || frame.DryRun
 	p.State = loopState{ch: ch}
 	p.Watchdog = daemonWatchdog{
 		ch: ch, done: ctx.Done(), judge: p.Judge, sender: p.Sender, log: p.Log,

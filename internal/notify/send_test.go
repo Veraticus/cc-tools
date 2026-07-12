@@ -142,6 +142,31 @@ func TestResolveSenderEnv_DirectURL(t *testing.T) {
 	}
 }
 
+func TestResolveSenderEnv_GenericNamesTakePrecedence(t *testing.T) {
+	s, ok := ResolveSenderEnv([]string{
+		"CC_TOOLS_NTFY_URL=https://ntfy.sh/generic",
+		"CC_TOOLS_NTFY_TOKEN=generic-token",
+		"CLAUDE_HOOKS_NTFY_URL=https://ntfy.sh/legacy",
+		"CLAUDE_HOOKS_NTFY_TOKEN=legacy-token",
+	})
+	if !ok {
+		t.Fatal("ResolveSenderEnv() ok = false, want true")
+	}
+	if s.URL != "https://ntfy.sh/generic" || s.Token != "generic-token" {
+		t.Errorf("Sender = %+v, want generic URL and token", s)
+	}
+}
+
+func TestResolveSenderEnv_GenericDisabled(t *testing.T) {
+	_, ok := ResolveSenderEnv([]string{
+		"CLAUDE_HOOKS_NTFY_URL=https://ntfy.sh/mytopic",
+		"CC_TOOLS_NTFY_DISABLED=true",
+	})
+	if ok {
+		t.Fatal("ResolveSenderEnv() ok = true, want false when generic DISABLED=true")
+	}
+}
+
 func TestResolveSenderEnv_URLFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "url")
 	if err := os.WriteFile(path, []byte("https://ntfy.sh/fromfile\n"), 0o644); err != nil {

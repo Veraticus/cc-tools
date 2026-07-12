@@ -1,6 +1,9 @@
 # cc-tools
 
-High-performance Go implementation of Claude Code utilities. Provides statusline generation and MCP management with minimal overhead.
+High-performance Go utilities for terminal coding agents. Claude Code has the
+richest integration, and Codex CLI is supported for external turn-complete
+notifications. The historical `cc-tools` and `cc-tools-statusline` names are
+kept for compatibility.
 
 ## Features
 
@@ -15,6 +18,25 @@ High-performance Go implementation of Claude Code utilities. Provides statusline
 - **MCP management** - Enable/disable context servers per-project
 - **Debug logging** - Detailed execution logs for troubleshooting
 - **No daemon required** - Direct execution, no background processes
+
+### 🔔 Turn Notifications
+
+- **Claude Code hooks** - Rich Stop/Notification/SessionEnd processing with
+  transcript-aware dedupe and optional daemon-side composition
+- **Codex CLI notify** - Accepts Codex's `agent-turn-complete` JSON argument and
+  forwards the last assistant message without requiring Claude
+- **Provider-neutral configuration** - `CC_TOOLS_NTFY_*` environment variables,
+  with the original `CLAUDE_HOOKS_NTFY_*` names retained as aliases
+
+## Agent compatibility
+
+| Capability | Claude Code | Codex CLI |
+|---|---|---|
+| External notification command | Yes, JSON on stdin | Yes, JSON in one argument |
+| Turn-complete ntfy delivery | Yes | Yes |
+| Permission/external approval delivery | Yes | Use Codex's built-in TUI notifications |
+| Transcript-aware decisions and watchdogs | Yes | No; Codex's notify payload has no transcript path |
+| Replace the in-app status line with `cc-tools-statusline` | Yes | No; Codex accepts built-in footer item identifiers only |
 
 ## Installation
 
@@ -72,6 +94,75 @@ Add to your `~/.claude/settings.json`:
   }
 }
 ```
+
+### Codex notifications
+
+Codex's external notification command is a user-level setting. Add this at the
+top level of `~/.codex/config.toml` (use the absolute path to your installed
+binary):
+
+```toml
+notify = ["/home/you/bin/cc-tools", "notify"]
+```
+
+Configure ntfy in the environment inherited by Codex:
+
+```bash
+export CC_TOOLS_NTFY_URL="https://ntfy.sh/your-topic"
+# Optional for an authenticated topic:
+export CC_TOOLS_NTFY_TOKEN="your-token"
+```
+
+The `_FILE` variants are supported for secrets (`CC_TOOLS_NTFY_URL_FILE` and
+`CC_TOOLS_NTFY_TOKEN_FILE`). Set `CC_TOOLS_NTFY_DISABLED=true` to suppress
+delivery. The old `CLAUDE_HOOKS_NTFY_*` variables continue to work.
+
+You can exercise the Codex adapter without sending anything:
+
+```bash
+cc-tools notify --dry-run '{
+  "type":"agent-turn-complete",
+  "thread-id":"demo-thread",
+  "turn-id":"demo-turn",
+  "cwd":"/tmp/project",
+  "input-messages":["demo"],
+  "last-assistant-message":"The requested work is complete."
+}'
+```
+
+Codex currently invokes external `notify` commands for `agent-turn-complete`.
+Its built-in TUI notifications additionally understand events such as approval
+requests:
+
+```toml
+[tui]
+notifications = ["agent-turn-complete", "approval-requested"]
+notification_condition = "unfocused" # or "always"
+notification_method = "auto"         # or "osc9" / "bel"
+```
+
+### Codex status line
+
+Codex cannot invoke `cc-tools-statusline` as its footer renderer. Unlike Claude
+Code's `statusLine.type = "command"` contract, Codex's `tui.status_line` is an
+ordered list of native item identifiers. A close native configuration is:
+
+```toml
+[tui]
+status_line = [
+  "model-with-reasoning",
+  "current-dir",
+  "git-branch",
+  "context-remaining",
+  "five-hour-limit",
+  "weekly-limit",
+]
+status_line_use_colors = true
+```
+
+This covers the core model/directory/git/context/rate-limit information, but
+the custom AWS, Google Cloud, Kubernetes, transcript-cost, and powerline-chip
+rendering in this repository cannot be injected into Codex's footer today.
 
 ## Control Commands
 
@@ -158,6 +249,10 @@ echo '{"cwd": "/path/to/project", "model": {"display_name": "Claude 3.5"}, "cost
 ```
 
 Example output: image
+
+The provider-neutral cache variables are
+`CC_TOOLS_STATUSLINE_CACHE_DIR` and `CC_TOOLS_STATUSLINE_CACHE_SECONDS`.
+Their original `CLAUDE_STATUSLINE_*` aliases remain supported.
 
 ## Configuration
 

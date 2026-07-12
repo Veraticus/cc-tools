@@ -17,10 +17,14 @@ type Frame struct {
 	HookInput HookInput `json:"hook_input"`
 	Workspace string    `json:"workspace"`
 	Environ   []string  `json:"environ"`
-	// ParentPID is the claude process that invoked the hook (os.Getppid() at
-	// the client), forwarded so an armed watchdog's dead-session probe works
-	// from the daemon, which has no parent-process relationship of its own
-	// to the session.
+	// DryRun is a one-way safety override from the client: true forces this
+	// frame to rehearse even when notifyd itself was started in real mode.
+	// A false client value never disables a daemon-wide dry run.
+	DryRun bool `json:"dry_run,omitempty"`
+	// ParentPID is the agent process that invoked the client (os.Getppid()).
+	// Claude transcript events forward it so an armed watchdog's dead-session
+	// probe works from the daemon, which has no parent-process relationship of
+	// its own to the session. Codex TurnComplete events never arm a watchdog.
 	ParentPID int `json:"parent_pid"`
 }
 

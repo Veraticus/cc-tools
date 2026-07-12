@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,11 +17,19 @@ import (
 // inline literals in Decide's switch.
 const eventNotification = "Notification"
 
-// HookInput is the JSON payload Claude Code writes to a hook's stdin. Field
-// meaning varies by HookEventName: NotificationType/Message apply to
-// Notification events, LastAssistantMessage to Stop events, and
-// AgentID/AgentType are set only inside a subagent/teammate context (empty
-// at the top level).
+// eventTurnComplete is the provider-neutral event emitted by adapters whose
+// notification API reports only that an agent turn finished. Codex's
+// agent-turn-complete notification maps here; unlike Claude's Stop hook it
+// carries no transcript path to inspect, so Decide handles it without the
+// Claude-specific transcript/judge pipeline.
+const eventTurnComplete = "TurnComplete"
+
+// HookInput is the notifier's canonical provider-neutral event. Claude's
+// stdin hook shape already matches most fields; ParseHookInput adapts Codex's
+// argv notification shape into the same type. Field meaning varies by
+// HookEventName: NotificationType/Message apply to Notification events,
+// LastAssistantMessage applies to Stop/TurnComplete, and AgentID/AgentType
+// are set only inside a Claude subagent/teammate context.
 type HookInput struct {
 	SessionID      string `json:"session_id"`
 	TranscriptPath string `json:"transcript_path"`
@@ -36,21 +45,68 @@ type HookInput struct {
 	AgentType string `json:"agent_type"`
 }
 
-// ParseHookInput decodes exactly one JSON object from r into a HookInput.
-// Unknown fields are ignored. Empty input or malformed JSON is an error
-// rather than a zero-value HookInput: this is a hook, and garbage input must
-// surface as a visible failure the caller logs, not silently decide as if
-// nothing were wrong. When r contains more than one JSON value, only the
-// first is decoded (json.Decoder.Decode reads a single value and leaves the
-// rest in its buffer unread) — the first object wins.
+// codexNotifyInput is the JSON object Codex passes as the notify command's
+// single argv value. Codex deliberately uses kebab-case field names here,
+// unlike Claude's snake_case hook payload.
+type codexNotifyInput struct {
+	Type                 string   `json:"type"`
+	ThreadID             string   `json:"thread-id"`
+	TurnID               string   `json:"turn-id"`
+	CWD                  string   `json:"cwd"`
+	InputMessages        []string `json:"input-messages"`
+	LastAssistantMessage string   `json:"last-assistant-message"`
+}
+
+// ParseHookInput decodes exactly one provider payload from r and normalizes
+// it into HookInput. Claude hook objects use snake_case fields and lifecycle
+// event names; Codex passes a kebab-case agent-turn-complete object. Unknown
+// fields are ignored. Empty input or malformed JSON is an error rather than
+// a zero-value HookInput: garbage input must surface as a visible failure the
+// caller logs, not silently decide as if nothing were wrong. When r contains
+// more than one JSON value, only the first is decoded — the first object wins.
 func ParseHookInput(r io.Reader) (HookInput, error) {
 	dec := json.NewDecoder(r)
-	var in HookInput
-	if err := dec.Decode(&in); err != nil {
+	var raw json.RawMessage
+	if err := dec.Decode(&raw); err != nil {
 		if errors.Is(err, io.EOF) {
 			return HookInput{}, fmt.Errorf("parsing hook input: empty input")
 		}
 		return HookInput{}, fmt.Errorf("parsing hook input: %w", err)
+	}
+
+	// Probe only the discriminator fields first. Keeping detection separate
+	// from normalization makes future provider adapters additive rather than
+	// forcing their wire fields into the canonical HookInput type.
+	var probe struct {
+		HookEventName string `json:"hook_event_name"`
+		SessionID     string `json:"session_id"`
+		Type          string `json:"type"`
+	}
+	if err := json.NewDecoder(bytes.NewReader(raw)).Decode(&probe); err != nil {
+		return HookInput{}, fmt.Errorf("parsing hook input: %w", err)
+	}
+
+	var in HookInput
+	switch {
+	case probe.HookEventName != "" || probe.SessionID != "":
+		if err := json.Unmarshal(raw, &in); err != nil {
+			return HookInput{}, fmt.Errorf("parsing hook input: %w", err)
+		}
+	case probe.Type == "agent-turn-complete":
+		var codex codexNotifyInput
+		if err := json.Unmarshal(raw, &codex); err != nil {
+			return HookInput{}, fmt.Errorf("parsing hook input: %w", err)
+		}
+		in = HookInput{
+			SessionID:            codex.ThreadID,
+			CWD:                  codex.CWD,
+			HookEventName:        eventTurnComplete,
+			NotificationType:     codex.Type,
+			Message:              strings.Join(codex.InputMessages, "\n"),
+			LastAssistantMessage: codex.LastAssistantMessage,
+		}
+	default:
+		return HookInput{}, fmt.Errorf("parsing hook input: unsupported notification type %q", probe.Type)
 	}
 
 	// SessionID keys the daemon's in-memory dedupe state (MemoryState.sessions)

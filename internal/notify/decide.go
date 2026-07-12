@@ -140,6 +140,11 @@ func Decide(in HookInput, scan ScanResult, env Env) Decision {
 		return Decision{Outcome: OutcomeSilent, Reason: "session end"}
 	case "Stop":
 		return decideStop(scan)
+	case eventTurnComplete:
+		return Decision{
+			Outcome: OutcomeSend, Urgency: UrgencyDone,
+			Message: in.LastAssistantMessage, Reason: "turn complete",
+		}
 	case eventNotification:
 		return decideNotification(in, scan, env)
 	default:

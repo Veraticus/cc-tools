@@ -59,6 +59,9 @@ func runStatuslineWithInput(reader io.Reader) (string, error) {
 }
 
 func getCacheDir() string {
+	if dir := os.Getenv("CC_TOOLS_STATUSLINE_CACHE_DIR"); dir != "" {
+		return dir
+	}
 	if dir := os.Getenv("CLAUDE_STATUSLINE_CACHE_DIR"); dir != "" {
 		return dir
 	}
@@ -69,7 +72,11 @@ func getCacheDuration() time.Duration {
 	if os.Getenv("DEBUG_CONTEXT") == "1" {
 		return 0
 	}
-	if seconds := os.Getenv("CLAUDE_STATUSLINE_CACHE_SECONDS"); seconds != "" {
+	seconds := os.Getenv("CC_TOOLS_STATUSLINE_CACHE_SECONDS")
+	if seconds == "" {
+		seconds = os.Getenv("CLAUDE_STATUSLINE_CACHE_SECONDS")
+	}
+	if seconds != "" {
 		if duration, err := time.ParseDuration(seconds + "s"); err == nil {
 			return duration
 		}

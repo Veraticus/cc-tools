@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -76,6 +77,15 @@ func runNotifyCommand() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), notifyHookTimeout)
 	defer cancel()
+	payload := io.Reader(os.Stdin)
+	if flags.NArg() == 1 {
+		// Codex passes its notification JSON as one argv value. Claude writes
+		// hook JSON to stdin. Normalize both before they reach dispatchNotify.
+		payload = strings.NewReader(flags.Arg(0))
+	} else if flags.NArg() > 1 {
+		_, _ = fmt.Fprintln(os.Stderr, "cc-tools notify: expected at most one JSON payload argument")
+		return
+	}
 
 	dispatchNotify(ctx, notifyClientConfig{
 		DryRun:      *dryRun,
@@ -85,7 +95,7 @@ func runNotifyCommand() {
 		SelfBin:     selfBin,
 		SockPath:    notify.SocketPath(),
 		DialTimeout: clientDialTimeout,
-	}, os.Stdin, os.Stdout, os.Stderr)
+	}, payload, os.Stdout, os.Stderr)
 }
 
 // notifyClientConfig groups the dependencies dispatchNotify needs, resolved
@@ -118,8 +128,14 @@ func dispatchNotify(ctx context.Context, cfg notifyClientConfig, stdin io.Reader
 	}
 
 	workspace := notify.WorkspaceName(cfg.Environ, notify.RunCommand)
-	frame := notify.Frame{HookInput: in, Workspace: workspace, Environ: cfg.Environ, ParentPID: os.Getppid()}
-	if sendFrame(ctx, cfg.SockPath, frame, cfg.DialTimeout) {
+	frame := notify.Frame{
+		HookInput: in, Workspace: workspace, Environ: cfg.Environ,
+		ParentPID: os.Getppid(), DryRun: cfg.DryRun,
+	}
+	// A dry run must print its rehearsal to this invocation's stdout. Sending
+	// it to a live daemon would put the output in the daemon's logs instead
+	// (and older daemons did not know the per-frame DryRun field at all).
+	if !cfg.DryRun && sendFrame(ctx, cfg.SockPath, frame, cfg.DialTimeout) {
 		return
 	}
 

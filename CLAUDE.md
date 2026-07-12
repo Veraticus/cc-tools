@@ -1,6 +1,8 @@
 # cc-tools Development Guide
 
-Go implementation of Claude Code utilities. Provides statusline generation and MCP management.
+Go implementation of terminal coding-agent utilities. Claude Code provides the
+rich statusline/hook surface; Codex CLI is also supported for external
+turn-complete notifications.
 
 ## Project Structure
 

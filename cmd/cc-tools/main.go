@@ -74,13 +74,13 @@ func main() {
 }
 
 func printUsage(out *output.Terminal) {
-	out.RawError(`cc-tools - Claude Code Tools
+	out.RawError(`cc-tools - terminal coding-agent tools
 
 Usage:
   cc-tools <command> [arguments]
 
 Commands:
-  statusline    Generate a status line for the prompt
+  statusline    Generate a Claude-compatible command status line
   debug         Configure debug logging for directories
   mcp           Manage Claude MCP servers
   config        Manage configuration settings
@@ -88,7 +88,7 @@ Commands:
   render-clouds Emit AWS/gcloud/k8s chip chain as ANSI (for starship)
   subagent-statusline  Render per-row chip decorations for the claude agents view
   preview       Render every statusline/subagent-statusline scenario, labeled
-  notify        Turn-aware hook notifier (Stop/Notification/SessionEnd)
+  notify        Agent notifier (Claude hook stdin or Codex JSON argument)
   notifyd       Long-running daemon that runs the notify pipeline over a control socket
   version       Print version information
   help          Show this help message
@@ -148,6 +148,9 @@ func runStatuslineWithInput(reader io.Reader) (string, error) {
 }
 
 func getCacheDir() string {
+	if dir := os.Getenv("CC_TOOLS_STATUSLINE_CACHE_DIR"); dir != "" {
+		return dir
+	}
 	if dir := os.Getenv("CLAUDE_STATUSLINE_CACHE_DIR"); dir != "" {
 		return dir
 	}
@@ -158,7 +161,11 @@ func getCacheDuration() time.Duration {
 	if os.Getenv("DEBUG_CONTEXT") == "1" {
 		return 0
 	}
-	if seconds := os.Getenv("CLAUDE_STATUSLINE_CACHE_SECONDS"); seconds != "" {
+	seconds := os.Getenv("CC_TOOLS_STATUSLINE_CACHE_SECONDS")
+	if seconds == "" {
+		seconds = os.Getenv("CLAUDE_STATUSLINE_CACHE_SECONDS")
+	}
+	if seconds != "" {
 		if duration, err := time.ParseDuration(seconds + "s"); err == nil {
 			return duration
 		}

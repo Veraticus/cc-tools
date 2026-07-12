@@ -3,15 +3,60 @@ package notify
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestDaemon_ClientDryRunNeverDelivers(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	logPath := filepath.Join(t.TempDir(), "notify-decisions.jsonl")
+	d := Daemon{Pipeline: Pipeline{
+		DryRun: false,
+		Sender: Sender{URL: srv.URL},
+		Log:    DecisionLog{Path: logPath},
+		Stdout: io.Discard,
+		Host:   "testhost",
+	}}
+
+	sockPath := filepath.Join(t.TempDir(), "notifyd.sock")
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("net.Listen() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = d.Serve(ctx, ln) }()
+
+	dialAndSendFrame(t, sockPath, Frame{
+		HookInput: HookInput{
+			SessionID: "codex-dry-run", CWD: "/tmp/project",
+			HookEventName: eventTurnComplete, NotificationType: "agent-turn-complete",
+			LastAssistantMessage: "done",
+		},
+		DryRun: true,
+	})
+	waitForDecisionRecords(t, logPath, 1, 2*time.Second)
+
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("notification requests = %d, want 0 for client dry-run", got)
+	}
+}
 
 // listenHelperEnv, when set to "1" in this test binary's own environment,
 // diverts TestMain into runListenHelper instead of the normal test suite:

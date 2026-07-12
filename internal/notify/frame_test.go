@@ -15,6 +15,7 @@ func TestFrame_EncodeDecode_RoundTrip(t *testing.T) {
 		},
 		Workspace: "my-tmux-session",
 		Environ:   []string{"TMUX=/tmp/tmux-1000/default,1234,0", "CLAUDE_CONFIG_DIR=/home/user/.claude"},
+		DryRun:    true,
 	}
 
 	var buf bytes.Buffer

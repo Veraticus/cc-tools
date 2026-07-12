@@ -124,26 +124,36 @@ func (s Sender) post(
 }
 
 // ResolveSenderEnv resolves a Sender from environ (os.Environ() form,
-// "KEY=VALUE" entries): CLAUDE_HOOKS_NTFY_URL or CLAUDE_HOOKS_NTFY_URL_FILE
-// (file contents, whitespace-trimmed) supplies the URL, the same pattern
-// supplies CLAUDE_HOOKS_NTFY_TOKEN, and CLAUDE_HOOKS_NTFY_DISABLED=true
-// always forces not-ok. A pure function of the slice plus filesystem reads
-// for the _FILE variants — never os.Getenv — so callers control exactly
-// which environment it sees. No URL resolved (directly or via file) means
-// not-ok.
+// "KEY=VALUE" entries). Provider-neutral CC_TOOLS_NTFY_* names take
+// precedence; the original CLAUDE_HOOKS_NTFY_* names remain supported for
+// compatibility. Either *_DISABLED=true forces not-ok. Direct values take
+// precedence over their _FILE variants. This is a pure function of the
+// slice plus filesystem reads — never os.Getenv — so callers control exactly
+// which environment it sees. No URL resolved means not-ok.
 func ResolveSenderEnv(environ []string) (Sender, bool) {
 	env := parseEnviron(environ)
-	if env["CLAUDE_HOOKS_NTFY_DISABLED"] == "true" {
+	if env["CC_TOOLS_NTFY_DISABLED"] == "true" || env["CLAUDE_HOOKS_NTFY_DISABLED"] == "true" {
 		return Sender{}, false
 	}
 
-	url := resolveEnvValue(env, "CLAUDE_HOOKS_NTFY_URL")
+	url := resolveFirstEnvValue(env, "CC_TOOLS_NTFY_URL", "CLAUDE_HOOKS_NTFY_URL")
 	if url == "" {
 		return Sender{}, false
 	}
-	token := resolveEnvValue(env, "CLAUDE_HOOKS_NTFY_TOKEN")
+	token := resolveFirstEnvValue(env, "CC_TOOLS_NTFY_TOKEN", "CLAUDE_HOOKS_NTFY_TOKEN")
 
 	return Sender{URL: url, Token: token}, true
+}
+
+// resolveFirstEnvValue returns the first direct-or-file value resolved from
+// bases in priority order.
+func resolveFirstEnvValue(env map[string]string, bases ...string) string {
+	for _, base := range bases {
+		if value := resolveEnvValue(env, base); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // parseEnviron turns an os.Environ()-form slice into a lookup map, skipping

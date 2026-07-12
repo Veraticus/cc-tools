@@ -157,7 +157,11 @@ func (p Pipeline) Run(ctx context.Context, in HookInput) error {
 		return nil
 	}
 
-	res, scanErr := p.scanTranscript(in.TranscriptPath)
+	var res ScanResult
+	var scanErr error
+	if in.TranscriptPath != "" {
+		res, scanErr = p.scanTranscript(in.TranscriptPath)
+	}
 	reasonSuffix := ""
 	if scanErr != nil {
 		reasonSuffix = fmt.Sprintf(" (transcript error: %s)", scanErr)
@@ -265,6 +269,8 @@ func (p Pipeline) handleSend(
 // title slot carries where to go, not what happened.
 func sendLabel(notificationType string) string {
 	switch notificationType {
+	case "agent-turn-complete":
+		return "turn complete"
 	case "permission_prompt":
 		return "needs permission"
 	case notifTypeAgentNeedsInput:

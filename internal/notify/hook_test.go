@@ -53,6 +53,38 @@ func TestParseHookInput(t *testing.T) {
 		}
 	})
 
+	t.Run("Codex agent turn complete normalizes", func(t *testing.T) {
+		in, err := ParseHookInput(strings.NewReader(`{
+			"type": "agent-turn-complete",
+			"thread-id": "019c-thread-1",
+			"turn-id": "turn-7",
+			"cwd": "/home/josh/proj",
+			"input-messages": ["Please fix it", "and run tests"],
+			"last-assistant-message": "Fixed it and all tests pass."
+		}`))
+		if err != nil {
+			t.Fatalf("ParseHookInput: unexpected error: %v", err)
+		}
+		want := HookInput{
+			SessionID:            "019c-thread-1",
+			CWD:                  "/home/josh/proj",
+			HookEventName:        eventTurnComplete,
+			NotificationType:     "agent-turn-complete",
+			Message:              "Please fix it\nand run tests",
+			LastAssistantMessage: "Fixed it and all tests pass.",
+		}
+		if in != want {
+			t.Errorf("ParseHookInput mismatch\ngot:  %+v\nwant: %+v", in, want)
+		}
+	})
+
+	t.Run("unsupported provider event errors", func(t *testing.T) {
+		_, err := ParseHookInput(strings.NewReader(`{"type":"future-event","thread-id":"thread-1"}`))
+		if err == nil || !strings.Contains(err.Error(), "unsupported notification type") {
+			t.Fatalf("ParseHookInput error = %v, want unsupported notification type", err)
+		}
+	})
+
 	t.Run("empty input errors", func(t *testing.T) {
 		_, err := ParseHookInput(strings.NewReader(""))
 		if err == nil {
