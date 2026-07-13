@@ -24,7 +24,7 @@ kept for compatibility.
 - **Claude Code hooks** - Rich Stop/Notification/SessionEnd processing with
   transcript-aware dedupe and optional daemon-side composition
 - **Codex CLI notify** - Accepts Codex's `agent-turn-complete` JSON argument and
-  forwards the last assistant message without requiring Claude
+  delivers a concise turn summary without requiring Claude
 - **Provider-neutral configuration** - `CC_TOOLS_NTFY_*` environment variables,
   with the original `CLAUDE_HOOKS_NTFY_*` names retained as aliases
 
@@ -116,6 +116,29 @@ export CC_TOOLS_NTFY_TOKEN="your-token"
 The `_FILE` variants are supported for secrets (`CC_TOOLS_NTFY_URL_FILE` and
 `CC_TOOLS_NTFY_TOKEN_FILE`). Set `CC_TOOLS_NTFY_DISABLED=true` to suppress
 delivery. The old `CLAUDE_HOOKS_NTFY_*` variables continue to work.
+
+When `notifyd` is reachable, Codex turn composition is daemon-only. The daemon
+starts a separate `codex exec` process that is ephemeral, read-only, isolated
+from user configuration and rules, and instructed to use no tools. It sends the
+complete newline-joined `input-messages` plus the complete final assistant
+response to Luna without truncating or pre-summarizing either input; only the
+resulting notification output is bounded. The default model is
+`gpt-5.6-luna`. Set `CC_TOOLS_CODEX_JUDGE_MODEL` to a non-empty model name to
+override it.
+
+Luna's JSON verdict is internal IPC. ntfy receives only parsed plain text: the
+task in the title and the human summary in the body, never serialized verdict
+JSON, the model's reason, stdout/stderr, or evaluator diagnostics. Successful
+bodies include the locator and have a 200-byte UTF-8 limit with a visible
+ellipsis when needed. If Luna is disabled or fails, the notification uses a
+model-free tail of the final response with a 160-byte UTF-8 limit and a leading
+ellipsis when truncated (or `turn complete` when empty), and omits a body locator.
+
+If `notifyd` is unavailable, `cc-tools notify` uses that same bounded,
+model-free fallback inline; it never starts `codex`. Dry runs are model-free as
+well. Claude routes are unchanged: their separate judge still defaults to
+Haiku (`claude-haiku-4-5`) and honors the existing
+`ANTHROPIC_SMALL_FAST_MODEL` override.
 
 You can exercise the Codex adapter without sending anything:
 

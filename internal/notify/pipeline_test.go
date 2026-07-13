@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // readDecisionLog reads every JSON line in path as a DecisionRecord.
@@ -176,6 +178,412 @@ func stubSenderRecording(captured *[]capturedRequest) Sender {
 				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(""))}, nil
 			}),
 		},
+	}
+}
+
+func waitCapturedRequest(t *testing.T, requestCh <-chan capturedRequest) capturedRequest {
+	t.Helper()
+	select {
+	case request := <-requestCh:
+		return request
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for ntfy request")
+		return capturedRequest{}
+	}
+}
+
+func TestPipeline_TurnComplete_CodexVerdictSentAsPlainText(t *testing.T) {
+	t.Setenv(
+		"STUB_STDOUT",
+		`{"notify":true,"urgency":"done","task":"tests complete","body":"Human summary","reason":"SECRET-REASON"}`,
+	)
+
+	requestCh := make(chan capturedRequest, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Errorf("reading ntfy body: %v", err)
+		}
+		requestCh <- capturedRequest{Title: req.Header.Get("Title"), Body: string(body)}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	p, logPath := newGoalTestPipeline(t, &stdout, writeStubClaude(t))
+	p.CodexJudge = CodexJudge{Bin: writeStubCodex(t), Model: "gpt-5.6-luna", Timeout: time.Second}
+	p.Sender = Sender{URL: server.URL, Client: server.Client()}
+	p.Workspace = "earth:3"
+	p.Host = "vermissian"
+
+	in := HookInput{
+		SessionID: "codex-plain-text", CWD: "/home/user/project", HookEventName: eventTurnComplete,
+		Message: "fix the tests", LastAssistantMessage: "All checks now pass.",
+	}
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	request := waitCapturedRequest(t, requestCh)
+	if want := "project · tests complete"; request.Title != want {
+		t.Errorf("Title = %q, want %q", request.Title, want)
+	}
+	if want := "Human summary\n\n— earth:3 @ vermissian"; request.Body != want {
+		t.Errorf("Body = %q, want %q", request.Body, want)
+	}
+	for _, forbidden := range []string{"{", `"notify"`, "SECRET-REASON"} {
+		if strings.Contains(request.Title, forbidden) || strings.Contains(request.Body, forbidden) {
+			t.Errorf(
+				"ntfy request leaked %q: title=%q body=%q",
+				forbidden,
+				request.Title,
+				request.Body,
+			)
+		}
+	}
+	records := readDecisionLog(t, logPath)
+	if len(records) != 1 || records[0].JudgeMode != "" {
+		t.Errorf(
+			"decision records = %+v, want dedicated Codex handling without a Claude JudgeMode",
+			records,
+		)
+	}
+}
+
+func TestPipeline_TurnComplete_CodexFailuresSendBoundedPlainTextFallback(t *testing.T) {
+	tests := []struct {
+		name, stdout, stderr, exit, sleep string
+		missingBin                        bool
+	}{
+		{name: "missing binary", missingBin: true},
+		{name: "timeout", sleep: "1"},
+		{name: "nonzero", stdout: "SECRET-STDOUT", stderr: "SECRET-STDERR", exit: "7"},
+		{name: "empty stdout"},
+		{name: "malformed verdict", stdout: `{MALFORMED-SECRET`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("STUB_STDOUT", tt.stdout)
+			t.Setenv("STUB_STDERR", tt.stderr)
+			t.Setenv("STUB_EXIT", tt.exit)
+			t.Setenv("STUB_SLEEP", tt.sleep)
+
+			requestCh := make(chan capturedRequest, 1)
+			server := httptest.NewServer(
+				http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+					body, err := io.ReadAll(req.Body)
+					if err != nil {
+						t.Errorf("reading ntfy body: %v", err)
+					}
+					requestCh <- capturedRequest{Title: req.Header.Get("Title"), Body: string(body)}
+					w.WriteHeader(http.StatusOK)
+				}),
+			)
+			defer server.Close()
+
+			bin := writeStubCodex(t)
+			if tt.missingBin {
+				bin = filepath.Join(t.TempDir(), "ERROR-SENTINEL-missing-codex")
+			}
+			var stdout bytes.Buffer
+			p, logPath := newGoalTestPipeline(t, &stdout, writeStubClaude(t))
+			p.CodexJudge = CodexJudge{
+				Bin:     bin,
+				Model:   "gpt-5.6-luna",
+				Timeout: 20 * time.Millisecond,
+			}
+			p.Sender = Sender{URL: server.URL, Client: server.Client()}
+			p.Workspace = "earth:3"
+			p.Host = "vermissian"
+
+			final := strings.Repeat("prefix αβγ $() `tick` \"quote\"\n", 12) + "meaningful tail ✅"
+			in := HookInput{
+				SessionID:            "codex-failure",
+				CWD:                  "/home/user/project",
+				HookEventName:        eventTurnComplete,
+				Message:              "summarize this",
+				LastAssistantMessage: final,
+			}
+			if err := p.Run(context.Background(), in); err != nil {
+				t.Fatalf("Run() error = %v", err)
+			}
+
+			request := waitCapturedRequest(t, requestCh)
+			if want := "project · earth:3"; request.Title != want {
+				t.Errorf("Title = %q, want %q", request.Title, want)
+			}
+			if want := truncateHeadWords(final, maxNotificationTailLen); request.Body != want {
+				t.Errorf("Body = %q, want bounded fallback %q", request.Body, want)
+			}
+			if len(request.Body) > maxNotificationTailLen || !utf8.ValidString(request.Body) {
+				t.Errorf(
+					"Body = %q (%d bytes), want valid UTF-8 within %d bytes",
+					request.Body,
+					len(request.Body),
+					maxNotificationTailLen,
+				)
+			}
+			if !strings.HasPrefix(request.Body, truncationEllipsis) {
+				t.Errorf("Body = %q, want visible leading truncation ellipsis", request.Body)
+			}
+			for _, forbidden := range []string{
+				"SECRET-STDOUT", "SECRET-STDERR", "MALFORMED-SECRET", "ERROR-SENTINEL", "codex exec:",
+			} {
+				if strings.Contains(request.Title, forbidden) ||
+					strings.Contains(request.Body, forbidden) {
+					t.Errorf(
+						"ntfy request leaked %q: title=%q body=%q",
+						forbidden,
+						request.Title,
+						request.Body,
+					)
+				}
+			}
+			records := readDecisionLog(t, logPath)
+			if len(records) != 1 || records[0].JudgeErr == "" {
+				t.Fatalf(
+					"decision records = %+v, want one internally logged evaluator error",
+					records,
+				)
+			}
+			if len(records[0].JudgeErr) > maxErrSnippetBytes ||
+				!utf8.ValidString(records[0].JudgeErr) {
+				t.Errorf(
+					"JudgeErr = %q (%d bytes), want bounded valid UTF-8 within %d bytes",
+					records[0].JudgeErr, len(records[0].JudgeErr), maxErrSnippetBytes,
+				)
+			}
+		})
+	}
+}
+
+func TestPipeline_TurnComplete_CodexDigestPreservesCompleteInput(t *testing.T) {
+	stdinFile := filepath.Join(t.TempDir(), "codex-stdin")
+	t.Setenv("STUB_STDIN_FILE", stdinFile)
+	t.Setenv("STUB_STDOUT", validCodexVerdict)
+
+	var stdout bytes.Buffer
+	var sent []capturedRequest
+	p, _ := newGoalTestPipeline(t, &stdout, writeStubClaude(t))
+	p.CodexJudge = CodexJudge{Bin: writeStubCodex(t), Model: "gpt-5.6-luna", Timeout: time.Second}
+	p.Sender = stubSenderRecording(&sent)
+
+	userInput := strings.Repeat("用户输入 αβγ \"quoted\" $() `backticks`\nsecond line ✅\n", 80)
+	final := strings.Repeat("最终回答 🌙 \"verbatim\" $() `literal`\nnext line\n", 80)
+	in := HookInput{
+		SessionID:            "codex-complete-digest",
+		CWD:                  "/home/user/project",
+		HookEventName:        eventTurnComplete,
+		Message:              userInput,
+		LastAssistantMessage: final,
+	}
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	got, err := os.ReadFile(stdinFile)
+	if err != nil {
+		t.Fatalf("reading evaluator stdin: %v", err)
+	}
+	wantDigest := "USER INPUT\n" + userInput + "\n\nFINAL ASSISTANT MESSAGE\n" + final
+	want := codexJudgeRubric + "\n\nDIGEST\n" + wantDigest
+	if string(got) != want {
+		t.Errorf(
+			"evaluator stdin was modified: got %d bytes, want exact %d-byte rubric+digest",
+			len(got),
+			len(want),
+		)
+	}
+	if len(sent) != 1 {
+		t.Fatalf("sent = %+v, want one notification", sent)
+	}
+}
+
+func TestPipeline_TurnComplete_DryRunNeverEvaluatesCodex(t *testing.T) {
+	callLog := filepath.Join(t.TempDir(), "codex-calls")
+	t.Setenv("STUB_CALL_LOG", callLog)
+	t.Setenv("STUB_STDOUT", validCodexVerdict)
+
+	var stdout bytes.Buffer
+	p, logPath := newTestPipeline(t, &stdout, writeStubClaude(t))
+	p.CodexJudge = CodexJudge{Bin: writeStubCodex(t), Model: "gpt-5.6-luna", Timeout: time.Second}
+
+	in := HookInput{
+		SessionID:            "codex-dry-run",
+		CWD:                  "/home/user/project",
+		HookEventName:        eventTurnComplete,
+		Message:              "summarize",
+		LastAssistantMessage: "Dry-run fallback only.",
+	}
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if _, err := os.Stat(callLog); err == nil {
+		t.Fatal("Codex call log exists: dry run evaluated a model")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat Codex call log: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "Dry-run fallback only.") {
+		t.Errorf("stdout = %q, want deterministic fallback", stdout.String())
+	}
+	records := readDecisionLog(t, logPath)
+	if len(records) != 1 {
+		t.Fatalf("decision records = %+v, want one", records)
+	}
+	if records[0].JudgeErr != "" || records[0].JudgeMs != 0 || records[0].Digest != "" {
+		t.Errorf("decision record = %+v, want no evaluator attempt", records[0])
+	}
+}
+
+func TestPipeline_TurnComplete_CodexSuccessClampsBodyAndPreservesLocator(t *testing.T) {
+	rawBody := strings.Repeat("a", 180)
+	verdict, marshalErr := json.Marshal(JudgeVerdict{
+		Notify: true, Urgency: UrgencyDone, Task: "large result", Body: rawBody, Reason: "complete",
+	})
+	if marshalErr != nil {
+		t.Fatalf("marshaling verdict: %v", marshalErr)
+	}
+	t.Setenv("STUB_STDOUT", string(verdict))
+
+	var stdout bytes.Buffer
+	var sent []capturedRequest
+	p, _ := newGoalTestPipeline(t, &stdout, writeStubClaude(t))
+	p.CodexJudge = CodexJudge{Bin: writeStubCodex(t), Model: "gpt-5.6-luna", Timeout: time.Second}
+	p.Sender = stubSenderRecording(&sent)
+	p.Workspace = "earth:3"
+	p.Host = "vermissian"
+
+	in := HookInput{
+		SessionID:            "codex-clamped-success",
+		CWD:                  "/home/user/project",
+		HookEventName:        eventTurnComplete,
+		Message:              "summarize",
+		LastAssistantMessage: "Delivered the requested result.",
+	}
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if len(sent) != 1 {
+		t.Fatalf("sent = %+v, want one notification", sent)
+	}
+	suffix := locatorSuffix("earth:3", "vermissian")
+	want := truncateWords(rawBody, maxBodyBytes-len(suffix)) + suffix
+	if sent[0].Body != want {
+		t.Errorf("Body = %q, want summary clamp with preserved locator %q", sent[0].Body, want)
+	}
+	if len(sent[0].Body) > maxBodyBytes ||
+		!utf8.ValidString(sent[0].Body) ||
+		!strings.HasSuffix(sent[0].Body, suffix) ||
+		!strings.HasSuffix(strings.TrimSuffix(sent[0].Body, suffix), truncationEllipsis) {
+		t.Errorf(
+			"Body = %q (%d bytes), want visible summary clamp and exact locator within %d bytes",
+			sent[0].Body,
+			len(sent[0].Body),
+			maxBodyBytes,
+		)
+	}
+}
+
+func TestPipeline_TurnComplete_DisabledCodexEmptyFinalFallsBackToTurnComplete(t *testing.T) {
+	var stdout bytes.Buffer
+	var sent []capturedRequest
+	p, _ := newGoalTestPipeline(t, &stdout, writeStubClaude(t))
+	p.Sender = stubSenderRecording(&sent)
+	p.Workspace = "earth:3"
+	p.Host = "vermissian"
+
+	in := HookInput{
+		SessionID:     "codex-empty-fallback",
+		CWD:           "/home/user/project",
+		HookEventName: eventTurnComplete,
+	}
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if len(sent) != 1 {
+		t.Fatalf("sent = %+v, want one notification", sent)
+	}
+	if sent[0].Title != "project · earth:3" || sent[0].Body != "turn complete" {
+		t.Errorf("notification = %+v, want locus title and exact fallback without locator", sent[0])
+	}
+}
+
+func TestPipeline_TurnComplete_IdenticalEventsAlwaysSendWithoutWatchdog(t *testing.T) {
+	t.Setenv("STUB_STDOUT", validCodexVerdict)
+
+	var stdout bytes.Buffer
+	var sent []capturedRequest
+	p, logPath := newGoalTestPipeline(t, &stdout, writeStubClaude(t))
+	p.CodexJudge = CodexJudge{Bin: writeStubCodex(t), Model: "gpt-5.6-luna", Timeout: time.Second}
+	p.Sender = stubSenderRecording(&sent)
+	dedupe := newMemDedupeState()
+	p.State = dedupe
+	wd := &fakeWatchdog{}
+	p.Watchdog = wd
+
+	in := HookInput{
+		SessionID: "codex-always-send", CWD: "/home/user/project", HookEventName: eventTurnComplete,
+		Message: "run checks", LastAssistantMessage: "The requested checks now pass.",
+	}
+	if err := dedupe.MarkNotified(
+		context.Background(), in.SessionID, time.Now(), "The requested checks now pass.",
+	); err != nil {
+		t.Fatalf("seeding dedupe state: %v", err)
+	}
+	for i := 1; i <= 2; i++ {
+		if err := p.Run(context.Background(), in); err != nil {
+			t.Fatalf("Run() #%d error = %v", i, err)
+		}
+	}
+
+	if len(sent) != 2 {
+		t.Fatalf("sent = %+v, want both identical TurnComplete notifications", sent)
+	}
+	if since := dedupe.SinceLastNotifySame(
+		context.Background(), in.SessionID, time.Now(), sent[1].Body,
+	); since < 0 || since > 5*time.Second {
+		t.Errorf("SinceLastNotifySame(latest body) = %v, want a recent notification", since)
+	}
+	if len(wd.armed) != 0 {
+		t.Errorf("watchdog arms = %+v, want none", wd.armed)
+	}
+	records := readDecisionLog(t, logPath)
+	if len(records) != 2 || records[0].Outcome != OutcomeSend.String() ||
+		records[1].Outcome != OutcomeSend.String() {
+		t.Errorf("decision records = %+v, want two sends", records)
+	}
+}
+
+func TestPipeline_TurnComplete_SkipsTranscriptScan(t *testing.T) {
+	var stdout bytes.Buffer
+	var sent []capturedRequest
+	p, logPath := newGoalTestPipeline(t, &stdout, writeStubClaude(t))
+	p.Sender = stubSenderRecording(&sent)
+
+	in := HookInput{
+		SessionID:            "codex-no-transcript-scan",
+		CWD:                  "/home/user/project",
+		HookEventName:        eventTurnComplete,
+		TranscriptPath:       "/nonexistent/TRANSCRIPT-SCAN-SENTINEL",
+		LastAssistantMessage: "Turn complete.",
+	}
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if len(sent) != 1 {
+		t.Fatalf("sent = %+v, want one fallback notification", sent)
+	}
+	records := readDecisionLog(t, logPath)
+	if len(records) != 1 {
+		t.Fatalf("decision records = %+v, want one", records)
+	}
+	if strings.Contains(records[0].Reason, "transcript error") ||
+		strings.Contains(records[0].Reason, "TRANSCRIPT-SCAN-SENTINEL") {
+		t.Errorf("Reason = %q, want TurnComplete to skip transcript scanning", records[0].Reason)
 	}
 }
 

@@ -2,6 +2,7 @@ package notify
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +17,8 @@ import (
 // is what carries the meaningful content, matching the head/tail convention
 // established in transcript.go/digest.go.
 const maxNotificationTailLen = 160
+
+const turnCompleteLabel = "turn complete"
 
 // dryRunWouldArmWatchdogSuffix is appended to a decision's Reason whenever a
 // dry run reaches an arm-the-watchdog branch without actually arming it.
@@ -84,8 +87,11 @@ type DedupeState interface {
 type Pipeline struct {
 	DryRun bool
 	Judge  Judge
-	Sender Sender
-	Log    DecisionLog
+	// CodexJudge composes TurnComplete notifications only. Its zero value
+	// disables composition for the inline/no-daemon pipeline.
+	CodexJudge CodexJudge
+	Sender     Sender
+	Log        DecisionLog
 	// State is where dedupe/broadcast-claim bookkeeping lives. The zero
 	// value (nil) defaults to NopState{} — every session reports "never
 	// notified" — so only callers that want real dedupe (notifyd's
@@ -159,7 +165,7 @@ func (p Pipeline) Run(ctx context.Context, in HookInput) error {
 
 	var res ScanResult
 	var scanErr error
-	if in.TranscriptPath != "" {
+	if in.HookEventName != eventTurnComplete && in.TranscriptPath != "" {
 		res, scanErr = p.scanTranscript(in.TranscriptPath)
 	}
 	reasonSuffix := ""
@@ -186,11 +192,116 @@ func (p Pipeline) Run(ctx context.Context, in HookInput) error {
 	case OutcomeSilent:
 		p.handleSilent(in, res, now, project, host, d, reasonSuffix)
 	case OutcomeSend:
-		p.handleSend(ctx, in, now, project, locus, host, d, reasonSuffix)
+		if in.HookEventName == eventTurnComplete {
+			p.handleCodexTurnComplete(ctx, in, now, project, locus, host, d, reasonSuffix)
+		} else {
+			p.handleSend(ctx, in, now, project, locus, host, d, reasonSuffix)
+		}
 	case OutcomeJudge:
 		p.handleJudge(ctx, in, res, env, now, project, locus, host, d, reasonSuffix)
 	}
 	return nil
+}
+
+func (p Pipeline) handleCodexTurnComplete(
+	ctx context.Context,
+	in HookInput,
+	now time.Time,
+	project, locus, host string,
+	d Decision,
+	reasonSuffix string,
+) {
+	if p.DryRun || p.CodexJudge.Bin == "" {
+		n := codexTurnFallback(in, project, locus)
+		sendSuffix := p.deliverCodexTurn(ctx, in, now, n)
+		p.logRecord(in, now, DecisionRecord{
+			Outcome: OutcomeSend.String(), Reason: d.Reason + reasonSuffix + sendSuffix,
+			Urgency: n.Urgency, Title: n.Title, Body: n.Body,
+		})
+		return
+	}
+
+	digest := codexTurnDigest(in)
+	start := time.Now()
+	verdict, jerr := p.CodexJudge.Evaluate(ctx, digest)
+	judgeMs := time.Since(start).Milliseconds()
+	if jerr != nil {
+		n := codexTurnFallback(in, project, locus)
+		sendSuffix := p.deliverCodexTurn(ctx, in, now, n)
+		jerr = errors.New(truncateWords(jerr.Error(), maxErrSnippetBytes))
+		p.logCodexTurn(in, now, d.Reason+reasonSuffix+sendSuffix, n, jerr, digest, judgeMs)
+		return
+	}
+
+	n := Notification{
+		Title:   project + " · " + verdict.Task,
+		Body:    codexBodyWithLocator(verdict.Body, locatorSuffix(p.Workspace, host)),
+		Urgency: verdict.Urgency,
+	}
+	sendSuffix := p.deliverCodexTurn(ctx, in, now, n)
+	p.logCodexTurn(in, now, d.Reason+reasonSuffix+sendSuffix, n, nil, digest, judgeMs)
+}
+
+func (p Pipeline) deliverCodexTurn(
+	ctx context.Context,
+	in HookInput,
+	now time.Time,
+	n Notification,
+) string {
+	sendSuffix := p.deliver(ctx, n)
+	if !p.DryRun {
+		_ = p.dedupeState().MarkNotified(ctx, in.SessionID, now, n.Body)
+	}
+	return sendSuffix
+}
+
+func codexTurnDigest(in HookInput) string {
+	return "USER INPUT\n" + in.Message + "\n\nFINAL ASSISTANT MESSAGE\n" + in.LastAssistantMessage
+}
+
+func codexTurnFallback(in HookInput, project, locus string) Notification {
+	body := truncateHeadWords(in.LastAssistantMessage, maxNotificationTailLen)
+	if body == "" {
+		body = turnCompleteLabel
+	}
+	return Notification{Title: project + " · " + locus, Body: body, Urgency: UrgencyDone}
+}
+
+func codexBodyWithLocator(summary, suffix string) string {
+	summary = strings.ToValidUTF8(summary, "")
+	suffix = strings.ToValidUTF8(suffix, "")
+	if suffix == "" {
+		return truncateWords(summary, maxBodyBytes)
+	}
+	if len(suffix) >= maxBodyBytes {
+		return truncateWords(suffix, maxBodyBytes)
+	}
+
+	summaryBudget := maxBodyBytes - len(suffix)
+	if len(summary) > summaryBudget && summaryBudget < len(truncationEllipsis) {
+		return suffix
+	}
+	return truncateWords(summary, summaryBudget) + suffix
+}
+
+func (p Pipeline) logCodexTurn(
+	in HookInput,
+	now time.Time,
+	reason string,
+	n Notification,
+	jerr error,
+	digest string,
+	judgeMs int64,
+) {
+	rec := DecisionRecord{
+		Outcome: OutcomeSend.String(), Reason: reason,
+		Urgency: n.Urgency, Title: n.Title, Body: n.Body,
+		JudgeMs: judgeMs, Digest: digest,
+	}
+	if jerr != nil {
+		rec.JudgeErr = jerr.Error()
+	}
+	p.logRecord(in, now, rec)
 }
 
 // scanTranscript opens and scans path, returning a zero ScanResult on any
@@ -270,7 +381,7 @@ func (p Pipeline) handleSend(
 func sendLabel(notificationType string) string {
 	switch notificationType {
 	case "agent-turn-complete":
-		return "turn complete"
+		return turnCompleteLabel
 	case "permission_prompt":
 		return "needs permission"
 	case notifTypeAgentNeedsInput:

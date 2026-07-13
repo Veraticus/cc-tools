@@ -27,6 +27,13 @@ const notifyJudgeModel = "claude-haiku-4-5"
 // timeout is 90s, so 60s still leaves room for scanning and delivery.
 const notifyJudgeTimeout = 60 * time.Second
 
+// notifyCodexJudgeModel is the default compose-only Codex model used by
+// notifyd for Codex TurnComplete events.
+const notifyCodexJudgeModel = "gpt-5.6-luna"
+
+// notifyCodexJudgeTimeout bounds the ephemeral Codex compose subprocess.
+const notifyCodexJudgeTimeout = 10 * time.Second
+
 // notifyHookTimeout bounds the whole hook invocation, comfortably above
 // notifyJudgeTimeout to leave room for transcript scanning/enrichment and
 // under the 90s hook timeout configured in settings.json.
@@ -206,6 +213,30 @@ func notifydRequiresSender(senderOK, dryRun bool) bool {
 	return !senderOK && !dryRun
 }
 
+func newNotifydPipeline(
+	dryRun bool,
+	sender notify.Sender,
+	log notify.DecisionLog,
+	selfBin string,
+	environ []string,
+) notify.Pipeline {
+	return notify.Pipeline{
+		DryRun: dryRun,
+		Judge: notify.Judge{
+			Bin:     "claude",
+			Model:   notify.ResolveJudgeModel(environ, notifyJudgeModel),
+			Timeout: notifyJudgeTimeout,
+		},
+		CodexJudge: notify.CodexJudge{
+			Bin: "codex", Model: notify.ResolveCodexJudgeModel(environ, notifyCodexJudgeModel),
+			Timeout: notifyCodexJudgeTimeout,
+		},
+		Sender:  sender,
+		Log:     log,
+		SelfBin: selfBin,
+	}
+}
+
 // runNotifydCommand runs the notifyd daemon: it constructs the real
 // Pipeline dependencies once (unlike the hook client, which resolves them
 // fresh on every invocation) and serves the control socket until SIGTERM or
@@ -220,8 +251,6 @@ func runNotifydCommand() {
 	}
 
 	log := notify.DecisionLog{Path: filepath.Join(*stateBase, decisionLogName)}
-	judgeModel := notify.ResolveJudgeModel(os.Environ(), notifyJudgeModel)
-	judge := notify.Judge{Bin: "claude", Model: judgeModel, Timeout: notifyJudgeTimeout}
 	sender, senderOK := notify.ResolveSenderEnv(os.Environ())
 	sender.Host = notify.ShortHostname()
 
@@ -236,13 +265,7 @@ func runNotifydCommand() {
 	}
 
 	d := notify.Daemon{
-		Pipeline: notify.Pipeline{
-			DryRun:  *dryRun,
-			Judge:   judge,
-			Sender:  sender,
-			Log:     log,
-			SelfBin: selfBin,
-		},
+		Pipeline: newNotifydPipeline(*dryRun, sender, log, selfBin, os.Environ()),
 	}
 
 	sockPath := notify.SocketPath()

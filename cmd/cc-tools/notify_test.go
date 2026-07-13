@@ -3,12 +3,16 @@ package main
 import (
 	"bytes"
 	"context"
+	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Veraticus/cc-tools/internal/notify"
 )
@@ -40,10 +44,10 @@ func writeClientStubClaude(t *testing.T) string {
 // creates markerPath — used to prove a code path that must never invoke a
 // real judge binary in fact never does, even if some future regression
 // changed the disabled judge's Bin to a PATH-relative name.
-func writeMarkerScript(t *testing.T, dir, markerPath string) {
+func writeMarkerScript(t *testing.T, dir, name, markerPath string) {
 	t.Helper()
 	script := "#!/bin/sh\ntouch " + markerPath + "\nexit 0\n"
-	path := filepath.Join(dir, "claude")
+	path := filepath.Join(dir, name)
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("writing marker script: %v", err)
 	}
@@ -135,21 +139,93 @@ func TestDispatchNotify_UnreachableSocket_OutcomeSend_DeterministicFallback(t *t
 func TestDispatchNotify_CodexTurnComplete_DeterministicFallback(t *testing.T) {
 	sockPath := filepath.Join(t.TempDir(), "no-daemon-here.sock")
 	cfg := testNotifyClientConfig(t, sockPath)
+	cfg.DryRun = false
+
+	requestCh := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Errorf("reading ntfy body: %v", err)
+		}
+		requestCh <- string(body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	cfg.Sender = notify.Sender{URL: server.URL, Client: server.Client()}
+
+	markerDir := t.TempDir()
+	markerPath := filepath.Join(t.TempDir(), "codex-invoked.marker")
+	writeMarkerScript(t, markerDir, "codex", markerPath)
+	t.Setenv("PATH", markerDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	final := strings.Repeat("earlier detail ", 20) + "meaningful tail"
 
 	input := strings.NewReader(
 		`{"type":"agent-turn-complete","thread-id":"codex-thread-1","turn-id":"turn-1",` +
 			`"cwd":"/home/user/proj","input-messages":["fix it"],` +
-			`"last-assistant-message":"Fixed it and all tests pass."}`,
+			`"last-assistant-message":"` + final + `"}`,
 	)
 	var stdout, stderr bytes.Buffer
 
 	dispatchNotify(context.Background(), cfg, input, &stdout, &stderr)
 
-	if !strings.Contains(stdout.String(), "Fixed it and all tests pass.") {
-		t.Errorf("stdout = %q, want Codex's last assistant message", stdout.String())
+	if _, err := os.Stat(markerPath); err == nil {
+		t.Fatal("Codex marker exists: inline fallback invoked a model")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat Codex marker: %v", err)
 	}
-	if !strings.Contains(stdout.String(), "[done]") {
-		t.Errorf("stdout = %q, want done urgency", stdout.String())
+	var got string
+	select {
+	case got = <-requestCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for ntfy request")
+	}
+	if len(got) > 160 ||
+		!utf8.ValidString(got) ||
+		!strings.HasPrefix(got, "…") ||
+		!strings.HasSuffix(got, "meaningful tail") {
+		t.Errorf("ntfy body = %q (%d bytes), want bounded UTF-8 tail fallback", got, len(got))
+	}
+	if stdout.String() != "" {
+		t.Errorf("stdout = %q, want empty in a real send", stdout.String())
+	}
+	if stderr.String() != "" {
+		t.Errorf("stderr = %q, want empty", stderr.String())
+	}
+	logData, err := os.ReadFile(cfg.Log.Path)
+	if err != nil {
+		t.Fatalf("reading decision log: %v", err)
+	}
+	if strings.Contains(string(logData), "judge_err") ||
+		strings.Contains(string(logData), "codex exec") {
+		t.Errorf(
+			"decision log = %q, want disabled composition without an evaluator attempt",
+			logData,
+		)
+	}
+}
+
+func TestDispatchNotify_CodexTurnComplete_DryRunNeverInvokesCodex(t *testing.T) {
+	cfg := testNotifyClientConfig(t, filepath.Join(t.TempDir(), "unused-daemon.sock"))
+	markerDir := t.TempDir()
+	markerPath := filepath.Join(t.TempDir(), "codex-dry-run.marker")
+	writeMarkerScript(t, markerDir, "codex", markerPath)
+	t.Setenv("PATH", markerDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	input := strings.NewReader(
+		`{"type":"agent-turn-complete","thread-id":"codex-dry-run","turn-id":"turn-1",` +
+			`"cwd":"/home/user/proj","input-messages":["fix it"],` +
+			`"last-assistant-message":"Dry-run fallback only."}`,
+	)
+	var stdout, stderr bytes.Buffer
+	dispatchNotify(context.Background(), cfg, input, &stdout, &stderr)
+
+	if _, err := os.Stat(markerPath); err == nil {
+		t.Fatal("Codex marker exists: dry-run invoked a model")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat Codex marker: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "Dry-run fallback only.") {
+		t.Errorf("stdout = %q, want deterministic dry-run fallback", stdout.String())
 	}
 	if stderr.String() != "" {
 		t.Errorf("stderr = %q, want empty", stderr.String())
@@ -211,7 +287,7 @@ func TestDispatchNotify_UnreachableSocket_JudgeRoute_NeverInvokesRealJudge(t *te
 	// by getting invoked.
 	markerDir := t.TempDir()
 	markerPath := filepath.Join(t.TempDir(), "invoked.marker")
-	writeMarkerScript(t, markerDir, markerPath)
+	writeMarkerScript(t, markerDir, "claude", markerPath)
 	t.Setenv("PATH", markerDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	stdin := strings.NewReader(
@@ -250,6 +326,46 @@ func TestNotifydRequiresSender(t *testing.T) {
 				t.Errorf(
 					"notifydRequiresSender(senderOK=%v, dryRun=%v) = %v, want %v",
 					c.senderOK, c.dryRun, got, c.wantRequiresSender,
+				)
+			}
+		})
+	}
+}
+
+func TestNewNotifydPipeline_ConfiguresCodexJudge(t *testing.T) {
+	tests := []struct {
+		name    string
+		environ []string
+		model   string
+	}{
+		{name: "unset", model: "gpt-5.6-luna"},
+		{name: "empty", environ: []string{"CC_TOOLS_CODEX_JUDGE_MODEL="}, model: "gpt-5.6-luna"},
+		{
+			name:    "override",
+			environ: []string{"CC_TOOLS_CODEX_JUDGE_MODEL=gpt-custom"},
+			model:   "gpt-custom",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := newNotifydPipeline(
+				false,
+				notify.Sender{},
+				notify.DecisionLog{},
+				"cc-tools",
+				tt.environ,
+			)
+			if p.CodexJudge.Bin != "codex" || p.CodexJudge.Model != tt.model ||
+				p.CodexJudge.Timeout != 10*time.Second {
+				t.Errorf("CodexJudge = %+v, want codex/%s/10s", p.CodexJudge, tt.model)
+			}
+			if p.Judge.Bin != "claude" || p.Judge.Model != notifyJudgeModel ||
+				p.Judge.Timeout != notifyJudgeTimeout {
+				t.Errorf(
+					"Claude Judge = %+v, want existing claude/%s/%s",
+					p.Judge,
+					notifyJudgeModel,
+					notifyJudgeTimeout,
 				)
 			}
 		})
