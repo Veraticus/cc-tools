@@ -221,8 +221,10 @@ func TestCodexJudgeEvaluate_ValidVerdictAndInvocation(t *testing.T) {
 }
 
 func TestCodexJudgeEvaluate_ClampsLongVerdictFields(t *testing.T) {
-	longTask := strings.Repeat("Luna ", 30) + "月"
-	longBody := strings.Repeat("完了 ", 80) + "end"
+	plainTask := strings.Repeat("Luna ", 30) + "月"
+	plainBody := strings.Repeat("完了 ", 80) + "end"
+	longTask := "## **" + plainTask + "**"
+	longBody := "- `" + plainBody + "`"
 	stdout := `{"notify":true,"urgency":"done","task":"` + longTask + `","body":"` + longBody + `","reason":"r"}`
 	t.Setenv("STUB_STDOUT", stdout)
 
@@ -231,16 +233,18 @@ func TestCodexJudgeEvaluate_ClampsLongVerdictFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Evaluate() error = %v", err)
 	}
-	if got.Task != truncateWords(longTask, maxTaskBytes) {
+	wantTask := truncateWords(plainTask, maxTaskBytes)
+	if got.Task != wantTask {
 		t.Errorf(
 			"Task = %q, want shared %d-byte clamp %q",
-			got.Task, maxTaskBytes, truncateWords(longTask, maxTaskBytes),
+			got.Task, maxTaskBytes, wantTask,
 		)
 	}
-	if got.Body != truncateWords(longBody, maxBodyBytes) {
+	wantBody := truncateWords(plainBody, maxBodyBytes)
+	if got.Body != wantBody {
 		t.Errorf(
 			"Body = %q, want shared %d-byte clamp %q",
-			got.Body, maxBodyBytes, truncateWords(longBody, maxBodyBytes),
+			got.Body, maxBodyBytes, wantBody,
 		)
 	}
 	if len(got.Task) > maxTaskBytes || len(got.Body) > maxBodyBytes {
@@ -248,6 +252,95 @@ func TestCodexJudgeEvaluate_ClampsLongVerdictFields(t *testing.T) {
 	}
 	if !utf8.ValidString(got.Task) || !utf8.ValidString(got.Body) {
 		t.Errorf("clamped fields are not valid UTF-8: task %q, body %q", got.Task, got.Body)
+	}
+}
+
+func TestCodexJudgeEvaluate_AcceptsSemanticVerdicts(t *testing.T) {
+	tests := []struct {
+		name   string
+		stdout string
+		want   JudgeVerdict
+	}{
+		{
+			name:   "silent",
+			stdout: `{"notify":false,"urgency":null,"task":null,"body":null,"reason":"routine worker report"}`,
+			want:   JudgeVerdict{Notify: false, Reason: "routine worker report"},
+		},
+		{
+			name:   "blocked",
+			stdout: `{"notify":true,"urgency":"blocked","task":"choose database","body":"A database decision is needed.","reason":"user decision gates progress"}`,
+			want: JudgeVerdict{
+				Notify: true, Urgency: UrgencyBlocked, Task: "choose database",
+				Body: "A database decision is needed.", Reason: "user decision gates progress",
+			},
+		},
+		{
+			name:   "done",
+			stdout: validCodexVerdict,
+			want: JudgeVerdict{
+				Notify: true, Urgency: UrgencyDone, Task: "tests complete",
+				Body: "The requested checks now pass.", Reason: "work delivered",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("STUB_STDOUT", tt.stdout)
+			j := CodexJudge{Bin: writeStubCodex(t), Model: "luna"}
+			got, err := j.Evaluate(context.Background(), "digest")
+			if err != nil {
+				t.Fatalf("Evaluate() error = %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("Evaluate() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeCodexPlainText_PreservesLiteralTechnicalTokens(t *testing.T) {
+	tests := []struct {
+		name, input, want string
+	}{
+		{name: "dunder filename", input: "__init__.py", want: "__init__.py"},
+		{name: "recursive glob", input: "**/*.go", want: "**/*.go"},
+		{name: "bare extension glob", input: "*.*", want: "*.*"},
+		{name: "bare underscored glob", input: "*_*", want: "*_*"},
+		{name: "underscored directory", input: "_private_/file", want: "_private_/file"},
+		{name: "path and glob", input: "src/my_project/*.go", want: "src/my_project/*.go"},
+		{name: "Unicode technical text", input: "检查 src/模块_一/*.go ✅", want: "检查 src/模块_一/*.go ✅"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := normalizeCodexPlainText(tt.input); got != tt.want {
+				t.Errorf("normalizeCodexPlainText(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeCodexPlainText_RemovesActualEmphasis(t *testing.T) {
+	tests := []struct {
+		name, input, want string
+	}{
+		{name: "asterisk bold", input: "**bold**", want: "bold"},
+		{name: "underscore bold", input: "__bold__", want: "bold"},
+		{name: "asterisk italic", input: "*italic*", want: "italic"},
+		{name: "underscore italic", input: "_italic_", want: "italic"},
+		{name: "strikethrough", input: "~~strike~~", want: "strike"},
+		{name: "bold path", input: "**src/foo.go**", want: "src/foo.go"},
+		{name: "bold dotted text", input: "**v1.2**", want: "v1.2"},
+		{name: "bold glob path", input: "**src/*.go**", want: "src/*.go"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := normalizeCodexPlainText(tt.input); got != tt.want {
+				t.Errorf("normalizeCodexPlainText(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -267,10 +360,21 @@ func TestCodexJudgeEvaluate_SourceAuthorityPrompt(t *testing.T) {
 	}
 	prompt := string(promptBytes)
 	for _, phrase := range []string{
+		"whether a Codex turn should notify",
 		"single raw JSON object",
-		"no markdown code fences",
-		"notify=true",
-		"urgency=done",
+		"notify=false",
+		"routine worker, reviewer, or scout reports",
+		"acknowledgements",
+		"internal progress",
+		"waiting on other work",
+		`urgency="blocked"`,
+		"answer, decision, approval, recovery action",
+		"material blocker or failure",
+		"possible intervention",
+		`For urgency="blocked", body must state the exact answer, decision, approval, recovery action, or other concrete input the user must provide or take`,
+		`urgency="done"`,
+		"genuinely useful final deliverable",
+		"material completed outcome",
 		"at most 6 words",
 		"60 UTF-8 bytes",
 		"one sentence",
@@ -279,12 +383,9 @@ func TestCodexJudgeEvaluate_SourceAuthorityPrompt(t *testing.T) {
 		"Do not use tools",
 		"FINAL ASSISTANT MESSAGE alone",
 		"USER INPUT is context for task naming only, not proof",
-		"recommendations",
-		"validation",
-		"partial progress",
-		"blockers",
-		"completed work",
-		"distinct",
+		"complete digest",
+		"plain text",
+		"no Markdown, JSON, headings, bullets, backticks, emphasis, links, or fences",
 	} {
 		if !strings.Contains(prompt, phrase) {
 			t.Errorf("prompt does not contain required rule %q: %q", phrase, prompt)
@@ -320,14 +421,9 @@ func TestCodexJudgeEvaluate_ModelOutputFailures(t *testing.T) {
 			maxErrorLen: len("codex exec: invalid verdict: ") + maxErrSnippetBytes,
 		},
 		{
-			name:      "notify false violates compose contract",
-			stdout:    `{"notify":false,"urgency":null,"task":null,"body":null,"reason":"r"}`,
-			wantError: "notify=false",
-		},
-		{
-			name:      "non-done urgency violates compose contract",
+			name:      "invalid notified urgency",
 			stdout:    `{"notify":true,"urgency":"info","task":"t","body":"b","reason":"r"}`,
-			wantError: `want "done"`,
+			wantError: "invalid notified urgency",
 		},
 		{
 			name:        "nonzero exit has bounded output",

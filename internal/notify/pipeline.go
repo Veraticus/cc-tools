@@ -87,8 +87,8 @@ type DedupeState interface {
 type Pipeline struct {
 	DryRun bool
 	Judge  Judge
-	// CodexJudge composes TurnComplete notifications only. Its zero value
-	// disables composition for the inline/no-daemon pipeline.
+	// CodexJudge decides and composes TurnComplete notifications. Its zero
+	// value disables evaluation for the inline/no-daemon pipeline.
 	CodexJudge CodexJudge
 	Sender     Sender
 	Log        DecisionLog
@@ -229,17 +229,40 @@ func (p Pipeline) handleCodexTurnComplete(
 		n := codexTurnFallback(in, project, locus)
 		sendSuffix := p.deliverCodexTurn(ctx, in, now, n)
 		jerr = errors.New(truncateWords(jerr.Error(), maxErrSnippetBytes))
-		p.logCodexTurn(in, now, d.Reason+reasonSuffix+sendSuffix, n, jerr, digest, judgeMs)
+		p.logCodexTurn(
+			in, now, OutcomeSend.String(), d.Reason+reasonSuffix+sendSuffix, n, jerr, digest, judgeMs,
+		)
+		return
+	}
+	if !verdict.Notify {
+		p.logCodexTurn(
+			in, now, OutcomeSilent.String(), verdict.Reason+reasonSuffix,
+			Notification{}, nil, digest, judgeMs,
+		)
 		return
 	}
 
+	task := verdict.Task
+	if task == "" {
+		task = turnCompleteLabel
+	}
+	body := verdict.Body
+	if body == "" {
+		body = turnCompleteLabel
+	}
+	title := project + " · " + task
+	if verdict.Urgency == UrgencyBlocked {
+		title = project + " · Needs input · " + task
+	}
 	n := Notification{
-		Title:   project + " · " + verdict.Task,
-		Body:    codexBodyWithLocator(verdict.Body, locatorSuffix(p.Workspace, host)),
+		Title:   title,
+		Body:    codexBodyWithLocator(body, locatorSuffix(p.Workspace, host)),
 		Urgency: verdict.Urgency,
 	}
 	sendSuffix := p.deliverCodexTurn(ctx, in, now, n)
-	p.logCodexTurn(in, now, d.Reason+reasonSuffix+sendSuffix, n, nil, digest, judgeMs)
+	p.logCodexTurn(
+		in, now, OutcomeSend.String(), verdict.Reason+reasonSuffix+sendSuffix, n, nil, digest, judgeMs,
+	)
 }
 
 func (p Pipeline) deliverCodexTurn(
@@ -260,7 +283,7 @@ func codexTurnDigest(in HookInput) string {
 }
 
 func codexTurnFallback(in HookInput, project, locus string) Notification {
-	body := truncateHeadWords(in.LastAssistantMessage, maxNotificationTailLen)
+	body := truncateHeadWords(normalizeCodexPlainText(in.LastAssistantMessage), maxNotificationTailLen)
 	if body == "" {
 		body = turnCompleteLabel
 	}
@@ -287,6 +310,7 @@ func codexBodyWithLocator(summary, suffix string) string {
 func (p Pipeline) logCodexTurn(
 	in HookInput,
 	now time.Time,
+	outcome string,
 	reason string,
 	n Notification,
 	jerr error,
@@ -294,7 +318,7 @@ func (p Pipeline) logCodexTurn(
 	judgeMs int64,
 ) {
 	rec := DecisionRecord{
-		Outcome: OutcomeSend.String(), Reason: reason,
+		Outcome: outcome, Reason: reason,
 		Urgency: n.Urgency, Title: n.Title, Body: n.Body,
 		JudgeMs: judgeMs, Digest: digest,
 	}

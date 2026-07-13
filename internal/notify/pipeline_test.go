@@ -192,10 +192,10 @@ func waitCapturedRequest(t *testing.T, requestCh <-chan capturedRequest) capture
 	}
 }
 
-func TestPipeline_TurnComplete_CodexVerdictSentAsPlainText(t *testing.T) {
+func TestPipeline_TurnComplete_CodexDoneVerdictSentAsNormalizedPlainText(t *testing.T) {
 	t.Setenv(
 		"STUB_STDOUT",
-		`{"notify":true,"urgency":"done","task":"tests complete","body":"Human summary","reason":"SECRET-REASON"}`,
+		`{"notify":true,"urgency":"done","task":"## **tests_complete**","body":"`+"```text"+`\n# Result\n- **Fixed** [tests](https://example.test)\n`+"```"+`\n> Use `+"`go test ./...`"+` in src/my_project/*.go.\n~~Old note~~ 完了 ✅","reason":"SECRET-REASON"}`,
 	)
 
 	requestCh := make(chan capturedRequest, 1)
@@ -225,13 +225,15 @@ func TestPipeline_TurnComplete_CodexVerdictSentAsPlainText(t *testing.T) {
 	}
 
 	request := waitCapturedRequest(t, requestCh)
-	if want := "project · tests complete"; request.Title != want {
+	if want := "project · tests_complete"; request.Title != want {
 		t.Errorf("Title = %q, want %q", request.Title, want)
 	}
-	if want := "Human summary\n\n— earth:3 @ vermissian"; request.Body != want {
+	if want := "Result Fixed tests Use go test ./... in src/my_project/*.go. Old note 完了 ✅\n\n— earth:3 @ vermissian"; request.Body != want {
 		t.Errorf("Body = %q, want %q", request.Body, want)
 	}
-	for _, forbidden := range []string{"{", `"notify"`, "SECRET-REASON"} {
+	for _, forbidden := range []string{
+		"{", `"notify"`, "SECRET-REASON", "##", "**", "[tests](", "```", "`", "~~", "\n- ", "\n> ",
+	} {
 		if strings.Contains(request.Title, forbidden) || strings.Contains(request.Body, forbidden) {
 			t.Errorf(
 				"ntfy request leaked %q: title=%q body=%q",
@@ -241,12 +243,123 @@ func TestPipeline_TurnComplete_CodexVerdictSentAsPlainText(t *testing.T) {
 			)
 		}
 	}
+	if !utf8.ValidString(request.Title) || !utf8.ValidString(request.Body) || len(request.Body) > maxBodyBytes {
+		t.Errorf(
+			"ntfy request is not bounded valid UTF-8: title=%q body=%q (%d bytes)",
+			request.Title,
+			request.Body,
+			len(request.Body),
+		)
+	}
 	records := readDecisionLog(t, logPath)
 	if len(records) != 1 || records[0].JudgeMode != "" {
 		t.Errorf(
 			"decision records = %+v, want dedicated Codex handling without a Claude JudgeMode",
 			records,
 		)
+	}
+}
+
+func TestPipeline_TurnComplete_CodexSilentVerdictSendsNothing(t *testing.T) {
+	t.Setenv(
+		"STUB_STDOUT",
+		`{"notify":false,"urgency":null,"task":null,"body":null,"reason":"routine worker report"}`,
+	)
+
+	var stdout bytes.Buffer
+	var sent []capturedRequest
+	p, logPath := newGoalTestPipeline(t, &stdout, writeStubClaude(t))
+	p.CodexJudge = CodexJudge{Bin: writeStubCodex(t), Model: "gpt-5.6-luna", Timeout: time.Second}
+	p.Sender = stubSenderRecording(&sent)
+
+	in := HookInput{
+		SessionID: "codex-silent", CWD: "/home/user/project", HookEventName: eventTurnComplete,
+		Message: "report status", LastAssistantMessage: "The scout reported its findings to the parent.",
+	}
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if len(sent) != 0 {
+		t.Fatalf("sent = %+v, want semantic silence", sent)
+	}
+	records := readDecisionLog(t, logPath)
+	if len(records) != 1 || records[0].Outcome != OutcomeSilent.String() {
+		t.Fatalf("decision records = %+v, want one silent outcome", records)
+	}
+	if records[0].Urgency != "" || records[0].Title != "" || records[0].Body != "" {
+		t.Errorf("silent decision record carries notification fields: %+v", records[0])
+	}
+}
+
+func TestPipeline_TurnComplete_CodexBlockedVerdictNeedsInput(t *testing.T) {
+	t.Setenv(
+		"STUB_STDOUT",
+		`{"notify":true,"urgency":"blocked","task":"choose database","body":"Choose SQLite or Postgres to continue.","reason":"user decision gates progress"}`,
+	)
+
+	var stdout bytes.Buffer
+	var sent []capturedRequest
+	p, logPath := newGoalTestPipeline(t, &stdout, writeStubClaude(t))
+	p.CodexJudge = CodexJudge{Bin: writeStubCodex(t), Model: "gpt-5.6-luna", Timeout: time.Second}
+	p.Sender = stubSenderRecording(&sent)
+	p.Workspace = "earth:3"
+	p.Host = "vermissian"
+
+	in := HookInput{
+		SessionID: "codex-blocked", CWD: "/home/user/project", HookEventName: eventTurnComplete,
+		Message: "pick storage", LastAssistantMessage: "Which database should I use?",
+	}
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if len(sent) != 1 {
+		t.Fatalf("sent = %+v, want one blocked notification", sent)
+	}
+	if want := "project · Needs input · choose database"; sent[0].Title != want {
+		t.Errorf("Title = %q, want %q", sent[0].Title, want)
+	}
+	if want := "Choose SQLite or Postgres to continue.\n\n— earth:3 @ vermissian"; sent[0].Body != want {
+		t.Errorf("Body = %q, want exact action and locator %q", sent[0].Body, want)
+	}
+	if sent[0].Priority != "5" || sent[0].Tags != "question" {
+		t.Errorf("ntfy headers = priority %q tags %q, want Priority 5/question", sent[0].Priority, sent[0].Tags)
+	}
+	records := readDecisionLog(t, logPath)
+	if len(records) != 1 || records[0].Outcome != OutcomeSend.String() || records[0].Urgency != UrgencyBlocked {
+		t.Errorf("decision records = %+v, want one blocked send", records)
+	}
+}
+
+func TestPipeline_TurnComplete_CodexJSONFieldsNeverReachSender(t *testing.T) {
+	rawJSON := `{"notify":true,"urgency":"done","task":"secret","body":"SECRET-JSON-SENTINEL","reason":"secret"}`
+	verdict, marshalErr := json.Marshal(JudgeVerdict{
+		Notify: true, Urgency: UrgencyDone, Task: rawJSON, Body: rawJSON, Reason: "r",
+	})
+	if marshalErr != nil {
+		t.Fatalf("marshaling verdict: %v", marshalErr)
+	}
+	t.Setenv("STUB_STDOUT", string(verdict))
+
+	var stdout bytes.Buffer
+	var sent []capturedRequest
+	p, _ := newGoalTestPipeline(t, &stdout, writeStubClaude(t))
+	p.CodexJudge = CodexJudge{Bin: writeStubCodex(t), Model: "gpt-5.6-luna", Timeout: time.Second}
+	p.Sender = stubSenderRecording(&sent)
+	p.Host = "vermissian"
+
+	in := HookInput{SessionID: "codex-json", CWD: "/home/user/project", HookEventName: eventTurnComplete}
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if len(sent) != 1 {
+		t.Fatalf("sent = %+v, want one notification", sent)
+	}
+	for _, forbidden := range []string{"{", `"notify"`, "SECRET-JSON-SENTINEL"} {
+		if strings.Contains(sent[0].Title, forbidden) || strings.Contains(sent[0].Body, forbidden) {
+			t.Errorf("sender boundary leaked raw evaluator JSON %q: %+v", forbidden, sent[0])
+		}
 	}
 }
 
@@ -296,7 +409,10 @@ func TestPipeline_TurnComplete_CodexFailuresSendBoundedPlainTextFallback(t *test
 			p.Workspace = "earth:3"
 			p.Host = "vermissian"
 
-			final := strings.Repeat("prefix αβγ $() `tick` \"quote\"\n", 12) + "meaningful tail ✅"
+			final := strings.Repeat("# Prefix αβγ\n- **item** [docs](https://example.test)\n", 12) +
+				"> Use `src/my_project/*.go`\n~~meaningful tail~~ ✅"
+			plainFinal := strings.Repeat("Prefix αβγ item docs ", 12) +
+				"Use src/my_project/*.go meaningful tail ✅"
 			in := HookInput{
 				SessionID:            "codex-failure",
 				CWD:                  "/home/user/project",
@@ -312,7 +428,7 @@ func TestPipeline_TurnComplete_CodexFailuresSendBoundedPlainTextFallback(t *test
 			if want := "project · earth:3"; request.Title != want {
 				t.Errorf("Title = %q, want %q", request.Title, want)
 			}
-			if want := truncateHeadWords(final, maxNotificationTailLen); request.Body != want {
+			if want := truncateHeadWords(plainFinal, maxNotificationTailLen); request.Body != want {
 				t.Errorf("Body = %q, want bounded fallback %q", request.Body, want)
 			}
 			if len(request.Body) > maxNotificationTailLen || !utf8.ValidString(request.Body) {
@@ -325,6 +441,11 @@ func TestPipeline_TurnComplete_CodexFailuresSendBoundedPlainTextFallback(t *test
 			}
 			if !strings.HasPrefix(request.Body, truncationEllipsis) {
 				t.Errorf("Body = %q, want visible leading truncation ellipsis", request.Body)
+			}
+			for _, forbidden := range []string{"# ", "- **", "[docs](", "`", "~~", "\n", "{"} {
+				if strings.Contains(request.Body, forbidden) {
+					t.Errorf("fallback body contains Markdown/JSON artifact %q: %q", forbidden, request.Body)
+				}
 			}
 			for _, forbidden := range []string{
 				"SECRET-STDOUT", "SECRET-STDERR", "MALFORMED-SECRET", "ERROR-SENTINEL", "codex exec:",
