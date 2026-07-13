@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -132,6 +134,98 @@ func (d memDedupeState) DeleteSession(_ context.Context, sessionID string) {
 	d.m.DeleteSession(sessionID)
 }
 
+type broadcastClaimCall struct {
+	key    string
+	window time.Duration
+	now    time.Time
+	dryRun bool
+}
+
+// synchronizedClaimState is a goroutine-safe DedupeState test double that
+// records broadcast claims while otherwise behaving like NopState. The
+// production MemoryState is deliberately loop-confined, so concurrent
+// pipeline tests need their own serialized claim ledger.
+type synchronizedClaimState struct {
+	mu     sync.Mutex
+	claims map[string]time.Time
+	calls  []broadcastClaimCall
+}
+
+func newSynchronizedClaimState() *synchronizedClaimState {
+	return &synchronizedClaimState{claims: make(map[string]time.Time)}
+}
+
+func (*synchronizedClaimState) SinceLastNotify(context.Context, string, time.Time) time.Duration {
+	return neverNotifiedDuration
+}
+
+func (*synchronizedClaimState) SinceLastNotifySame(
+	context.Context, string, time.Time, string,
+) time.Duration {
+	return neverNotifiedDuration
+}
+
+func (*synchronizedClaimState) MarkNotified(context.Context, string, time.Time, string) error {
+	return nil
+}
+
+func (*synchronizedClaimState) ClaimSend(
+	context.Context, string, time.Time, string, time.Duration, bool,
+) (bool, time.Duration) {
+	return true, neverNotifiedDuration
+}
+
+func (s *synchronizedClaimState) ClaimBroadcast(
+	_ context.Context,
+	key string,
+	window time.Duration,
+	now time.Time,
+	dryRun bool,
+) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.calls = append(s.calls, broadcastClaimCall{key: key, window: window, now: now, dryRun: dryRun})
+	claimedAt, exists := s.claims[key]
+	won := !exists || now.Sub(claimedAt) >= window
+	if won && !dryRun {
+		s.claims[key] = now
+	}
+	return won
+}
+
+func (*synchronizedClaimState) DeleteSession(context.Context, string) {}
+
+func (s *synchronizedClaimState) snapshot() ([]broadcastClaimCall, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]broadcastClaimCall(nil), s.calls...), len(s.claims)
+}
+
+type synchronizedRequestCapture struct {
+	mu       sync.Mutex
+	requests []capturedRequest
+}
+
+func (c *synchronizedRequestCapture) sender() Sender {
+	return Sender{
+		URL: "http://stub.invalid/publish",
+		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			body, _ := io.ReadAll(req.Body)
+			c.mu.Lock()
+			c.requests = append(c.requests, capturedRequest{Title: req.Header.Get("Title"), Body: string(body)})
+			c.mu.Unlock()
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(""))}, nil
+		})},
+	}
+}
+
+func (c *synchronizedRequestCapture) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.requests)
+}
+
 // fakeWatchdog is a spy Pipeline.Watchdog for tests that need to observe
 // arm/reap calls without a live daemon event loop.
 type fakeWatchdog struct {
@@ -189,6 +283,555 @@ func waitCapturedRequest(t *testing.T, requestCh <-chan capturedRequest) capture
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for ntfy request")
 		return capturedRequest{}
+	}
+}
+
+func TestCodexEvaluatorFailureClaimKey_UsesOnlyStableLocusMetadata(t *testing.T) {
+	tests := []struct {
+		name                       string
+		pane, workspace, host, cwd string
+		want                       string
+	}{
+		{
+			name: "pane and cwd take precedence",
+			pane: "%42", workspace: "IGNORED-WORKSPACE", host: "IGNORED-HOST", cwd: "/work/project",
+			want: "codex-evaluator-failure\npane=3:%42\ncwd=13:/work/project",
+		},
+		{
+			name:      "workspace and cwd when pane absent",
+			workspace: "earth:3", host: "IGNORED-HOST", cwd: "/work/project",
+			want: "codex-evaluator-failure\nworkspace=7:earth:3\ncwd=13:/work/project",
+		},
+		{
+			name: "host and empty cwd when pane and workspace absent",
+			host: "vermissian",
+			want: "codex-evaluator-failure\nhost=10:vermissian\ncwd=0:",
+		},
+		{
+			name: "cwd remains a locus when every runtime locator is absent",
+			cwd:  "/work/project",
+			want: "codex-evaluator-failure\nhost=0:\ncwd=13:/work/project",
+		},
+		{
+			name: "all locator fields absent",
+			want: "codex-evaluator-failure\nunknown-locus",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := codexEvaluatorFailureClaimKey(tt.pane, tt.workspace, tt.host, tt.cwd)
+			if got != tt.want {
+				t.Errorf("codexEvaluatorFailureClaimKey() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPipeline_TurnComplete_CodexFailureRateLimitedAcrossSessionsAndExpires(t *testing.T) {
+	var stdout bytes.Buffer
+	var sent []capturedRequest
+	p, logPath := newGoalTestPipeline(t, &stdout, writeStubClaude(t))
+	p.Sender = stubSenderRecording(&sent)
+	p.State = newMemDedupeState()
+	p.Environ = []string{"TMUX_PANE=%42"}
+	p.Workspace = "earth:3"
+	p.Host = "vermissian"
+
+	inputs := []HookInput{
+		{
+			SessionID: "thread-one", CWD: "/work/project", HookEventName: eventTurnComplete,
+			LastAssistantMessage: "First fallback body.",
+		},
+		{
+			SessionID: "thread-two", CWD: "/work/project", HookEventName: eventTurnComplete,
+			LastAssistantMessage: "A different fallback body from a sibling thread.",
+		},
+		{
+			SessionID: "thread-three", CWD: "/work/project", HookEventName: eventTurnComplete,
+			LastAssistantMessage: "Failure after the quiet window.",
+		},
+	}
+
+	for i := range 2 {
+		if err := p.Run(context.Background(), inputs[i]); err != nil {
+			t.Fatalf("Run() #%d error = %v", i+1, err)
+		}
+	}
+	if len(sent) != 1 {
+		t.Fatalf("sent after sibling failures = %+v, want only first failure", sent)
+	}
+
+	state, ok := p.State.(memDedupeState)
+	if !ok {
+		t.Fatalf("State = %T, want memDedupeState", p.State)
+	}
+	if len(state.m.claims) != 1 {
+		t.Fatalf("broadcast claims = %+v, want one failure-locus claim", state.m.claims)
+	}
+	for key := range state.m.claims {
+		state.m.claims[key] = claimMemState{claimedAt: time.Now().Add(-failOpenWindow - time.Second)}
+	}
+	if err := p.Run(context.Background(), inputs[2]); err != nil {
+		t.Fatalf("Run() after expiry error = %v", err)
+	}
+	if len(sent) != 2 {
+		t.Fatalf("sent after expiry = %+v, want failure to send again", sent)
+	}
+
+	records := readDecisionLog(t, logPath)
+	if len(records) != 3 || records[0].Outcome != OutcomeSend.String() ||
+		records[1].Outcome != OutcomeSilent.String() || records[2].Outcome != OutcomeSend.String() {
+		t.Fatalf("decision records = %+v, want send, silent, send", records)
+	}
+	if records[1].Title != "" || records[1].Body != "" {
+		t.Errorf("suppressed record carries notification fields: %+v", records[1])
+	}
+}
+
+func TestPipeline_TurnComplete_CodexFailureLociAreIndependent(t *testing.T) {
+	tests := []struct {
+		name                            string
+		firstPane, secondPane           string
+		firstWorkspace, secondWorkspace string
+		firstHost, secondHost           string
+		firstCWD, secondCWD             string
+		wantSent                        int
+	}{
+		{
+			name: "different pane", firstPane: "%1", secondPane: "%2",
+			firstWorkspace: "earth:3", secondWorkspace: "earth:3",
+			firstHost: "host-a", secondHost: "host-a", firstCWD: "/work/project", secondCWD: "/work/project",
+			wantSent: 2,
+		},
+		{
+			name: "different cwd", firstPane: "%1", secondPane: "%1",
+			firstWorkspace: "earth:3", secondWorkspace: "earth:3",
+			firstHost: "host-a", secondHost: "host-a", firstCWD: "/work/one", secondCWD: "/work/two",
+			wantSent: 2,
+		},
+		{
+			name:           "workspace stable without pane despite host change",
+			firstWorkspace: "earth:3", secondWorkspace: "earth:3",
+			firstHost: "host-a", secondHost: "host-b", firstCWD: "/work/project", secondCWD: "/work/project",
+			wantSent: 1,
+		},
+		{
+			name:      "host stable without pane or workspace",
+			firstHost: "host-a", secondHost: "host-a", firstCWD: "/work/project", secondCWD: "/work/project",
+			wantSent: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			var sent []capturedRequest
+			p, _ := newGoalTestPipeline(t, &stdout, writeStubClaude(t))
+			p.Sender = stubSenderRecording(&sent)
+			p.State = newMemDedupeState()
+
+			p.Environ = []string{"TMUX_PANE=" + tt.firstPane}
+			p.Workspace = tt.firstWorkspace
+			p.Host = tt.firstHost
+			if err := p.Run(context.Background(), HookInput{
+				SessionID: "thread-one", CWD: tt.firstCWD, HookEventName: eventTurnComplete,
+				LastAssistantMessage: "First evaluator failure.",
+			}); err != nil {
+				t.Fatalf("first Run() error = %v", err)
+			}
+
+			p.Environ = []string{"TMUX_PANE=" + tt.secondPane}
+			p.Workspace = tt.secondWorkspace
+			p.Host = tt.secondHost
+			if err := p.Run(context.Background(), HookInput{
+				SessionID: "thread-two", CWD: tt.secondCWD, HookEventName: eventTurnComplete,
+				LastAssistantMessage: "Second evaluator failure.",
+			}); err != nil {
+				t.Fatalf("second Run() error = %v", err)
+			}
+
+			if len(sent) != tt.wantSent {
+				t.Errorf("sent = %+v, want %d notifications", sent, tt.wantSent)
+			}
+		})
+	}
+}
+
+func TestPipeline_TurnComplete_NopStateCodexFallbacksNeverSuppressOrEvaluate(t *testing.T) {
+	var stdout bytes.Buffer
+	var sent []capturedRequest
+	p, logPath := newGoalTestPipeline(t, &stdout, writeStubClaude(t))
+	p.Sender = stubSenderRecording(&sent)
+	p.State = NopState{}
+	p.Environ = []string{"TMUX_PANE=%42"}
+	p.Workspace = "earth:3"
+	p.Host = "vermissian"
+
+	for i, in := range []HookInput{
+		{
+			SessionID: "inline-one", CWD: "/work/project", HookEventName: eventTurnComplete,
+			LastAssistantMessage: "First inline fallback.",
+		},
+		{
+			SessionID: "inline-two", CWD: "/work/project", HookEventName: eventTurnComplete,
+			LastAssistantMessage: "Second inline fallback.",
+		},
+	} {
+		if err := p.Run(context.Background(), in); err != nil {
+			t.Fatalf("Run() #%d error = %v", i+1, err)
+		}
+	}
+
+	if len(sent) != 2 {
+		t.Fatalf("sent = %+v, want both inline fallbacks", sent)
+	}
+	for _, record := range readDecisionLog(t, logPath) {
+		if record.Outcome != OutcomeSend.String() || record.JudgeErr != "" ||
+			record.JudgeMs != 0 || record.Digest != "" {
+			t.Errorf("inline record = %+v, want unsuppressed model-free send", record)
+		}
+	}
+}
+
+func TestPipeline_TurnComplete_DryRunCodexFailureClaimDoesNotRecord(t *testing.T) {
+	callLog := filepath.Join(t.TempDir(), "codex-calls")
+	t.Setenv("STUB_CALL_LOG", callLog)
+	t.Setenv("STUB_STDOUT", validCodexVerdict)
+
+	var stdout bytes.Buffer
+	p, _ := newTestPipeline(t, &stdout, writeStubClaude(t))
+	state := newSynchronizedClaimState()
+	p.State = state
+	p.CodexJudge = CodexJudge{Bin: writeStubCodex(t), Model: "gpt-5.6-luna", Timeout: time.Second}
+	p.Environ = []string{"TMUX_PANE=%42"}
+	p.Workspace = "earth:3"
+	p.Host = "vermissian"
+	in := HookInput{
+		SessionID: "dry-run", CWD: "/work/project", HookEventName: eventTurnComplete,
+		LastAssistantMessage: "Dry-run fallback.",
+	}
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("dry Run() error = %v", err)
+	}
+
+	calls, claimCount := state.snapshot()
+	if len(calls) != 1 || !calls[0].dryRun || claimCount != 0 {
+		t.Fatalf("dry-run claims = %+v, recorded=%d; want one observation and no record", calls, claimCount)
+	}
+	if _, err := os.Stat(callLog); err == nil {
+		t.Fatal("Codex call log exists: dry run evaluated a model")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat Codex call log: %v", err)
+	}
+
+	var sent []capturedRequest
+	p.DryRun = false
+	p.CodexJudge = CodexJudge{}
+	p.Sender = stubSenderRecording(&sent)
+	in.SessionID = "real-run"
+	if err := p.Run(context.Background(), in); err != nil {
+		t.Fatalf("real Run() error = %v", err)
+	}
+	if len(sent) != 1 {
+		t.Fatalf("sent = %+v, want real failure to win after dry-run observation", sent)
+	}
+}
+
+func TestPipeline_TurnComplete_CodexFailureClaimUsesFreshTimeAndPreservesEventTime(t *testing.T) {
+	var stdout bytes.Buffer
+	p, logPath := newTestPipeline(t, &stdout, writeStubClaude(t))
+	state := newSynchronizedClaimState()
+	p.State = state
+
+	eventNow := time.Now().Add(-time.Hour)
+	claimNotBefore := time.Now()
+	p.handleCodexEvaluatorFailure(
+		context.Background(),
+		HookInput{SessionID: "stale-event", CWD: "/work/project", HookEventName: eventTurnComplete},
+		eventNow,
+		"project",
+		"earth:3",
+		"vermissian",
+		"codex turn complete",
+		"",
+		errors.New("evaluator failed"),
+		"digest",
+		1,
+	)
+	claimNotAfter := time.Now()
+
+	calls, _ := state.snapshot()
+	if len(calls) != 1 {
+		t.Fatalf("failure claim calls = %+v, want one", calls)
+	}
+	if calls[0].now.Before(claimNotBefore) || calls[0].now.After(claimNotAfter) {
+		t.Errorf(
+			"claim time = %s, want fresh time in [%s, %s] (event time %s)",
+			calls[0].now,
+			claimNotBefore,
+			claimNotAfter,
+			eventNow,
+		)
+	}
+
+	records := readDecisionLog(t, logPath)
+	if len(records) != 1 || !records[0].Time.Equal(eventNow) {
+		t.Errorf("decision records = %+v, want event time %s unchanged", records, eventNow)
+	}
+}
+
+func TestPipeline_TurnComplete_ConcurrentCodexFailuresHaveOneWinner(t *testing.T) {
+	var stdout bytes.Buffer
+	p, logPath := newGoalTestPipeline(t, &stdout, writeStubClaude(t))
+	state := newSynchronizedClaimState()
+	captured := &synchronizedRequestCapture{}
+	p.State = state
+	p.Sender = captured.sender()
+	p.Environ = []string{"TMUX_PANE=%42"}
+	p.Workspace = "earth:3"
+	p.Host = "vermissian"
+
+	const runs = 16
+	start := make(chan struct{})
+	errCh := make(chan error, runs)
+	var wg sync.WaitGroup
+	for range runs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			errCh <- p.Run(context.Background(), HookInput{
+				SessionID: "sibling-thread", CWD: "/work/project", HookEventName: eventTurnComplete,
+				LastAssistantMessage: "Concurrent evaluator failure.",
+			})
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+	}
+
+	if captured.count() != 1 {
+		t.Fatalf("sent = %d, want exactly one atomic claim winner", captured.count())
+	}
+	records := readDecisionLog(t, logPath)
+	sends, silences := 0, 0
+	for _, record := range records {
+		switch record.Outcome {
+		case OutcomeSend.String():
+			sends++
+		case OutcomeSilent.String():
+			silences++
+			if record.Title != "" || record.Body != "" {
+				t.Errorf("suppressed record carries notification fields: %+v", record)
+			}
+		}
+	}
+	if sends != 1 || silences != runs-1 {
+		t.Errorf("outcomes: sends=%d silences=%d records=%d, want 1/%d/%d", sends, silences, len(records), runs-1, runs)
+	}
+}
+
+func TestPipeline_TurnComplete_ValidCodexVerdictsNeverConsultFailureClaims(t *testing.T) {
+	tests := []struct {
+		name        string
+		verdict     string
+		wantSent    int
+		wantOutcome string
+	}{
+		{
+			name: "done", verdict: validCodexVerdict,
+			wantSent: 1, wantOutcome: OutcomeSend.String(),
+		},
+		{
+			name: "blocked",
+			verdict: `{"notify":true,"urgency":"blocked","task":"choose database",` +
+				`"body":"Choose a database.","reason":"input needed"}`,
+			wantSent: 1, wantOutcome: OutcomeSend.String(),
+		},
+		{
+			name:        "semantic silence",
+			verdict:     `{"notify":false,"urgency":null,"task":null,"body":null,"reason":"work continues"}`,
+			wantOutcome: OutcomeSilent.String(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("STUB_STDOUT", tt.verdict)
+			var stdout bytes.Buffer
+			var sent []capturedRequest
+			p, logPath := newGoalTestPipeline(t, &stdout, writeStubClaude(t))
+			state := newSynchronizedClaimState()
+			p.State = state
+			p.CodexJudge = CodexJudge{Bin: writeStubCodex(t), Model: "gpt-5.6-luna", Timeout: time.Second}
+			p.Sender = stubSenderRecording(&sent)
+			p.Environ = []string{"TMUX_PANE=%42"}
+			p.Workspace = "earth:3"
+			p.Host = "vermissian"
+			key := codexEvaluatorFailureClaimKey("%42", p.Workspace, p.Host, "/work/project")
+			if !state.ClaimBroadcast(context.Background(), key, failOpenWindow, time.Now(), false) {
+				t.Fatal("seeding failure claim lost unexpectedly")
+			}
+
+			if err := p.Run(context.Background(), HookInput{
+				SessionID: "valid-verdict", CWD: "/work/project", HookEventName: eventTurnComplete,
+				Message: "evaluate this", LastAssistantMessage: "A valid semantic result.",
+			}); err != nil {
+				t.Fatalf("Run() error = %v", err)
+			}
+
+			if len(sent) != tt.wantSent {
+				t.Errorf("sent = %+v, want %d", sent, tt.wantSent)
+			}
+			calls, _ := state.snapshot()
+			if len(calls) != 1 {
+				t.Errorf("failure claim calls = %+v, want only the test seed", calls)
+			}
+			records := readDecisionLog(t, logPath)
+			if len(records) != 1 || records[0].Outcome != tt.wantOutcome {
+				t.Errorf("decision records = %+v, want one %q", records, tt.wantOutcome)
+			}
+		})
+	}
+}
+
+func TestPipeline_TurnComplete_CodexErrorSharesDisabledFailureClaimAndLogsBoundedSilence(t *testing.T) {
+	t.Setenv("STUB_STDOUT", "EVALUATOR-OUTPUT-SENTINEL")
+	t.Setenv("STUB_STDERR", strings.Repeat("E", 3*maxErrSnippetBytes)+" EVALUATOR-ERROR-SENTINEL")
+	t.Setenv("STUB_EXIT", "7")
+
+	var stdout bytes.Buffer
+	var sent []capturedRequest
+	p, logPath := newGoalTestPipeline(t, &stdout, writeStubClaude(t))
+	state := newSynchronizedClaimState()
+	p.State = state
+	p.Sender = stubSenderRecording(&sent)
+	p.Environ = []string{"IGNORED", "TMUX_PANE=%42"}
+	p.Workspace = "earth:3"
+	p.Host = "vermissian"
+	first := HookInput{
+		SessionID: "DISABLED-SESSION-SENTINEL", CWD: "/work/project", HookEventName: eventTurnComplete,
+		Message: "DISABLED-USER-CONTENT", LastAssistantMessage: "DISABLED-FALLBACK-BODY",
+	}
+	if err := p.Run(context.Background(), first); err != nil {
+		t.Fatalf("disabled Run() error = %v", err)
+	}
+
+	p.CodexJudge = CodexJudge{Bin: writeStubCodex(t), Model: "gpt-5.6-luna", Timeout: time.Second}
+	second := HookInput{
+		SessionID: "ERROR-SESSION-SENTINEL", CWD: "/work/project", HookEventName: eventTurnComplete,
+		Message: "ERROR-USER-CONTENT", LastAssistantMessage: "ERROR-FALLBACK-BODY",
+	}
+	if err := p.Run(context.Background(), second); err != nil {
+		t.Fatalf("error Run() error = %v", err)
+	}
+
+	if len(sent) != 1 {
+		t.Fatalf("sent = %+v, want disabled failure send then shared-class error suppression", sent)
+	}
+	records := readDecisionLog(t, logPath)
+	if len(records) != 2 {
+		t.Fatalf("decision records = %+v, want two", records)
+	}
+	suppressed := records[1]
+	if suppressed.Outcome != OutcomeSilent.String() || suppressed.Title != "" || suppressed.Body != "" {
+		t.Errorf("suppressed record = %+v, want silent with empty notification fields", suppressed)
+	}
+	if suppressed.Reason == "" || len(suppressed.Reason) > maxErrSnippetBytes ||
+		!strings.Contains(suppressed.Reason, "suppressed") {
+		t.Errorf(
+			"Reason = %q (%d bytes), want bounded suppression diagnostic",
+			suppressed.Reason,
+			len(suppressed.Reason),
+		)
+	}
+	if suppressed.JudgeErr == "" || len(suppressed.JudgeErr) > maxErrSnippetBytes ||
+		!utf8.ValidString(suppressed.JudgeErr) {
+		t.Errorf(
+			"JudgeErr = %q (%d bytes), want bounded valid diagnostic",
+			suppressed.JudgeErr,
+			len(suppressed.JudgeErr),
+		)
+	}
+
+	calls, _ := state.snapshot()
+	if len(calls) != 2 {
+		t.Fatalf("failure claim calls = %+v, want disabled and error claims", calls)
+	}
+	wantKey := "codex-evaluator-failure\npane=3:%42\ncwd=13:/work/project"
+	for i, call := range calls {
+		if call.key != wantKey || call.window != failOpenWindow || call.dryRun {
+			t.Errorf("claim #%d = %+v, want key %q window %s non-dry", i+1, call, wantKey, failOpenWindow)
+		}
+		for _, forbidden := range []string{
+			first.SessionID, first.Message, first.LastAssistantMessage,
+			second.SessionID, second.Message, second.LastAssistantMessage,
+			"EVALUATOR-OUTPUT-SENTINEL", "EVALUATOR-ERROR-SENTINEL",
+		} {
+			if strings.Contains(call.key, forbidden) {
+				t.Errorf("claim key leaked %q: %q", forbidden, call.key)
+			}
+		}
+	}
+}
+
+func TestPipeline_TurnComplete_SuppressedCodexErrorNormalizesInvalidUTF8BeforeBounding(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "codex-invalid-stderr")
+	const script = `#!/bin/sh
+cat >/dev/null
+i=0
+while [ "$i" -lt 60 ]; do
+  printf '\377' >&2
+  i=$((i + 1))
+done
+exit 7
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatalf("writing invalid-stderr Codex stub: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	p, logPath := newGoalTestPipeline(t, &stdout, writeStubClaude(t))
+	state := newSynchronizedClaimState()
+	p.State = state
+	p.CodexJudge = CodexJudge{Bin: bin, Model: "gpt-5.6-luna", Timeout: time.Second}
+	p.Environ = []string{"TMUX_PANE=%42"}
+	p.Workspace = "earth:3"
+	p.Host = "vermissian"
+	key := codexEvaluatorFailureClaimKey("%42", p.Workspace, p.Host, "/work/project")
+	if !state.ClaimBroadcast(context.Background(), key, failOpenWindow, time.Now(), false) {
+		t.Fatal("seeding failure claim lost unexpectedly")
+	}
+
+	if err := p.Run(context.Background(), HookInput{
+		SessionID: "invalid-stderr", CWD: "/work/project", HookEventName: eventTurnComplete,
+		LastAssistantMessage: "Suppressed fallback.",
+	}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	records := readDecisionLog(t, logPath)
+	if len(records) != 1 {
+		t.Fatalf("decision records = %+v, want one suppressed evaluator failure", records)
+	}
+	suppressed := records[0]
+	if suppressed.Outcome != OutcomeSilent.String() || suppressed.Title != "" || suppressed.Body != "" {
+		t.Errorf("suppressed record = %+v, want silent with empty notification fields", suppressed)
+	}
+	if suppressed.JudgeErr == "" || !utf8.ValidString(suppressed.JudgeErr) ||
+		len(suppressed.JudgeErr) > maxErrSnippetBytes {
+		t.Errorf(
+			"JudgeErr = %q (%d bytes), want valid UTF-8 within %d bytes",
+			suppressed.JudgeErr,
+			len(suppressed.JudgeErr),
+			maxErrSnippetBytes,
+		)
 	}
 }
 

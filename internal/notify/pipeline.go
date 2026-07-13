@@ -24,13 +24,32 @@ const turnCompleteLabel = "turn complete"
 // dry run reaches an arm-the-watchdog branch without actually arming it.
 const dryRunWouldArmWatchdogSuffix = " (would arm watchdog)"
 
-// failOpenWindow rate-limits a compose/decide-mode judge-error fallback send
-// to at most one per session within this long of its last notification: a
-// run of judge failures must not each re-ping — the reliability invariant
-// (an LLM failure may never lose a genuine ping) only requires that the
-// FIRST fail-open after a quiet period gets through; repeats within the
-// window are the same failure already surfaced.
+// failOpenWindow is the quiet period for evaluator-failure fallbacks: Claude's
+// compose/decide paths apply it per session, while Codex applies it per running
+// locus. The first fail-open gets through; repeats are the same surfaced model
+// failure and need not each re-ping.
 const failOpenWindow = 10 * time.Minute
+
+const codexEvaluatorFailureClaimPrefix = "codex-evaluator-failure"
+
+// codexEvaluatorFailureClaimKey identifies one running locus without any
+// session or turn content. Length-prefixing each value keeps empty and
+// delimiter-bearing components unambiguous while preserving their exact text.
+func codexEvaluatorFailureClaimKey(pane, workspace, host, cwd string) string {
+	component := func(value string) string {
+		return fmt.Sprintf("%d:%s", len(value), value)
+	}
+	if pane != "" {
+		return codexEvaluatorFailureClaimPrefix + "\npane=" + component(pane) + "\ncwd=" + component(cwd)
+	}
+	if workspace != "" {
+		return codexEvaluatorFailureClaimPrefix + "\nworkspace=" + component(workspace) + "\ncwd=" + component(cwd)
+	}
+	if host != "" || cwd != "" {
+		return codexEvaluatorFailureClaimPrefix + "\nhost=" + component(host) + "\ncwd=" + component(cwd)
+	}
+	return codexEvaluatorFailureClaimPrefix + "\nunknown-locus"
+}
 
 // DedupeState is Pipeline's interface onto per-session notify dedupe
 // (last-notify time and message hash) and broadcast-claim coordination, so
@@ -212,12 +231,9 @@ func (p Pipeline) handleCodexTurnComplete(
 	reasonSuffix string,
 ) {
 	if p.DryRun || p.CodexJudge.Bin == "" {
-		n := codexTurnFallback(in, project, locus)
-		sendSuffix := p.deliverCodexTurn(ctx, in, now, n)
-		p.logRecord(in, now, DecisionRecord{
-			Outcome: OutcomeSend.String(), Reason: d.Reason + reasonSuffix + sendSuffix,
-			Urgency: n.Urgency, Title: n.Title, Body: n.Body,
-		})
+		p.handleCodexEvaluatorFailure(
+			ctx, in, now, project, locus, host, d.Reason, reasonSuffix, nil, "", 0,
+		)
 		return
 	}
 
@@ -226,11 +242,8 @@ func (p Pipeline) handleCodexTurnComplete(
 	verdict, jerr := p.CodexJudge.Evaluate(ctx, digest)
 	judgeMs := time.Since(start).Milliseconds()
 	if jerr != nil {
-		n := codexTurnFallback(in, project, locus)
-		sendSuffix := p.deliverCodexTurn(ctx, in, now, n)
-		jerr = errors.New(truncateWords(jerr.Error(), maxErrSnippetBytes))
-		p.logCodexTurn(
-			in, now, OutcomeSend.String(), d.Reason+reasonSuffix+sendSuffix, n, jerr, digest, judgeMs,
+		p.handleCodexEvaluatorFailure(
+			ctx, in, now, project, locus, host, d.Reason, reasonSuffix, jerr, digest, judgeMs,
 		)
 		return
 	}
@@ -262,6 +275,44 @@ func (p Pipeline) handleCodexTurnComplete(
 	sendSuffix := p.deliverCodexTurn(ctx, in, now, n)
 	p.logCodexTurn(
 		in, now, OutcomeSend.String(), verdict.Reason+reasonSuffix+sendSuffix, n, nil, digest, judgeMs,
+	)
+}
+
+// handleCodexEvaluatorFailure applies one atomic, locus-wide claim to both
+// disabled evaluators and evaluator errors before delivering their shared
+// deterministic fallback. A lost claim is still logged, but never carries
+// notification fields that could be mistaken for a delivered ping.
+func (p Pipeline) handleCodexEvaluatorFailure(
+	ctx context.Context,
+	in HookInput,
+	now time.Time,
+	project, locus, host string,
+	reason, reasonSuffix string,
+	jerr error,
+	digest string,
+	judgeMs int64,
+) {
+	if jerr != nil {
+		jerr = errors.New(truncateWords(strings.ToValidUTF8(jerr.Error(), ""), maxErrSnippetBytes))
+	}
+	pane := parseEnviron(p.Environ)["TMUX_PANE"]
+	key := codexEvaluatorFailureClaimKey(pane, p.Workspace, host, in.CWD)
+	claimNow := time.Now()
+	if !p.dedupeState().ClaimBroadcast(ctx, key, failOpenWindow, claimNow, p.DryRun) {
+		suppressedReason := truncateWords(
+			reason+reasonSuffix+" (codex evaluator failure suppressed)",
+			maxErrSnippetBytes,
+		)
+		p.logCodexTurn(
+			in, now, OutcomeSilent.String(), suppressedReason, Notification{}, jerr, digest, judgeMs,
+		)
+		return
+	}
+
+	n := codexTurnFallback(in, project, locus)
+	sendSuffix := p.deliverCodexTurn(ctx, in, now, n)
+	p.logCodexTurn(
+		in, now, OutcomeSend.String(), reason+reasonSuffix+sendSuffix, n, jerr, digest, judgeMs,
 	)
 }
 
