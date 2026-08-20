@@ -44,7 +44,7 @@ func runStatuslineWithInput(reader io.Reader) (string, error) {
 		EnvReader:     &statusline.DefaultEnvReader{},
 		TerminalWidth: &statusline.DefaultTerminalWidth{},
 		Resolver:      aliases.NewResolverFromDefaultPath(os.Stderr, "cc-tools-statusline"),
-		CacheDir:      getCacheDir(),
+		CacheDir:      statusline.ResolveCacheDir(),
 		CacheDuration: getCacheDuration(),
 	}
 
@@ -56,16 +56,6 @@ func runStatuslineWithInput(reader io.Reader) (string, error) {
 	}
 
 	return result, nil
-}
-
-func getCacheDir() string {
-	if dir := os.Getenv("CC_TOOLS_STATUSLINE_CACHE_DIR"); dir != "" {
-		return dir
-	}
-	if dir := os.Getenv("CLAUDE_STATUSLINE_CACHE_DIR"); dir != "" {
-		return dir
-	}
-	return "/dev/shm"
 }
 
 func getCacheDuration() time.Duration {

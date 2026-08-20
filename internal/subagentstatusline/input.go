@@ -22,6 +22,11 @@ const maxInputBytes = 1 << 20 // 1 MiB
 // decoder silently drops everything else (`session_id`, `agent_id`,
 // `transcript_path`, etc.).
 type Input struct {
+	// SessionID identifies the parent session. Used to key the
+	// agents-state file (statusline.WriteAgentsState) that lets the
+	// main statusline's model chip show the running agents' models.
+	SessionID string `json:"session_id"`
+
 	// Columns is the agent view's terminal width at this tick. Used
 	// for width-pressure decisions when assembling chip chains.
 	Columns int `json:"columns"`

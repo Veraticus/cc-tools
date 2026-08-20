@@ -16,7 +16,11 @@ import (
 
 // Input represents the JSON input from stdin.
 type Input struct {
-	Model struct {
+	// SessionID keys the agents-state file the subagent hook writes
+	// (agents.go); empty or malformed ids simply disable the
+	// running-agents model-chip swap.
+	SessionID string `json:"session_id"`
+	Model     struct {
 		ID          string `json:"id"`
 		Provider    string `json:"provider"`
 		DisplayName string `json:"display_name"`
@@ -91,8 +95,12 @@ type PRInput struct {
 
 // CachedData represents cached statusline data.
 type CachedData struct {
-	ModelID        string
-	ModelDisplay   string
+	ModelID      string
+	ModelDisplay string
+	// AgentsDisplay is the running-agents summary ("2×O5 · sol ×XH")
+	// from ReadAgentsDisplay; "" when no agents are running. Non-empty
+	// swaps the model chip's text and icon (see Render).
+	AgentsDisplay  string
 	CurrentDir     string
 	TranscriptPath string
 	GitBranch      string
@@ -286,6 +294,13 @@ func (s *Statusline) computeData(currentDir string) *CachedData {
 	// Model display name (abbreviated to first-letter + version, e.g.
 	// "Sonnet 4.6 (1M Context)" → "S4.6").
 	data.ModelDisplay = abbreviateModel(s.input.Model.DisplayName)
+
+	// Running-agents summary from the subagent hook's state file.
+	// Non-empty means agents are running right now and the model chip
+	// should show their models instead of the session's (Claude never
+	// tells this hook about agents directly — see agents.go).
+	data.AgentsDisplay = ReadAgentsDisplay(
+		s.deps.FileReader, s.deps.CacheDir, s.input.SessionID, data.ModelDisplay, s.now())
 
 	// Git information. Branch comes from the zero-subprocess .git/HEAD
 	// file-read path (getGitInfo/readGitInfo); dirty/ahead/behind state

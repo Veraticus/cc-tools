@@ -32,7 +32,7 @@ func subagentStatuslineMain() int {
 	// pairing it with a bufio.Writer collapses N writes into one
 	// flush syscall regardless of how many tasks Claude passed.
 	bw := bufio.NewWriter(os.Stdout)
-	if err := subagentstatusline.Render(os.Stdin, bw, contextWindow, env); err != nil {
+	if err := subagentstatusline.Render(os.Stdin, bw, contextWindow, env, statusline.ResolveCacheDir()); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "subagent-statusline: %v\n", err)
 		return 1
 	}

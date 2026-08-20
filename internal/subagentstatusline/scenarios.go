@@ -36,7 +36,7 @@ const scenarioCWD = "/workspace/demo-project"
 // internal/statusline's selectModelIcon has, verified by inspection:
 // no math/rand usage anywhere in this package's production code).
 func Scenarios() []Scenario {
-	statuses := []string{"running", "completed", "failed", "pending"}
+	statuses := []string{statusRunning, statusCompleted, statusFailed, statusPending}
 	chainSizes := []int{1, 3}
 	columns := []int{200, 80}
 

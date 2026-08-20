@@ -31,6 +31,19 @@ func (s *Statusline) Render(data *CachedData) string {
 	}
 
 	modelIcon := s.selectModelIcon()
+	modelDisplay := data.ModelDisplay
+	effort := data.Effort
+	// Running agents swap the model chip: their models are what the
+	// session is actually burning right now, and the agent screen's
+	// bottom bar (same statusline — Claude renders one per session)
+	// otherwise says nothing about them. Effort is dropped because
+	// each agent label carries its own ("sol ×XH"); the session
+	// model's effort would mislabel them.
+	if data.AgentsDisplay != "" {
+		modelIcon = strings.TrimSpace(AgentIcon)
+		modelDisplay = data.AgentsDisplay
+		effort = nil
+	}
 	dirPath := formatPath(data.CurrentDir)
 
 	// Debug terminal width
@@ -59,7 +72,7 @@ func (s *Statusline) Render(data *CachedData) string {
 			sectionBudget -= alarmWidth
 		}
 	}
-	leftSection := s.buildLeftSection(dirPath, data.ModelDisplay, modelIcon, data.Effort, sectionBudget)
+	leftSection := s.buildLeftSection(dirPath, modelDisplay, modelIcon, effort, sectionBudget)
 	rightSection := s.buildRightSection(data, sectionBudget)
 
 	// Spacers are width constraints, not visible spaces

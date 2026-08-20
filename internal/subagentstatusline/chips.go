@@ -375,6 +375,41 @@ func isAlphaToken(s string) bool {
 	return true
 }
 
+// Task.Status values from Claude 2.1.145+. Shared by the status
+// color map, the running-labels filter, and the preview scenarios so
+// the strings exist exactly once.
+const (
+	statusRunning   = "running"
+	statusCompleted = "completed"
+	statusFailed    = "failed"
+	statusKilled    = "killed"
+	statusPending   = "pending"
+	statusQueued    = "queued"
+)
+
+// runningModelLabels collects one model label per running task for
+// the agents-state handoff (statusline.WriteAgentsState): the same
+// short form the model chip shows ("O5", "sol ×XH"), duplicates
+// intact so the main statusline can count them. Tasks Claude sent no
+// model for contribute an empty label — the reader substitutes the
+// session's own model, which is what an inherited-model task runs.
+func runningModelLabels(tasks []Task) []string {
+	labels := make([]string, 0, len(tasks))
+	for _, t := range tasks {
+		switch t.Status {
+		case statusRunning, statusPending, statusQueued:
+		default:
+			continue
+		}
+		label := shortModelName(t.Model)
+		if code := effortCode(string(t.Effort)); label != "" && code != "" {
+			label += " ×" + code
+		}
+		labels = append(labels, label)
+	}
+	return labels
+}
+
 // descriptionMaxRunes caps the description chip's text. Wider than
 // the name cap because descriptions are usually full sentences
 // ("Audit security findings", "Run integration tests against …").
@@ -431,13 +466,13 @@ func truncateRunes(s string, maxRunes int) string {
 // neutral fallback.
 func agentStatusColor(status string) Color {
 	switch status {
-	case "running":
+	case statusRunning:
 		return ColorPeach
-	case "completed":
+	case statusCompleted:
 		return ColorGreen
-	case "failed", "killed":
+	case statusFailed, statusKilled:
 		return ColorRed
-	case "pending", "queued":
+	case statusPending, statusQueued:
 		return ColorYellow
 	default:
 		return ColorLavender
