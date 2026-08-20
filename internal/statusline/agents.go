@@ -55,10 +55,15 @@ var validAgentsSessionID = regexp.MustCompile(`^[A-Za-z0-9-]{1,64}$`)
 // label per running task — duplicates intact, so the reader can count
 // them ("2×O5"). An empty label means "this task runs the session's
 // own model" (Claude omits model for inherited-model tasks); the
-// reader substitutes the session model display for those.
+// reader substitutes the session model display for those. Focused is
+// the label of the agent whose transcript view is open, nil when none
+// is (or when Claude is unpatched and never says — see the
+// patch-agent-focus.pl notes in nix-config); non-nil-but-empty means
+// a focused agent on the session's own model.
 type agentsState struct {
 	Updated int64    `json:"updated"`
 	Running []string `json:"running"`
+	Focused *string  `json:"focused,omitempty"`
 }
 
 // agentsStatePath joins the cache dir and session id into the state
@@ -70,12 +75,13 @@ func agentsStatePath(cacheDir, sessionID string) (string, bool) {
 	return filepath.Join(cacheDir, agentsStatePrefix+sessionID+".json"), true
 }
 
-// WriteAgentsState persists the running-agent labels for one session.
-// Called by the subagent hook on every invocation — including with an
-// empty labels slice, which is how the swap clears the moment every
-// agent completes. Writes are atomic (tmp + rename) so a concurrent
+// WriteAgentsState persists the running-agent labels (and the focused
+// agent's label, when there is one) for one session. Called by the
+// subagent hook on every invocation — including with an empty labels
+// slice, which is how the swap clears the moment every agent
+// completes. Writes are atomic (tmp + rename) so a concurrent
 // main-statusline read never sees a torn file.
-func WriteAgentsState(cacheDir, sessionID string, labels []string, now time.Time) error {
+func WriteAgentsState(cacheDir, sessionID string, labels []string, focused *string, now time.Time) error {
 	path, ok := agentsStatePath(cacheDir, sessionID)
 	if !ok {
 		return fmt.Errorf("agents state: unusable cache dir %q or session id %q", cacheDir, sessionID)
@@ -83,7 +89,7 @@ func WriteAgentsState(cacheDir, sessionID string, labels []string, now time.Time
 	if labels == nil {
 		labels = []string{}
 	}
-	raw, err := json.Marshal(agentsState{Updated: now.Unix(), Running: labels})
+	raw, err := json.Marshal(agentsState{Updated: now.Unix(), Running: labels, Focused: focused})
 	if err != nil {
 		return fmt.Errorf("agents state: marshal: %w", err)
 	}
@@ -98,15 +104,18 @@ func WriteAgentsState(cacheDir, sessionID string, labels []string, now time.Time
 	return nil
 }
 
-// ReadAgentsDisplay returns the running-agents summary for the model
-// chip ("2×O5 · sol ×XH"), or "" when the chip should show the
-// session model as usual: no state file, a stale one, garbage
-// content, or simply no running agents. sessionModel fills in for
-// tasks that inherit the session's model.
+// ReadAgentsDisplay returns the model-chip text for the session's
+// agents, or "" when the chip should show the session model as usual:
+// no state file, a stale one, garbage content, or nothing to say.
 //
-// Grouping preserves first-seen order; equal labels collapse into one
-// group with a "N×" prefix when N > 1. At most agentsMaxGroups groups
-// render, with the remainder folded into "+N".
+// The focused agent wins: when the user is inside an agent's
+// transcript view (patched Claude reports it — see agents_state
+// docs), the chip shows that one agent's label alone. Otherwise the
+// running agents aggregate: grouping preserves first-seen order,
+// equal labels collapse into one group with a "N×" prefix when N > 1,
+// and at most agentsMaxGroups groups render with the remainder folded
+// into "+N". sessionModel fills in for tasks that inherit the
+// session's model.
 func ReadAgentsDisplay(fr FileReader, cacheDir, sessionID, sessionModel string, now time.Time) string {
 	path, ok := agentsStatePath(cacheDir, sessionID)
 	if !ok {
@@ -123,6 +132,15 @@ func ReadAgentsDisplay(fr FileReader, cacheDir, sessionID, sessionModel string, 
 	age := now.Unix() - st.Updated
 	if age > int64(agentsStateTTL.Seconds()) || age < -int64(agentsStateTTL.Seconds()) {
 		return ""
+	}
+	if st.Focused != nil {
+		label := sanitizeAgentLabel(*st.Focused)
+		if label == "" {
+			label = sessionModel
+		}
+		if label != "" {
+			return label
+		}
 	}
 	if len(st.Running) == 0 {
 		return ""

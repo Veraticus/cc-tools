@@ -25,12 +25,14 @@ func Render(r io.Reader, w io.Writer, contextWindow int, env EnvReader, cacheDir
 		return fmt.Errorf("render: %w", err)
 	}
 
-	// Hand the running agents' model labels to the main statusline
-	// via the shared state file. Best-effort by design: this hook's
-	// job is the row decorations, and a read-only cache dir must not
-	// take them down with it.
+	// Hand the running agents' model labels (and the focused agent's,
+	// when Claude reports one) to the main statusline via the shared
+	// state file. Best-effort by design: this hook's job is the row
+	// decorations, and a read-only cache dir must not take them down
+	// with it.
 	if cacheDir != "" {
-		_ = statusline.WriteAgentsState(cacheDir, in.SessionID, runningModelLabels(in.Tasks), time.Now())
+		labels, focused := agentsHandoff(in.Tasks)
+		_ = statusline.WriteAgentsState(cacheDir, in.SessionID, labels, focused, time.Now())
 	}
 	// Snapshot env ONCE, not per-task. DefaultEnvReader.Get for
 	// AWS_PROFILE re-opens the state file on every call; with N tasks

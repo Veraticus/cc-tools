@@ -84,6 +84,14 @@ type Task struct {
 	// invocation-level context window.
 	ContextWindowSize int `json:"contextWindowSize"`
 
+	// Focused is true when this task's transcript view is the screen
+	// the user is currently inside. Stock Claude never sends it — the
+	// field exists only with nix-config's patch-agent-focus.pl applied
+	// (Claude exposes UI focus to no hook natively). Relayed through
+	// the agents-state file so the main statusline can show the viewed
+	// agent's model.
+	Focused bool `json:"focused"`
+
 	// CWD is the working directory of the agent. Used for the
 	// directory chip and as the starting point for git branch lookup.
 	CWD string `json:"cwd"`

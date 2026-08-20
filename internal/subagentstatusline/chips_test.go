@@ -844,3 +844,44 @@ func TestRenderModelChip_NoModelNoChip(t *testing.T) {
 		t.Error("no model → no chip, even with effort set")
 	}
 }
+
+// --- Agents handoff tests ---
+
+func TestAgentsHandoff_RunningLabelsAndFocus(t *testing.T) {
+	tasks := []Task{
+		{ID: "a", Status: "running", Model: "claude-opus-5[1m]"},
+		{ID: "b", Status: "completed", Model: "claude-haiku-4-5-20251001", Focused: true},
+		{ID: "c", Status: "running", Model: "chatgpt/sol", Effort: "xhigh"},
+		{ID: "d", Status: "failed", Model: "chatgpt/luna"},
+	}
+	labels, focused := agentsHandoff(tasks)
+	wantLabels := []string{"O5", "sol ×XH"}
+	if len(labels) != len(wantLabels) {
+		t.Fatalf("labels = %v, want %v", labels, wantLabels)
+	}
+	for i := range wantLabels {
+		if labels[i] != wantLabels[i] {
+			t.Errorf("labels[%d] = %q, want %q", i, labels[i], wantLabels[i])
+		}
+	}
+	if focused == nil || *focused != "H4.5" {
+		t.Errorf("focused should be the completed-but-viewed task's label H4.5, got %v", focused)
+	}
+}
+
+func TestAgentsHandoff_NoFocus(t *testing.T) {
+	labels, focused := agentsHandoff([]Task{{ID: "a", Status: "running", Model: "sonnet"}})
+	if focused != nil {
+		t.Errorf("no focused task should give nil, got %q", *focused)
+	}
+	if len(labels) != 1 || labels[0] != "sonnet" {
+		t.Errorf("labels = %v, want [sonnet]", labels)
+	}
+}
+
+func TestAgentsHandoff_FocusedInheritedModelEmptyLabel(t *testing.T) {
+	_, focused := agentsHandoff([]Task{{ID: "a", Status: "running", Focused: true}})
+	if focused == nil || *focused != "" {
+		t.Errorf("focused inherited-model task should give non-nil empty label, got %v", focused)
+	}
+}

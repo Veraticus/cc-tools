@@ -16,7 +16,7 @@ const agentsTestSession = "39fdc97d-5534-4e4b-af38-8e1ae9d77939"
 func TestAgentsState_WriteReadRoundtrip(t *testing.T) {
 	dir := t.TempDir()
 	labels := []string{"O5", "O5", "sol ×XH"}
-	if err := WriteAgentsState(dir, agentsTestSession, labels, agentsNow()); err != nil {
+	if err := WriteAgentsState(dir, agentsTestSession, labels, nil, agentsNow()); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	got := ReadAgentsDisplay(&DefaultFileReader{}, dir, agentsTestSession, "F5", agentsNow())
@@ -28,10 +28,10 @@ func TestAgentsState_WriteReadRoundtrip(t *testing.T) {
 
 func TestAgentsState_EmptyLabelsClearTheSwap(t *testing.T) {
 	dir := t.TempDir()
-	if err := WriteAgentsState(dir, agentsTestSession, []string{"O5"}, agentsNow()); err != nil {
+	if err := WriteAgentsState(dir, agentsTestSession, []string{"O5"}, nil, agentsNow()); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if err := WriteAgentsState(dir, agentsTestSession, nil, agentsNow()); err != nil {
+	if err := WriteAgentsState(dir, agentsTestSession, nil, nil, agentsNow()); err != nil {
 		t.Fatalf("rewrite: %v", err)
 	}
 	if got := ReadAgentsDisplay(&DefaultFileReader{}, dir, agentsTestSession, "F5", agentsNow()); got != "" {
@@ -41,7 +41,7 @@ func TestAgentsState_EmptyLabelsClearTheSwap(t *testing.T) {
 
 func TestReadAgentsDisplay_StaleFileIgnored(t *testing.T) {
 	dir := t.TempDir()
-	if err := WriteAgentsState(dir, agentsTestSession, []string{"O5"}, agentsNow()); err != nil {
+	if err := WriteAgentsState(dir, agentsTestSession, []string{"O5"}, nil, agentsNow()); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	later := agentsNow().Add(agentsStateTTL + time.Second)
@@ -53,7 +53,7 @@ func TestReadAgentsDisplay_StaleFileIgnored(t *testing.T) {
 func TestReadAgentsDisplay_FutureTimestampIgnored(t *testing.T) {
 	dir := t.TempDir()
 	future := agentsNow().Add(agentsStateTTL + time.Minute)
-	if err := WriteAgentsState(dir, agentsTestSession, []string{"O5"}, future); err != nil {
+	if err := WriteAgentsState(dir, agentsTestSession, []string{"O5"}, nil, future); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	if got := ReadAgentsDisplay(&DefaultFileReader{}, dir, agentsTestSession, "F5", agentsNow()); got != "" {
@@ -78,7 +78,7 @@ func TestReadAgentsDisplay_GarbageFile(t *testing.T) {
 
 func TestReadAgentsDisplay_InheritedModelFallsBackToSessionModel(t *testing.T) {
 	dir := t.TempDir()
-	if err := WriteAgentsState(dir, agentsTestSession, []string{"", ""}, agentsNow()); err != nil {
+	if err := WriteAgentsState(dir, agentsTestSession, []string{"", ""}, nil, agentsNow()); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	if got := ReadAgentsDisplay(&DefaultFileReader{}, dir, agentsTestSession, "F5", agentsNow()); got != "2×F5" {
@@ -89,7 +89,7 @@ func TestReadAgentsDisplay_InheritedModelFallsBackToSessionModel(t *testing.T) {
 func TestReadAgentsDisplay_GroupCapAndOverflow(t *testing.T) {
 	dir := t.TempDir()
 	labels := []string{"O5", "sol", "H4.5", "S5", "glm-4.6", "glm-4.6"}
-	if err := WriteAgentsState(dir, agentsTestSession, labels, agentsNow()); err != nil {
+	if err := WriteAgentsState(dir, agentsTestSession, labels, nil, agentsNow()); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	got := ReadAgentsDisplay(&DefaultFileReader{}, dir, agentsTestSession, "F5", agentsNow())
@@ -124,7 +124,7 @@ func TestAgentsStatePath_RejectsBadIDs(t *testing.T) {
 }
 
 func TestWriteAgentsState_RejectsBadSessionID(t *testing.T) {
-	if err := WriteAgentsState(t.TempDir(), "../evil", []string{"O5"}, agentsNow()); err == nil {
+	if err := WriteAgentsState(t.TempDir(), "../evil", []string{"O5"}, nil, agentsNow()); err == nil {
 		t.Error("path-traversal session id must error")
 	}
 }
@@ -173,5 +173,54 @@ func TestRender_AgentsDisplaySwapsModelChip(t *testing.T) {
 	}
 	if !strings.Contains(swapped, strings.TrimSpace(AgentIcon)) {
 		t.Errorf("swap should use the agent icon, got %q", stripAnsi(swapped))
+	}
+}
+
+func strPtr(s string) *string { return &s }
+
+func TestReadAgentsDisplay_FocusedWinsOverAggregate(t *testing.T) {
+	dir := t.TempDir()
+	err := WriteAgentsState(
+		dir, agentsTestSession, []string{"O5", "O5"}, strPtr("sol ×XH"), agentsNow())
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if got := ReadAgentsDisplay(&DefaultFileReader{}, dir, agentsTestSession, "F5", agentsNow()); got != "sol ×XH" {
+		t.Errorf("focused agent should win over aggregate, got %q", got)
+	}
+}
+
+func TestReadAgentsDisplay_FocusedInheritedModelShowsSessionModel(t *testing.T) {
+	dir := t.TempDir()
+	if err := WriteAgentsState(dir, agentsTestSession, []string{"O5"}, strPtr(""), agentsNow()); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if got := ReadAgentsDisplay(&DefaultFileReader{}, dir, agentsTestSession, "F5", agentsNow()); got != "F5" {
+		t.Errorf("focused inherited-model agent should show session model, got %q", got)
+	}
+}
+
+func TestReadAgentsDisplay_FocusedWithNoRunningAgents(t *testing.T) {
+	// Viewing a completed agent's transcript: no running tasks, but the
+	// focused label still labels the screen the user is on.
+	dir := t.TempDir()
+	if err := WriteAgentsState(dir, agentsTestSession, nil, strPtr("H4.5"), agentsNow()); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if got := ReadAgentsDisplay(&DefaultFileReader{}, dir, agentsTestSession, "F5", agentsNow()); got != "H4.5" {
+		t.Errorf("focused completed agent should still label the chip, got %q", got)
+	}
+}
+
+func TestReadAgentsDisplay_FocusedSanitized(t *testing.T) {
+	fr := NewMockFileReader()
+	path, _ := agentsStatePath("/cache", agentsTestSession)
+	fr.files[path] = []byte(`{"updated":1787200000,"running":[],"focused":"sol\u001b[31m"}`)
+	got := ReadAgentsDisplay(fr, "/cache", agentsTestSession, "F5", agentsNow())
+	if strings.ContainsRune(got, 0x1b) {
+		t.Errorf("focused label must be control-stripped, got %q", got)
+	}
+	if got != "sol[31m" {
+		t.Errorf("sanitized focused label = %q, want %q", got, "sol[31m")
 	}
 }

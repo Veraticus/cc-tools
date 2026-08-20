@@ -387,27 +387,34 @@ const (
 	statusQueued    = "queued"
 )
 
-// runningModelLabels collects one model label per running task for
-// the agents-state handoff (statusline.WriteAgentsState): the same
-// short form the model chip shows ("O5", "sol ×XH"), duplicates
-// intact so the main statusline can count them. Tasks Claude sent no
-// model for contribute an empty label — the reader substitutes the
-// session's own model, which is what an inherited-model task runs.
-func runningModelLabels(tasks []Task) []string {
+// agentsHandoff collects what the main statusline needs from this
+// tick (statusline.WriteAgentsState): one model label per running
+// task — the same short form the model chip shows ("O5", "sol ×XH"),
+// duplicates intact so the main statusline can count them — plus the
+// focused task's label when an agent view is open (any status: a
+// completed agent's transcript is still a view worth labeling). Tasks
+// Claude sent no model for contribute an empty label; the reader
+// substitutes the session's own model, which is what an
+// inherited-model task runs. The returned focused pointer is nil when
+// no agent view is open (or on stock Claude, which never sets
+// Task.Focused).
+func agentsHandoff(tasks []Task) ([]string, *string) {
 	labels := make([]string, 0, len(tasks))
+	var focused *string
 	for _, t := range tasks {
-		switch t.Status {
-		case statusRunning, statusPending, statusQueued:
-		default:
-			continue
-		}
 		label := shortModelName(t.Model)
 		if code := effortCode(string(t.Effort)); label != "" && code != "" {
 			label += " ×" + code
 		}
-		labels = append(labels, label)
+		if t.Focused && focused == nil {
+			focused = &label
+		}
+		switch t.Status {
+		case statusRunning, statusPending, statusQueued:
+			labels = append(labels, label)
+		}
 	}
-	return labels
+	return labels, focused
 }
 
 // descriptionMaxRunes caps the description chip's text. Wider than
