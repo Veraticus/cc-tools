@@ -183,3 +183,49 @@ func TestParse_ReadError(t *testing.T) {
 		t.Errorf("error %q should wrap reader error", err)
 	}
 }
+
+func TestParse_ModelEffortAndWindow(t *testing.T) {
+	input := `{"columns": 120, "tasks": [{
+		"id": "t1", "type": "local_agent", "status": "running",
+		"model": "chatgpt/sol", "effort": "low", "contextWindowSize": 372000
+	}]}`
+	in, err := Parse(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	task := in.Tasks[0]
+	if task.Model != "chatgpt/sol" {
+		t.Errorf("Model = %q, want %q", task.Model, "chatgpt/sol")
+	}
+	if task.Effort != "low" {
+		t.Errorf("Effort = %q, want %q", task.Effort, "low")
+	}
+	if task.ContextWindowSize != 372000 {
+		t.Errorf("ContextWindowSize = %d, want 372000", task.ContextWindowSize)
+	}
+}
+
+func TestParse_EffortObjectShape(t *testing.T) {
+	input := `{"tasks": [{"id": "t1", "effort": {"level": "xhigh"}}]}`
+	in, err := Parse(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if in.Tasks[0].Effort != "xhigh" {
+		t.Errorf("Effort = %q, want %q", in.Tasks[0].Effort, "xhigh")
+	}
+}
+
+func TestParse_EffortGarbageToleratedAsEmpty(t *testing.T) {
+	input := `{"tasks": [{"id": "t1", "model": "sonnet", "effort": 42}]}`
+	in, err := Parse(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("malformed effort must not fail the payload: %v", err)
+	}
+	if in.Tasks[0].Effort != "" {
+		t.Errorf("Effort = %q, want empty", in.Tasks[0].Effort)
+	}
+	if in.Tasks[0].Model != "sonnet" {
+		t.Errorf("Model = %q, want %q (rest of task must survive)", in.Tasks[0].Model, "sonnet")
+	}
+}

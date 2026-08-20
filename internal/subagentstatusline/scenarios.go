@@ -56,6 +56,20 @@ func Scenarios() []Scenario {
 // context chip stays green) context-bar percentage.
 const scenarioTokensPerTask = 10000
 
+// scenarioModels cycles across a chain's tasks so multi-task scenarios
+// exercise the model chip's three id shapes: a claude id that
+// abbreviates, a provider-prefixed alias, and a claude id with a date
+// stamp. Effort accompanies the first model only, covering both the
+// suffixed and suffix-free renderings.
+var scenarioModels = []struct { //nolint:gochecknoglobals // immutable fixture table
+	model  string
+	effort EffortLevel
+}{
+	{"claude-fable-5[1m]", "high"},
+	{"chatgpt/sol", ""},
+	{"claude-haiku-4-5-20251001", ""},
+}
+
 // buildScenario constructs one Scenario: a chain of chainSize tasks,
 // all sharing status, rendered at the given column budget.
 func buildScenario(columns, chainSize int, status string) Scenario {
@@ -64,6 +78,7 @@ func buildScenario(columns, chainSize int, status string) Scenario {
 	tasks := make([]Task, chainSize)
 	for i := range chainSize {
 		agentName := fmt.Sprintf("Agent %d", i+1)
+		m := scenarioModels[i%len(scenarioModels)]
 		tasks[i] = Task{
 			ID:          fmt.Sprintf("task-%d", i+1),
 			Name:        &agentName,
@@ -71,6 +86,8 @@ func buildScenario(columns, chainSize int, status string) Scenario {
 			Status:      status,
 			Description: fmt.Sprintf("Doing work item %d", i+1),
 			TokenCount:  (i + 1) * scenarioTokensPerTask,
+			Model:       m.model,
+			Effort:      m.effort,
 			CWD:         scenarioCWD,
 		}
 	}

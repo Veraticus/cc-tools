@@ -733,3 +733,114 @@ func TestSnapshotEnv_PrimaryWins(t *testing.T) {
 		t.Errorf("KUBE_CONTEXT should win, got %q", snap.K8sContext)
 	}
 }
+
+// --- Model chip tests ---
+
+func TestShortModelName_Table(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"", ""},
+		{"   ", ""},
+		{"claude-fable-5[1m]", "F5"},
+		{"claude-fable-5", "F5"},
+		{"claude-opus-4-8", "O4.8"},
+		{"claude-sonnet-5", "S5"},
+		{"claude-haiku-4-5-20251001", "H4.5"},
+		{"claude-3-5-sonnet-20241022", "S3.5"},
+		{"chatgpt/sol", "sol"},
+		{"chatgpt/luna", "luna"},
+		{"openrouter/glm-4.6", "glm-4.6"},
+		{"bedrock/opus", "opus"},
+		{"gpt-5.6-sol", "gpt-5.6-sol"},
+		{"sonnet", "sonnet"},
+		{"opus", "opus"},
+		// claude- prefix with no recognizable family/version falls back
+		// to the raw (truncated) id.
+		{"claude-next", "claude-next"},
+		// Provider prefix stripped before claude abbreviation.
+		{"anthropic/claude-opus-4-8", "O4.8"},
+		// Trailing slash: nothing after it, id passes through.
+		{"weird/", "weird/"},
+	}
+	for _, c := range cases {
+		if got := shortModelName(c.in); got != c.want {
+			t.Errorf("shortModelName(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestShortModelName_TruncatesLongIDs(t *testing.T) {
+	got := shortModelName("some-extremely-long-model-identifier-v2")
+	if runeCount := len([]rune(got)); runeCount > modelMaxRunes {
+		t.Errorf("long id should truncate to ≤%d runes, got %d (%q)", modelMaxRunes, runeCount, got)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("truncated id should end with ellipsis, got %q", got)
+	}
+}
+
+func TestShortModelName_StripsControlBytes(t *testing.T) {
+	got := shortModelName("chatgpt/s\x1bol")
+	if strings.ContainsRune(got, 0x1b) {
+		t.Errorf("control bytes must be stripped, got %q", got)
+	}
+	if got != "sol" {
+		t.Errorf("shortModelName with embedded ESC = %q, want %q", got, "sol")
+	}
+}
+
+func TestRenderModelChip_Basic(t *testing.T) {
+	chip, ok := renderModelChip(Task{Model: "chatgpt/sol"})
+	if !ok {
+		t.Fatal("model set → chip expected")
+	}
+	if chip.Color != ColorTeal {
+		t.Errorf("model chip color = %v, want ColorTeal", chip.Color)
+	}
+	if !strings.Contains(chip.Body, "sol") {
+		t.Errorf("body should contain short model name, got %q", chip.Body)
+	}
+	if !strings.HasPrefix(chip.Body, " ") || !strings.HasSuffix(chip.Body, " ") {
+		t.Errorf("body should have padding spaces, got %q", chip.Body)
+	}
+}
+
+func TestRenderModelChip_EffortSuffix(t *testing.T) {
+	cases := []struct {
+		effort EffortLevel
+		want   string
+	}{
+		{"low", "×L"},
+		{"medium", "×M"},
+		{"high", "×H"},
+		{"xhigh", "×XH"},
+		{"max", "×MAX"},
+	}
+	for _, c := range cases {
+		chip, ok := renderModelChip(Task{Model: "claude-fable-5[1m]", Effort: c.effort})
+		if !ok {
+			t.Fatalf("effort=%q: chip expected", c.effort)
+		}
+		if !strings.Contains(chip.Body, "F5 "+c.want) {
+			t.Errorf("effort=%q: body should contain %q, got %q", c.effort, "F5 "+c.want, chip.Body)
+		}
+	}
+}
+
+func TestRenderModelChip_UnknownEffortNoSuffix(t *testing.T) {
+	chip, ok := renderModelChip(Task{Model: "sonnet", Effort: "ultra"})
+	if !ok {
+		t.Fatal("model set → chip expected")
+	}
+	if strings.Contains(chip.Body, "×") {
+		t.Errorf("unknown effort should render no suffix, got %q", chip.Body)
+	}
+}
+
+func TestRenderModelChip_NoModelNoChip(t *testing.T) {
+	if _, ok := renderModelChip(Task{Effort: "high"}); ok {
+		t.Error("no model → no chip, even with effort set")
+	}
+}

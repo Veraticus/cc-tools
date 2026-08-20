@@ -38,6 +38,12 @@ const (
 	AlarmIcon = "󰀦 "
 	// ModelIcons contains various icons for model display.
 	ModelIcons = "󰚩󱚝󱚟󱚡󱚣󱚥"
+	// ModelIcon is the fixed model-chip icon used by the subagent
+	// statusline (the first ModelIcons glyph plus a trailing space).
+	// The main statusline picks randomly from ModelIcons per render;
+	// subagent rows use one fixed glyph so a tick never reshuffles
+	// icons across rows.
+	ModelIcon = "󰚩 "
 
 	// ProgressLeftEmpty is the left empty progress bar character.
 	ProgressLeftEmpty = ""

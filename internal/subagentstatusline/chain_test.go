@@ -295,3 +295,68 @@ func TestBuildContent_ZeroContextWindow(t *testing.T) {
 		t.Errorf("BuildContent with contextWindow=0 should default to 1M, expected 50%%, got %q", got)
 	}
 }
+
+func TestBuildContent_ModelChipRendered(t *testing.T) {
+	task := Task{
+		ID:     "t1",
+		Type:   "local_agent",
+		Status: "running",
+		Model:  "chatgpt/sol",
+		CWD:    "/tmp",
+	}
+	out := BuildContent(task, 200, DefaultContextWindow, EnvSnapshot{})
+	if !strings.Contains(out, "sol") {
+		t.Errorf("chain should contain model short name 'sol', got %q", out)
+	}
+}
+
+func TestBuildContent_ModelChipSurvivesModeratePressure(t *testing.T) {
+	// At 80 columns with all env chips present, the right-side chips
+	// drop first; the model chip (index 1) must still be there.
+	task := Task{
+		ID:          "t1",
+		Type:        "local_agent",
+		Status:      "running",
+		Description: "Doing something fairly long here",
+		Model:       "claude-fable-5[1m]",
+		Effort:      "high",
+		CWD:         "/tmp",
+	}
+	snap := EnvSnapshot{AWSProfile: "dev-profile", GCloudProject: "my-project", K8sContext: "cluster"}
+	out := BuildContent(task, 80, DefaultContextWindow, snap)
+	if !strings.Contains(out, "F5 ×H") {
+		t.Errorf("model chip should survive moderate pressure, got %q", out)
+	}
+}
+
+func TestBuildContent_TaskWindowOverridesInvocationWindow(t *testing.T) {
+	// 186k tokens: 50% of the task's 372k window, but only 19% of the
+	// invocation-level 1M fallback. The task's own window must win.
+	task := Task{
+		ID:                "t1",
+		Type:              "local_agent",
+		Status:            "running",
+		Model:             "chatgpt/sol",
+		ContextWindowSize: 372_000,
+		TokenCount:        186_000,
+		CWD:               "/tmp",
+	}
+	out := BuildContent(task, 200, DefaultContextWindow, EnvSnapshot{})
+	if !strings.Contains(out, "50%") {
+		t.Errorf("context bar should use the task's 372k window (50%%), got %q", out)
+	}
+}
+
+func TestBuildContent_ZeroTaskWindowFallsBack(t *testing.T) {
+	task := Task{
+		ID:         "t1",
+		Type:       "local_agent",
+		Status:     "running",
+		TokenCount: 500_000,
+		CWD:        "/tmp",
+	}
+	out := BuildContent(task, 200, DefaultContextWindow, EnvSnapshot{})
+	if !strings.Contains(out, "50%") {
+		t.Errorf("no task window → invocation window (50%% of 1M), got %q", out)
+	}
+}

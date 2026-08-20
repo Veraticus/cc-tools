@@ -20,7 +20,7 @@ const maxInputBytes = 1 << 20 // 1 MiB
 //
 // Only the fields cc-tools renders against are listed; the JSON
 // decoder silently drops everything else (`session_id`, `agent_id`,
-// `effort`, `transcript_path`, etc.).
+// `transcript_path`, etc.).
 type Input struct {
 	// Columns is the agent view's terminal width at this tick. Used
 	// for width-pressure decisions when assembling chip chains.
@@ -63,9 +63,51 @@ type Task struct {
 	// TokenCount is the running token total used for the context bar.
 	TokenCount int `json:"tokenCount"`
 
+	// Model is the model id or alias configured for this task
+	// ("claude-fable-5[1m]", "chatgpt/sol", "sonnet"). Empty when
+	// Claude didn't report one; the model chip is omitted then.
+	Model string `json:"model"`
+
+	// Effort is the reasoning-effort level for this task (low |
+	// medium | high | xhigh | max). Rendered as a suffix inside the
+	// model chip, mirroring the main statusline's "×H" convention.
+	Effort EffortLevel `json:"effort"`
+
+	// ContextWindowSize is Model's context window in tokens, as
+	// computed by Claude per task. 0 when absent (Claude only sends
+	// it when Model is set); the renderer then falls back to the
+	// invocation-level context window.
+	ContextWindowSize int `json:"contextWindowSize"`
+
 	// CWD is the working directory of the agent. Used for the
 	// directory chip and as the starting point for git branch lookup.
 	CWD string `json:"cwd"`
+}
+
+// EffortLevel is a task's reasoning-effort level. Claude 2.1.234 sends
+// it as a bare string; the unmarshaller also tolerates the main
+// statusline's `{"level": "..."}` object shape, and maps anything else
+// to "" rather than failing the whole payload — a malformed effort
+// value should cost one suffix, not every row.
+type EffortLevel string
+
+// UnmarshalJSON accepts `"high"`, `{"level": "high"}`, or anything
+// else (→ ""). Never returns an error by design; see EffortLevel.
+func (e *EffortLevel) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		*e = EffortLevel(s)
+		return nil
+	}
+	var obj struct {
+		Level string `json:"level"`
+	}
+	if err := json.Unmarshal(data, &obj); err == nil {
+		*e = EffortLevel(obj.Level)
+		return nil
+	}
+	*e = ""
+	return nil
 }
 
 // Parse reads a subagentStatusLine JSON blob and decodes it into an

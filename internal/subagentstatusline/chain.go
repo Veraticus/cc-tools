@@ -118,33 +118,43 @@ func assembleChain(chips []Chip) string {
 // budget. Chip selection runs in epic-defined order; drops happen
 // right-to-left (k8s first, dir never).
 //
-// contextWindow defaults to DefaultContextWindow (Opus 1M) when 0 or
-// negative. snap holds the env values shared across all tasks in this
-// invocation — read once per invocation, not per task.
+// The task's own ContextWindowSize sizes the context bar when Claude
+// reported one (it tracks the task's actual model — a 372k
+// subscription route and a 1M Opus session get different bars);
+// contextWindow is the invocation-level fallback, defaulting to
+// DefaultContextWindow (Opus 1M) when 0 or negative. snap holds the
+// env values shared across all tasks in this invocation — read once
+// per invocation, not per task.
 func BuildContent(task Task, columns, contextWindow int, snap EnvSnapshot) string {
-	if contextWindow <= 0 {
-		contextWindow = DefaultContextWindow
+	window := task.ContextWindowSize
+	if window <= 0 {
+		window = contextWindow
+	}
+	if window <= 0 {
+		window = DefaultContextWindow
 	}
 
 	// Gather all candidate chips. Display order goes:
-	// name → description → dir → context → branch → env chips.
+	// name → model → description → dir → context → branch → env chips.
 	// Name and dir are pinned; everything else can drop under width
-	// pressure. Description sits next to name visually but drops
-	// before dir thanks to per-chip droppable flags.
+	// pressure. Model and description sit next to name visually but
+	// drop before dir thanks to per-chip droppable flags.
 	name := renderAgentNameChip(task)
+	model, modelOK := renderModelChip(task)
 	desc, descOK := renderAgentDescriptionChip(task)
 	dir := renderDirectoryChip(task.CWD)
-	ctx := renderContextChip(task.TokenCount, contextWindow)
+	ctx := renderContextChip(task.TokenCount, window)
 	branch, branchOK := renderBranchChip(task.CWD)
 	aws, awsOK := renderAWSChip(snap.AWSProfile)
 	gcloud, gcloudOK := renderGCloudChip(snap.GCloudProject)
 	k8s, k8sOK := renderK8sChip(snap.K8sContext)
 
 	candidates := []chipOpt{
-		{name, true, false},  // identity — pinned
-		{desc, descOK, true}, // sits next to name, drops first under pressure
-		{dir, true, false},   // cwd — pinned
-		{ctx, true, true},    // always present, droppable
+		{name, true, false},    // identity — pinned
+		{model, modelOK, true}, // model identity, drops second-to-last
+		{desc, descOK, true},   // sits next to name, drops first under pressure
+		{dir, true, false},     // cwd — pinned
+		{ctx, true, true},      // always present, droppable
 		{branch, branchOK, true},
 		{aws, awsOK, true},
 		{gcloud, gcloudOK, true},

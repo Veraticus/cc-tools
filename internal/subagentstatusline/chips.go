@@ -231,6 +231,150 @@ func agentNamePicked(t Task) (string, nameSource) {
 	return agentTypeLabel(t.Type), sourceTypeLabel
 }
 
+// modelMaxRunes caps the model chip's identifier portion. Short ids
+// ("F5", "sol", "glm-4.6") are the common case; a long unrecognized
+// id truncates rather than starving the chips to its right.
+const modelMaxRunes = 14
+
+// renderModelChip builds the chip identifying which model this task
+// runs — the one piece of row identity Claude's own chrome doesn't
+// show, and the only visible difference between otherwise-identical
+// rungs routed to different upstreams. Returns (Chip{}, false) when
+// the task has no model (Claude omits the field for inherited-model
+// tasks). Effort renders as a "×H"-style suffix, matching the main
+// statusline's model chip.
+//
+// Color is ColorTeal — distinct from the status-colored name chip on
+// its left and the sapphire description chip on its right.
+func renderModelChip(t Task) (Chip, bool) {
+	text := shortModelName(t.Model)
+	if text == "" {
+		return Chip{}, false
+	}
+	if code := effortCode(string(t.Effort)); code != "" {
+		text += " ×" + code
+	}
+	return Chip{
+		Color: ColorTeal,
+		Body:  " " + statusline.ModelIcon + text + " ",
+	}, true
+}
+
+// effortCode maps an effort level to the compact code shown as the
+// model chip's suffix. Same codes as the main statusline's effortCode
+// (internal/statusline/render.go); unknown or empty levels return "".
+func effortCode(level string) string {
+	switch level {
+	case "low":
+		return "L"
+	case "medium":
+		return "M"
+	case "high":
+		return "H"
+	case "xhigh":
+		return "XH"
+	case "max":
+		return "MAX"
+	}
+	return ""
+}
+
+// shortModelName compresses a model id or alias into chip-sized text:
+//
+//  1. Control bytes stripped, whitespace trimmed.
+//  2. A trailing bracket marker is dropped ("claude-fable-5[1m]" →
+//     "claude-fable-5") — same intent as the main statusline stripping
+//     "(1M Context)".
+//  3. A provider prefix is dropped ("chatgpt/sol" → "sol",
+//     "openrouter/glm-4.6" → "glm-4.6").
+//  4. A "claude-" id abbreviates to first-letter + dotted version
+//     ("claude-fable-5" → "F5", "claude-opus-4-8" → "O4.8",
+//     "claude-3-5-sonnet-20241022" → "S3.5") via abbreviateClaudeID.
+//  5. Anything else passes through truncated to modelMaxRunes.
+//
+// Empty input returns "" (caller omits the chip).
+func shortModelName(model string) string {
+	s := strings.TrimSpace(stripControl(model))
+	if s == "" {
+		return ""
+	}
+	if i := strings.IndexByte(s, '['); i > 0 {
+		s = strings.TrimSpace(s[:i])
+	}
+	if i := strings.LastIndexByte(s, '/'); i >= 0 && i+1 < len(s) {
+		s = s[i+1:]
+	}
+	if rest, ok := strings.CutPrefix(s, "claude-"); ok {
+		if short := abbreviateClaudeID(rest); short != "" {
+			return short
+		}
+	}
+	return truncateRunes(s, modelMaxRunes)
+}
+
+// dateStampMinDigits distinguishes a version token ("5", "4", "8")
+// from a date stamp ("20241022") inside a claude model id: any
+// all-digit token this long or longer is a snapshot date, not a
+// version component.
+const dateStampMinDigits = 6
+
+// abbreviateClaudeID turns the post-"claude-" tail of a model id into
+// first-letter-of-family + dotted version: "fable-5" → "F5",
+// "opus-4-8" → "O4.8", "haiku-4-5-20251001" → "H4.5",
+// "3-5-sonnet-20241022" → "S3.5" (old ids put the version first).
+// The family is the last alphabetic token; the version joins every
+// short all-digit token with dots, skipping date stamps. Returns ""
+// when either half is missing so the caller can fall back to the raw
+// id.
+func abbreviateClaudeID(rest string) string {
+	var family string
+	var version []string
+	for tok := range strings.SplitSeq(rest, "-") {
+		switch {
+		case tok == "":
+		case isDigits(tok):
+			if len(tok) < dateStampMinDigits {
+				version = append(version, tok)
+			}
+		case isAlphaToken(tok):
+			family = tok
+		}
+	}
+	if family == "" || len(version) == 0 {
+		return ""
+	}
+	return strings.ToUpper(family[:1]) + strings.Join(version, ".")
+}
+
+// isDigits reports whether s is non-empty and all ASCII digits.
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := range len(s) {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// isAlphaToken reports whether s is non-empty and all ASCII letters.
+// Mixed tokens ("5m", "v2") count as neither family nor version and
+// are skipped by abbreviateClaudeID.
+func isAlphaToken(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := range len(s) {
+		c := s[i]
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
+			return false
+		}
+	}
+	return true
+}
+
 // descriptionMaxRunes caps the description chip's text. Wider than
 // the name cap because descriptions are usually full sentences
 // ("Audit security findings", "Run integration tests against …").
