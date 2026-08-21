@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"time"
@@ -131,6 +132,11 @@ type CachedData struct {
 	// failed — and the cost chip renders CostInput.TotalCostUSD
 	// instead.
 	CostFromTranscript bool
+
+	// Patchbay is today's gateway-accounted usage summary when Patchbay is
+	// configured. Unconfigured and unavailable states retain the legacy
+	// transcript path; an API error renders a visible error chip instead.
+	Patchbay patchbayResult
 }
 
 // Dependencies contains all external dependencies.
@@ -142,6 +148,9 @@ type Dependencies struct {
 	Resolver      *aliases.Resolver
 	CacheDir      string
 	CacheDuration time.Duration
+	// PatchbayClient performs the optional local Patchbay usage request.
+	// nil uses a 500ms-bounded default client.
+	PatchbayClient *http.Client
 
 	// IconIndex selects which rune index into ModelIcons is displayed
 	// by selectModelIcon, given the icon count. nil (the production
@@ -340,6 +349,17 @@ func (s *Statusline) computeData(currentDir string) *CachedData {
 	data.Cost = s.input.Cost
 	data.Effort = s.input.Effort
 	data.PR = s.input.PR
+
+	// A configured Patchbay is the accounting source of truth. Only an
+	// unreachable gateway falls through to the legacy transcript path; an
+	// authentication, server, or response-shape failure stays visible as an
+	// error indicator and never mixes accounting bases.
+	data.Patchbay = patchbayCost(
+		s.deps.CacheDir, s.deps.CacheDuration, s.now(), s.deps.EnvReader, s.deps.PatchbayClient,
+	)
+	if data.Patchbay.Status == patchbayAvailable || data.Patchbay.Status == patchbayError {
+		return data
+	}
 
 	// Transcript-derived session+daily cost. Only attempted when stdin
 	// reported a transcript path; a failure (or no path) leaves

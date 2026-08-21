@@ -497,27 +497,40 @@ func (s *Statusline) buildMiddleSection(data *CachedData, width int) string {
 		return strings.Repeat(" ", width)
 	}
 	if width < clusterWidth {
-		// assembleMiddleCluster already dropped the context element, so
-		// the chip alone doesn't fit. The rate-limit/cost chips blank
-		// under this pressure; the alarm never does — it degrades.
-		if kind == chipAlarm {
-			return s.buildSqueezedAlarmChip(data.Cost, width)
-		}
-		if kind == chipCost && data.CostFromTranscript {
-			// The full two-part body doesn't fit — retry with the
-			// session-only single-figure body before giving up and
-			// blanking, still through assembleMiddleCluster so the
-			// context element can also drop.
-			sessionOnlyChip := s.buildSessionOnlyCostChip(data)
-			sessionCluster, sessionClusterWidth := assembleMiddleCluster(contextEl, sessionOnlyChip, width)
-			if sessionClusterWidth > 0 && width >= sessionClusterWidth {
-				return s.centerElement(sessionCluster, sessionClusterWidth, width)
-			}
-		}
-		return strings.Repeat(" ", width)
+		return s.buildSqueezedMiddleSection(data, contextEl, kind, width)
 	}
 
 	return s.centerElement(cluster, clusterWidth, width)
+}
+
+// buildSqueezedMiddleSection handles a chip that remains too wide after
+// assembleMiddleCluster has dropped context. Alarms remain visible; a legacy
+// two-part cost may degrade to its session figure; every other chip blanks.
+func (s *Statusline) buildSqueezedMiddleSection(
+	data *CachedData,
+	contextEl string,
+	kind chipKind,
+	width int,
+) string {
+	if kind == chipAlarm {
+		if data.Patchbay.Status == patchbayAvailable {
+			return s.buildSqueezedPatchbayAlarmChip(width)
+		}
+		return s.buildSqueezedAlarmChip(data.Cost, width)
+	}
+	if kind != chipCost || !data.CostFromTranscript {
+		return strings.Repeat(" ", width)
+	}
+
+	// The full two-part body doesn't fit — retry with the session-only
+	// single-figure body before giving up and blanking, still through
+	// assembleMiddleCluster so the context element can also drop.
+	sessionOnlyChip := s.buildSessionOnlyCostChip(data)
+	sessionCluster, sessionClusterWidth := assembleMiddleCluster(contextEl, sessionOnlyChip, width)
+	if sessionClusterWidth > 0 && width >= sessionClusterWidth {
+		return s.centerElement(sessionCluster, sessionClusterWidth, width)
+	}
+	return strings.Repeat(" ", width)
 }
 
 // assembleMiddleCluster joins the (optional) context element and the
@@ -563,25 +576,38 @@ const (
 	chipCost
 )
 
-// middleChipKind decides which chip (if any) renders in the wide
-// middle cluster, given the parsed rate-limit/cost data. An active
-// 5h-window alarm (used% >= 100) always wins over the plain
-// rate-limit chip; rate-limits, when reported at all, always win over
-// the cost-only chip (RateLimits is nil precisely when the session
-// isn't a subscription session, per statusline.go's Input.RateLimits
-// doc comment). The cost chip renders on either a nonzero stdin
-// TotalCostUSD or a successfully computed transcript-derived cost —
-// checking SessionCostUSD OR DailyCostUSD (not SessionCostUSD alone),
-// since a subscribed user can have a pure-anthropic $0 session while
-// still carrying nonzero bedrock spend earlier today; that daily figure
-// is a real signal worth showing even when the session itself is free.
+// middleChipKind decides which chip (if any) renders in the wide middle
+// cluster. A Patchbay error outranks every rate-limit state so broken accounting
+// cannot disappear. Otherwise an active 5h alarm wins, then the rate-limit
+// chip. Patchbay's available day total hides when both its known and unknown
+// counts are zero; an unconfigured Patchbay preserves the original legacy path.
 func middleChipKind(data *CachedData) chipKind {
+	if data.Patchbay.Status == patchbayError {
+		return chipCost
+	}
 	if data.RateLimits != nil {
 		if data.RateLimits.FiveHour != nil && data.RateLimits.FiveHour.UsedPercentage >= 100 {
 			return chipAlarm
 		}
 		return chipRateLimit
 	}
+	switch data.Patchbay.Status {
+	case patchbayUnavailable:
+		return chipCost
+	case patchbayAvailable:
+		if data.Patchbay.Summary.KnownCostNanoUSD > 0 || data.Patchbay.Summary.UnknownCostRows > 0 {
+			return chipCost
+		}
+		return chipNone
+	case patchbayUnconfigured:
+		return legacyMiddleChipKind(data)
+	case patchbayError:
+		return chipCost
+	}
+	return chipNone
+}
+
+func legacyMiddleChipKind(data *CachedData) chipKind {
 	transcriptCostNonzero := data.CostFromTranscript && (data.SessionCostUSD > 0 || data.DailyCostUSD > 0)
 	if data.Cost.TotalCostUSD > 0 || transcriptCostNonzero {
 		return chipCost
@@ -594,6 +620,9 @@ func middleChipKind(data *CachedData) chipKind {
 func (s *Statusline) buildMiddleChip(kind chipKind, data *CachedData) string {
 	switch kind {
 	case chipAlarm:
+		if data.Patchbay.Status == patchbayAvailable {
+			return s.buildPatchbayAlarmChip()
+		}
 		return s.buildAlarmChip(data.Cost)
 	case chipRateLimit:
 		return s.buildRateLimitChip(data.RateLimits, s.now())
@@ -743,14 +772,36 @@ func transcriptCostChipBody(sessionUSD, dailyUSD float64) string {
 	return fmt.Sprintf("%s$%.2f ∙ $%.2f day", CostIcon, sessionUSD, dailyUSD)
 }
 
-// buildCostChip renders the cost powerline chip on a sapphire
-// background. When data.CostFromTranscript, the body is the two-part
-// `$<session> ∙ $<day> day` figure; otherwise it's the legacy
-// single-figure stdin-cost body.
+// patchbayCostChipBody renders Patchbay's day-scoped total. Unknown rows are
+// deliberately marked instead of estimated because Patchbay does not know
+// their cost.
+func patchbayCostChipBody(summary patchbaySummary) string {
+	body := CostIcon + formatPatchbayUSD(summary.KnownCostNanoUSD) + " day"
+	if summary.UnknownCostRows > 0 {
+		body += fmt.Sprintf(" +%d?", summary.UnknownCostRows)
+	}
+	return body
+}
+
+// buildCostChip renders the cost powerline chip on a sapphire background. A
+// successful Patchbay result is the day-only accounting source. An unreachable
+// configured Patchbay retains the legacy basis with a trailing `~`; broken
+// authentication, server, or response data renders `ERR` with no cost figures.
 func (s *Statusline) buildCostChip(data *CachedData) string {
-	body := legacyCostChipBody(data.Cost.TotalCostUSD)
-	if data.CostFromTranscript {
-		body = transcriptCostChipBody(data.SessionCostUSD, data.DailyCostUSD)
+	var body string
+	switch data.Patchbay.Status {
+	case patchbayAvailable:
+		body = patchbayCostChipBody(data.Patchbay.Summary)
+	case patchbayError:
+		body = CostIcon + "ERR"
+	case patchbayUnconfigured, patchbayUnavailable:
+		body = legacyCostChipBody(data.Cost.TotalCostUSD)
+		if data.CostFromTranscript {
+			body = transcriptCostChipBody(data.SessionCostUSD, data.DailyCostUSD)
+		}
+		if data.Patchbay.Status == patchbayUnavailable {
+			body += "~"
+		}
 	}
 	return s.buildPowerlineChip(body, colorSapphire)
 }
@@ -760,7 +811,11 @@ func (s *Statusline) buildCostChip(data *CachedData) string {
 // body doesn't fit the available width — see buildMiddleSection's
 // width-degradation step.
 func (s *Statusline) buildSessionOnlyCostChip(data *CachedData) string {
-	return s.buildPowerlineChip(legacyCostChipBody(data.SessionCostUSD), colorSapphire)
+	body := legacyCostChipBody(data.SessionCostUSD)
+	if data.Patchbay.Status == patchbayUnavailable {
+		body += "~"
+	}
+	return s.buildPowerlineChip(body, colorSapphire)
 }
 
 // alarmChipBody is the alarm chip's text content, shared by the
@@ -777,6 +832,20 @@ func (s *Statusline) buildAlarmChip(cost CostInput) string {
 	return s.buildPowerlineChip(alarmChipBody(cost), colorRed)
 }
 
+// patchbayAlarmChipBody keeps the rate-limit emergency signal visible without
+// combining an API-accounted session with the legacy stdin cost field.
+func patchbayAlarmChipBody() string {
+	return AlarmIcon + "EXTRA"
+}
+
+// buildPatchbayAlarmChip renders the Patchbay-accounted alarm without a dollar
+// amount. The API summary is day scoped, while the rate-limit alarm is about
+// current subscription capacity, so attaching either legacy or day money would
+// imply a relationship the data does not establish.
+func (s *Statusline) buildPatchbayAlarmChip() string {
+	return s.buildPowerlineChip(patchbayAlarmChipBody(), colorRed)
+}
+
 // buildSqueezedAlarmChip is the pathological fallback for a middle
 // region narrower than the full alarm chip (possible when the
 // left/right sections exhaust the row despite Render's alarm-width
@@ -784,12 +853,20 @@ func (s *Statusline) buildAlarmChip(cost CostInput) string {
 // not even a curve-wrapped icon fits, the whole region floods red.
 // The alarm degrades under width pressure but never blanks.
 func (s *Statusline) buildSqueezedAlarmChip(cost CostInput, width int) string {
+	return s.buildSqueezedAlarmBody(alarmChipBody(cost), width)
+}
+
+func (s *Statusline) buildSqueezedPatchbayAlarmChip(width int) string {
+	return s.buildSqueezedAlarmBody(patchbayAlarmChipBody(), width)
+}
+
+func (s *Statusline) buildSqueezedAlarmBody(body string, width int) string {
 	const chipChromeWidth = 4 // LeftCurve + two body-padding spaces + RightCurve
 	bodyBudget := width - chipChromeWidth
 	if bodyBudget < runewidth.StringWidth(AlarmIcon) {
 		return s.getColorBG(colorRed) + strings.Repeat(" ", width) + s.colors.NC()
 	}
-	chip := s.buildPowerlineChip(truncateText(alarmChipBody(cost), bodyBudget), colorRed)
+	chip := s.buildPowerlineChip(truncateText(body, bodyBudget), colorRed)
 	return s.centerElement(chip, runewidth.StringWidth(stripAnsi(chip)), width)
 }
 

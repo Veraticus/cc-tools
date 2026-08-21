@@ -72,19 +72,22 @@ func openCacheRoot(cacheDir string) (*os.Root, bool) {
 	return root, true
 }
 
-// readFreshCache reads name from the verified cache root and decodes
-// it into *out, reporting true only if the file exists, is younger
-// than ttl relative to now, and decodes as valid JSON. Any other
-// outcome — missing, stale, or corrupt — is a cache miss: false, with
-// *out left unmodified. out takes the decoded value by pointer (rather
-// than readFreshCache returning a T) so the function never returns a
+// readFreshCache reads name from the verified cache root and decodes it into
+// *out, reporting true only if the file exists, has no real wall-clock future
+// mtime, is younger than ttl relative to now, and decodes as valid JSON. Any
+// other outcome — missing, future-dated, stale, or corrupt — is a cache miss:
+// false, with *out left unmodified. out takes the decoded value by pointer
+// (rather than readFreshCache returning a T) so the function never returns a
 // bare generic type parameter.
 func readFreshCache[T any](root *os.Root, name string, ttl time.Duration, now time.Time, out *T) bool {
 	info, err := root.Stat(name)
 	if err != nil {
 		return false
 	}
-	if now.Sub(info.ModTime()) >= ttl {
+	// File mtimes are wall-clock values while callers may inject a logical
+	// `now` for deterministic expiration tests. Reject only a timestamp that
+	// lies in the real wall-clock future; the logical clock still decides TTL.
+	if info.ModTime().After(time.Now()) || now.Sub(info.ModTime()) >= ttl {
 		return false
 	}
 

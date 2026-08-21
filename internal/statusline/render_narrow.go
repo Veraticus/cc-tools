@@ -34,6 +34,7 @@ const (
 	kindDir     = "dir"
 	kindContext = "context"
 	kindAlarm   = "alarm"
+	kindCost    = "cost"
 	kindBranch  = "branch"
 	kindEnv     = "env"
 )
@@ -71,8 +72,8 @@ func stripNarrowControl(s string) string {
 // pass adds the leading/trailing space padding plus chevrons /
 // curves. No ANSI escapes embedded.
 //
-// Kind is one of kindDir/kindContext/kindBranch/kindEnv — used by
-// the truncation pass to know which chips drop first under width
+// Kind is one of kindDir/kindContext/kindAlarm/kindCost/kindBranch/kindEnv —
+// used by the truncation pass to know which chips drop first under width
 // pressure and which never drop.
 type narrowChip struct {
 	Color string
@@ -86,11 +87,11 @@ type narrowChip struct {
 const narrowChipCap = 5
 
 // gatherNarrowChips returns the chip list for narrow mode in display
-// order: dir, context, optional alarm, optional branch, optional env.
+// order: dir, context, optional alarm-or-cost, optional branch, optional env.
 // The context chip is always present (UsedPercentage is always
-// available, even if 0). The alarm chip (extra-usage emergency
-// signal) is included immediately after context when middleChipKind
-// classifies the data as chipAlarm — the same decision the wide-mode
+// available, even if 0). The alert chip (extra-usage alarm or Patchbay/legacy
+// cost state) is included immediately after context when middleChipKind
+// classifies the data as chipAlarm or chipCost — the same decision the wide-mode
 // middle cluster uses. Branch is included when CachedData.GitBranch
 // is non-empty AND passes the validBranchName check (upstream cache
 // layer already resolves .git/HEAD; this layer rejects names that
@@ -118,12 +119,26 @@ func gatherNarrowChips(deps *Dependencies, data *CachedData) []narrowChip {
 		Kind:  kindContext,
 	})
 
-	if middleChipKind(data) == chipAlarm {
-		chips = append(chips, narrowChip{
-			Color: colorRed,
-			Body:  buildNarrowAlarmBody(data.Cost),
-			Kind:  kindAlarm,
-		})
+	switch middleChipKind(data) {
+	case chipAlarm:
+		body := buildNarrowAlarmBody(data.Cost)
+		if data.Patchbay.Status == patchbayAvailable {
+			body = buildNarrowPatchbayAlarmBody()
+		}
+		chips = append(chips, narrowChip{Color: colorRed, Body: body, Kind: kindAlarm})
+	case chipCost:
+		// Legacy narrow mode never rendered a cost chip. Preserve that
+		// byte-for-byte behavior when Patchbay is unconfigured; configured
+		// states gain the API day total, fallback marker, or error marker.
+		if data.Patchbay.Status != patchbayUnconfigured {
+			chips = append(chips, narrowChip{
+				Color: colorSapphire,
+				Body:  buildNarrowCostBody(data),
+				Kind:  kindCost,
+			})
+		}
+	case chipNone, chipRateLimit:
+		// Narrow mode has no rate-limit-only chip.
 	}
 
 	// Narrow mode's branch chip stays branch-only — no dirty/ahead/behind
@@ -167,6 +182,34 @@ func buildNarrowContextBody(pct int) string {
 // plus the alarm icon carry the "extra usage" meaning on their own.
 func buildNarrowAlarmBody(cost CostInput) string {
 	return fmt.Sprintf("%s$%.2f", AlarmIcon, cost.TotalCostUSD)
+}
+
+// buildNarrowPatchbayAlarmBody retains the alarm signal without falsely
+// attaching the legacy stdin cost to API-accounted usage.
+func buildNarrowPatchbayAlarmBody() string {
+	return AlarmIcon + "EXTRA"
+}
+
+func buildNarrowCostBody(data *CachedData) string {
+	switch data.Patchbay.Status {
+	case patchbayAvailable:
+		return patchbayCostChipBody(data.Patchbay.Summary)
+	case patchbayError:
+		return CostIcon + "ERR"
+	case patchbayUnavailable:
+		body := legacyCostChipBody(data.Cost.TotalCostUSD)
+		if data.CostFromTranscript {
+			body = transcriptCostChipBody(data.SessionCostUSD, data.DailyCostUSD)
+		}
+		return body + "~"
+	case patchbayUnconfigured:
+		body := legacyCostChipBody(data.Cost.TotalCostUSD)
+		if data.CostFromTranscript {
+			return transcriptCostChipBody(data.SessionCostUSD, data.DailyCostUSD)
+		}
+		return body
+	}
+	return ""
 }
 
 // firstEnvChip returns the highest-priority env chip available, or
@@ -362,7 +405,7 @@ func narrowChainWidth(chips []narrowChip) int {
 // When chips fit with slack, the context chip's Body is expanded
 // (center-aligned content + colored padding) to absorb it. When chips
 // overflow, they're dropped in priority order:
-// env → branch → truncate-dir-to-leaf → drop-context → truncate-dir
+// env → branch → truncate-dir-to-leaf → drop-context → drop-cost → truncate-dir
 // with ellipsis. The alarm chip (kindAlarm) is deliberately absent
 // from this drop order — dropOneNarrowChip never removes it, so it
 // survives even the drop-context step and only ever loses width
@@ -475,9 +518,9 @@ func fitNarrowLastResort(work []narrowChip, budget int) []narrowChip {
 }
 
 // dropOneNarrowChip drops a single chip per priority: env → branch →
-// truncate-dir-to-leaf → drop-context. Returns (modifiedSlice, true)
-// when a drop/truncate happened, or (slice, false) when only dir
-// remains.
+// truncate-dir-to-leaf → drop-context → drop-cost. Returns
+// (modifiedSlice, true) when a drop/truncate happened, or (slice, false)
+// when only dir remains.
 func dropOneNarrowChip(chips []narrowChip) ([]narrowChip, bool) {
 	if idx := indexOfKind(chips, kindEnv); idx >= 0 {
 		return removeAt(chips, idx), true
@@ -497,6 +540,9 @@ func dropOneNarrowChip(chips []narrowChip) ([]narrowChip, bool) {
 		return out, true
 	}
 	if idx := indexOfKind(chips, kindContext); idx >= 0 {
+		return removeAt(chips, idx), true
+	}
+	if idx := indexOfKind(chips, kindCost); idx >= 0 {
 		return removeAt(chips, idx), true
 	}
 	return chips, false

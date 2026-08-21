@@ -482,6 +482,33 @@ func TestComputeData_RateLimitsAvailability_TogglesTranscriptSubscribedPricing(t
 	}
 }
 
+func TestComputeData_ForeignRouteUnconfiguredUsesLegacyTranscriptPricing(t *testing.T) {
+	now := time.Now()
+	timestamp := now.Format(time.RFC3339)
+	transcriptPath := setupTranscriptFixture(t, plainRow(timestamp))
+
+	deps := statuslineDeps()
+	deps.Now = func() time.Time { return now }
+
+	s := CreateStatusline(deps)
+	s.input = &Input{}
+	s.input.Model.ID = "chatgpt/sol"
+	s.input.Model.DisplayName = "Sol"
+	s.input.Workspace.ProjectDir = scenarioProjectDir
+	s.input.TranscriptPath = transcriptPath
+
+	data := s.computeData(s.getCurrentDir())
+	if data.Patchbay.Status != patchbayUnconfigured {
+		t.Fatalf("Patchbay status = %v, want unconfigured", data.Patchbay.Status)
+	}
+	if !data.CostFromTranscript || data.SessionCostUSD <= 0 {
+		t.Errorf("unconfigured foreign route must retain legacy transcript pricing, got %+v", data)
+	}
+	if !strings.Contains(stripAnsi(s.buildCostChip(data)), CostIcon) {
+		t.Errorf("unconfigured foreign route should render the legacy cost chip")
+	}
+}
+
 func TestGenerate_CostSourceFallback_RendersStdinCost(t *testing.T) {
 	deps := statuslineDeps()
 	deps.CostSource = func(string) (float64, float64, bool) { return 0, 0, false }

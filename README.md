@@ -277,6 +277,17 @@ The provider-neutral cache variables are
 `CC_TOOLS_STATUSLINE_CACHE_DIR` and `CC_TOOLS_STATUSLINE_CACHE_SECONDS`.
 Their original `CLAUDE_STATUSLINE_*` aliases remain supported.
 
+When `PATCHBAY_CALLER_KEY_FILE` is set, the statusline asks Patchbay's
+`/_patchbay/usage/summary` API for the local-midnight-to-now daily total. Set
+`CC_TOOLS_PATCHBAY_URL` to Patchbay's root URL, or omit it to use
+`http://127.0.0.1:4100`; leave both variables unset to retain transcript-based
+cost display. Costs stay integer nano-USD through half-even cent rounding. A
+trailing `~` means Patchbay was unreachable and the chip fell back wholly to
+legacy transcript data. `ERR` means the configured API, caller key, or response
+is broken, so no cost number is shown. A Patchbay-backed rate-limit alarm carries
+no dollar figure because its subscription-capacity signal has no shared monetary
+basis with the day summary.
+
 ## Configuration
 
 All configuration is managed through the `cc-tools config` command. Settings are stored in `~/.config/cc-tools/config.json` and are automatically created with defaults on first use.

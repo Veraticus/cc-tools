@@ -912,3 +912,71 @@ func TestAlarmChip_SurvivesToWidth50(t *testing.T) {
 		t.Errorf("renderNarrow width = %d, want 50", w)
 	}
 }
+
+func TestGatherNarrowChips_PatchbayCostStates(t *testing.T) {
+	deps := depsFor(t, "")
+	cases := []struct {
+		name string
+		data *CachedData
+		want string
+	}{
+		{
+			name: "available day cost",
+			data: &CachedData{Patchbay: patchbayResult{
+				Status:  patchbayAvailable,
+				Summary: patchbaySummary{KnownCostNanoUSD: 1_234_500_000},
+			}},
+			want: "$1.23 day",
+		},
+		{
+			name: "unavailable fallback marker",
+			data: &CachedData{
+				Cost:     CostInput{TotalCostUSD: 4.12},
+				Patchbay: patchbayResult{Status: patchbayUnavailable},
+			},
+			want: "$4.12~",
+		},
+		{
+			name: "error marker outranks rate limit",
+			data: &CachedData{
+				Patchbay: patchbayResult{Status: patchbayError},
+				RateLimits: &RateLimitsInput{
+					FiveHour: &RateLimitWindow{UsedPercentage: 23, ResetsAt: 1000},
+				},
+			},
+			want: "ERR",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			chips := gatherNarrowChips(deps, tc.data)
+			for _, chip := range chips {
+				if chip.Kind == kindCost && strings.Contains(chip.Body, tc.want) {
+					return
+				}
+			}
+			t.Errorf("narrow chips %+v have no cost body containing %q", chips, tc.want)
+		})
+	}
+}
+
+func TestGatherNarrowChips_PatchbayAlarmOmitsLegacyCost(t *testing.T) {
+	deps := depsFor(t, "")
+	data := &CachedData{
+		Cost:     CostInput{TotalCostUSD: 4.12},
+		Patchbay: patchbayResult{Status: patchbayAvailable},
+		RateLimits: &RateLimitsInput{
+			FiveHour: &RateLimitWindow{UsedPercentage: 100, ResetsAt: 1000},
+		},
+	}
+	chips := gatherNarrowChips(deps, data)
+	for _, chip := range chips {
+		if chip.Kind == kindAlarm {
+			if strings.Contains(chip.Body, "$") {
+				t.Errorf("Patchbay alarm must not embed legacy dollars: %q", chip.Body)
+			}
+			return
+		}
+	}
+	t.Errorf("expected Patchbay alarm in narrow chips: %+v", chips)
+}
