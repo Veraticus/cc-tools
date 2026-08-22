@@ -2,6 +2,7 @@ package statusline
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -25,6 +26,8 @@ const cacheDirPerm = 0o700
 // impossible for the small number of entries any one user renders a
 // statusline from.
 const cacheHashBytes = 8
+
+var cacheFlock = syscall.Flock
 
 // openCacheRoot creates (or verifies) the per-uid subdirectory of
 // cacheDir that all TTL-cached statusline data lives in (git status,
@@ -107,19 +110,83 @@ func readFreshCache[T any](root *os.Root, name string, ttl time.Duration, now ti
 	return true
 }
 
-// writeCache best-effort writes value as JSON to name inside the
-// verified cache root. A write failure isn't fatal — the freshly
-// computed value is returned to the caller regardless — so the error
-// is deliberately not propagated any further than this.
+// readCache decodes name from the verified cache root regardless of age. It
+// leaves *out untouched on any read or decode failure.
+func readCache[T any](root *os.Root, name string, out *T) bool {
+	f, err := root.Open(name)
+	if err != nil {
+		return false
+	}
+	data, err := io.ReadAll(f)
+	_ = f.Close()
+	if err != nil {
+		return false
+	}
+	var decoded T
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return false
+	}
+	*out = decoded
+	return true
+}
+
+type cacheRefillLockStatus uint8
+
+const (
+	cacheRefillLockAcquired cacheRefillLockStatus = iota
+	cacheRefillLockHeld
+	cacheRefillLockUnavailable
+)
+
+type cacheRefillLock struct {
+	file   *os.File
+	status cacheRefillLockStatus
+}
+
+// tryCacheRefillLock acquires an advisory, per-cache-entry refill lock without
+// waiting. Contention permits a stale fallback; an unavailable locking facility
+// degrades to the pre-lock behavior of fetching fresh data.
+func tryCacheRefillLock(root *os.Root, name string) cacheRefillLock {
+	f, err := root.OpenFile(name+".lock", os.O_CREATE|os.O_WRONLY, cacheFilePerm)
+	if err != nil {
+		return cacheRefillLock{status: cacheRefillLockUnavailable}
+	}
+	if err := cacheFlock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return cacheRefillLock{status: cacheRefillLockHeld}
+		}
+		return cacheRefillLock{status: cacheRefillLockUnavailable}
+	}
+	return cacheRefillLock{file: f, status: cacheRefillLockAcquired}
+}
+
+func releaseCacheRefillLock(f *os.File) {
+	_ = cacheFlock(int(f.Fd()), syscall.LOCK_UN)
+	_ = f.Close()
+}
+
+// writeCache best-effort writes value as JSON to name inside the verified cache
+// root. It publishes a fully written temporary sibling with rename, so readers
+// see either the old complete JSON document or the new one. A write failure
+// isn't fatal — the freshly computed value is returned to the caller regardless.
 func writeCache[T any](root *os.Root, name string, value T) {
 	data, err := json.Marshal(value)
 	if err != nil {
 		return
 	}
-	f, err := root.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, cacheFilePerm)
+	tempName := fmt.Sprintf(".%s.%d.%d.tmp", name, os.Getpid(), time.Now().UnixNano())
+	f, err := root.OpenFile(tempName, os.O_CREATE|os.O_EXCL|os.O_WRONLY, cacheFilePerm)
 	if err != nil {
 		return
 	}
-	_, _ = f.Write(data)
-	_ = f.Close()
+	defer func() { _ = root.Remove(tempName) }()
+	if n, err := f.Write(data); err != nil || n != len(data) {
+		_ = f.Close()
+		return
+	}
+	if err := f.Close(); err != nil {
+		return
+	}
+	_ = root.Rename(tempName, name)
 }

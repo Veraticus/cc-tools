@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -296,19 +297,6 @@ func TestBuildCostChip_PatchbayErrorShowsNoNumbers(t *testing.T) {
 	}
 }
 
-func TestBuildCostChip_UnconfiguredIsByteIdenticalToLegacy(t *testing.T) {
-	s := CreateStatusline(&Dependencies{})
-	s.colors = CatppuccinMocha{}
-	legacy := s.buildCostChip(&CachedData{Cost: CostInput{TotalCostUSD: 4.12}})
-	unconfigured := s.buildCostChip(&CachedData{
-		Cost:     CostInput{TotalCostUSD: 4.12},
-		Patchbay: patchbayResult{Status: patchbayUnconfigured},
-	})
-	if unconfigured != legacy {
-		t.Errorf("unconfigured Patchbay output changed legacy chip:\n got %q\nwant %q", unconfigured, legacy)
-	}
-}
-
 func TestBuildMiddleSection_PatchbayChipDropsContextThenBlanks(t *testing.T) {
 	s := CreateStatusline(&Dependencies{})
 	s.colors = CatppuccinMocha{}
@@ -575,5 +563,273 @@ func TestRender_UnconfiguredPatchbayLegacyGolden(t *testing.T) {
 	const want = "\x1b[0m\x1b[38;2;180;190;254m\x1b[48;2;180;190;254m\x1b[38;2;30;30;46m ~/project \x1b[0m\x1b[48;2;137;220;235m\x1b[38;2;180;190;254m\x1b[0m\x1b[48;2;137;220;235m\x1b[38;2;30;30;46m \U000f06a9 Fable \x1b[0m\x1b[38;2;137;220;235m\x1b[0m                                                                          \x1b[38;2;116;199;236m\x1b[0m\x1b[48;2;116;199;236m\x1b[38;2;30;30;46m \U000f0210 $8.89 ∙ $48.27 day \x1b[0m\x1b[38;2;116;199;236m\x1b[0m                                                                           "
 	if got != want {
 		t.Errorf("legacy statusline golden mismatch:\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestPatchbayCost_InvalidURLConfigIsErrorBeforeRequest(t *testing.T) {
+	keyFile := writePatchbayKey(t)
+	cases := []struct {
+		name string
+		url  string
+	}{
+		{name: "unsupported scheme", url: "ftp://127.0.0.1:4100"},
+		{name: "userinfo", url: "http://caller:secret@127.0.0.1:4100"},
+		{name: "external HTTP", url: "http://patchbay.example"},
+		{name: "empty host", url: "https:///usage"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var requests atomic.Int32
+			client := &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+				requests.Add(1)
+				return nil, fmt.Errorf("request must not be sent")
+			})}
+			result := patchbayCost("", time.Minute, time.Now(), patchbayEnv(tc.url, keyFile), client)
+			if result.Status != patchbayError {
+				t.Errorf("status = %v, want error", result.Status)
+			}
+			if got := requests.Load(); got != 0 {
+				t.Errorf("requests = %d, want 0 for invalid URL config", got)
+			}
+		})
+	}
+}
+
+func TestPatchbayCost_HTTPSAndLoopbackHTTPURLsAreAllowed(t *testing.T) {
+	for _, baseURL := range []string{
+		"https://patchbay.example",
+		"http://127.0.0.1:4100",
+		"http://[::1]:4100",
+		"http://localhost:4100",
+	} {
+		t.Run(baseURL, func(t *testing.T) {
+			got, err := patchbayUsageSummaryURL(baseURL, time.Now(), time.Now())
+			if err != nil {
+				t.Fatalf("patchbayUsageSummaryURL(%q) error = %v", baseURL, err)
+			}
+			if !strings.HasPrefix(got, baseURL+patchbayUsageSummaryPath) {
+				t.Errorf("endpoint = %q, want prefix %q", got, baseURL+patchbayUsageSummaryPath)
+			}
+		})
+	}
+}
+
+func TestPatchbayCost_RedirectIsErrorWithoutKeyLeak(t *testing.T) {
+	keyFile := writePatchbayKey(t)
+	var destinationHits atomic.Int32
+	destination := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		destinationHits.Add(1)
+	}))
+	defer destination.Close()
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", destination.URL)
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer redirector.Close()
+
+	result := patchbayCost("", time.Minute, time.Now(), patchbayEnv(redirector.URL, keyFile), redirector.Client())
+	if result.Status != patchbayError {
+		t.Errorf("status = %v, want error", result.Status)
+	}
+	if got := destinationHits.Load(); got != 0 {
+		t.Errorf("redirect destination hits = %d, want 0", got)
+	}
+}
+
+func TestPatchbayCost_StaleCacheServesWhileRefillLockIsHeld(t *testing.T) {
+	keyFile := writePatchbayKey(t)
+	cacheDir := t.TempDir()
+	var requests atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) == 2 {
+			close(started)
+			<-release
+		}
+		_, _ = w.Write([]byte(patchbaySummaryJSON(2, 0)))
+	}))
+	defer server.Close()
+
+	now := time.Now()
+	env := patchbayEnv(server.URL, keyFile)
+	warm := patchbayCost(cacheDir, time.Minute, now, env, server.Client())
+	if warm.Status != patchbayAvailable {
+		t.Fatalf("warm status = %v, want available", warm.Status)
+	}
+
+	var owner patchbayResult
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		owner = patchbayCost(cacheDir, time.Nanosecond, now.Add(time.Second), env, server.Client())
+	}()
+	<-started
+	stale := patchbayCost(cacheDir, time.Nanosecond, now.Add(time.Second), env, server.Client())
+	close(release)
+	wg.Wait()
+
+	if owner.Status != patchbayAvailable || owner.Summary.KnownCostNanoUSD != 2 {
+		t.Errorf("refill owner = %+v, want refreshed available result", owner)
+	}
+	if stale.Status != patchbayAvailable || stale.Summary.KnownCostNanoUSD != 2 {
+		t.Errorf("stale contender = %+v, want stale available result", stale)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Errorf("requests = %d, want warm request plus one coordinated refill", got)
+	}
+}
+
+func TestBuildCostChip_UnconfiguredIsByteIdenticalToLegacy(t *testing.T) {
+	s := CreateStatusline(&Dependencies{})
+	s.colors = CatppuccinMocha{}
+	unconfigured := s.buildCostChip(&CachedData{
+		Cost:     CostInput{TotalCostUSD: 4.12},
+		Patchbay: patchbayResult{Status: patchbayUnconfigured},
+	})
+	const want = "\x1b[38;2;116;199;236m\x1b[0m\x1b[48;2;116;199;236m\x1b[38;2;30;30;46m \U000f0210 $4.12 \x1b[0m\x1b[38;2;116;199;236m\x1b[0m"
+	if unconfigured != want {
+		t.Errorf("unconfigured Patchbay output changed legacy chip:\n got %q\nwant %q", unconfigured, want)
+	}
+}
+
+func TestWriteCache_ConcurrentReadersNeverSeePartialJSON(t *testing.T) {
+	type cacheBlob struct {
+		Payload string `json:"payload"`
+	}
+	cacheDir := t.TempDir()
+	root, trusted := openCacheRoot(cacheDir)
+	if !trusted {
+		t.Fatal("cache root should be trusted")
+	}
+	defer func() { _ = root.Close() }()
+	const cacheName = "atomic.json"
+	writeCache(root, cacheName, cacheBlob{Payload: strings.Repeat("a", 512*1024)})
+
+	done := make(chan struct{})
+	var badRead atomic.Bool
+	var readers sync.WaitGroup
+	for range 4 {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+					var value cacheBlob
+					if !readCache(root, cacheName, &value) {
+						badRead.Store(true)
+						return
+					}
+				}
+			}
+		}()
+	}
+	for range 100 {
+		writeCache(root, cacheName, cacheBlob{Payload: strings.Repeat("b", 512*1024)})
+	}
+	close(done)
+	readers.Wait()
+	if badRead.Load() {
+		t.Error("concurrent cache readers observed a missing or partial JSON document")
+	}
+}
+
+func TestPatchbayCost_StaleCacheRefreshesWhenRefillLockUnavailable(t *testing.T) {
+	keyFile := writePatchbayKey(t)
+	cacheDir := t.TempDir()
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte(patchbaySummaryJSON(2, 0)))
+	}))
+	defer server.Close()
+
+	now := time.Now()
+	env := patchbayEnv(server.URL, keyFile)
+	if result := patchbayCost(cacheDir, time.Minute, now, env, server.Client()); result.Status != patchbayAvailable {
+		t.Fatalf("warm status = %v, want available", result.Status)
+	}
+	keyInfo, err := os.Stat(keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cacheName := patchbayCacheName(server.URL, keyFile, keyInfo, localMidnight(now))
+	root, trusted := openCacheRoot(cacheDir)
+	if !trusted {
+		t.Fatal("cache root should be trusted")
+	}
+	if err := root.Remove(cacheName + ".lock"); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.Mkdir(cacheName+".lock", cacheDirPerm); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	refreshed := patchbayCost(cacheDir, time.Nanosecond, now.Add(time.Second), env, server.Client())
+	if refreshed.Status != patchbayAvailable {
+		t.Errorf("refreshed status = %v, want available", refreshed.Status)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Errorf("requests = %d, want warm request plus refresh after lock failure", got)
+	}
+}
+
+func TestPatchbayCost_InvalidURLRejectsPreexistingCache(t *testing.T) {
+	keyFile := writePatchbayKey(t)
+	cacheDir := t.TempDir()
+	now := time.Now()
+	const invalidURL = "http://patchbay.example"
+	keyInfo, err := os.Stat(keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, trusted := openCacheRoot(cacheDir)
+	if !trusted {
+		t.Fatal("cache root should be trusted")
+	}
+	cacheName := patchbayCacheName(invalidURL, keyFile, keyInfo, localMidnight(now))
+	writeCache(root, cacheName, patchbayResult{Status: patchbayAvailable, Summary: patchbaySummary{KnownCostNanoUSD: 12}})
+	if err := root.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	result := patchbayCost(cacheDir, time.Hour, now, patchbayEnv(invalidURL, keyFile), nil)
+	if result.Status != patchbayError {
+		t.Errorf("status = %v, want error instead of cached result", result.Status)
+	}
+}
+
+func TestPatchbayCost_StaleCacheRefreshesWhenFlockFails(t *testing.T) {
+	keyFile := writePatchbayKey(t)
+	cacheDir := t.TempDir()
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte(patchbaySummaryJSON(2, 0)))
+	}))
+	defer server.Close()
+
+	now := time.Now()
+	env := patchbayEnv(server.URL, keyFile)
+	if result := patchbayCost(cacheDir, time.Minute, now, env, server.Client()); result.Status != patchbayAvailable {
+		t.Fatalf("warm status = %v, want available", result.Status)
+	}
+	originalFlock := cacheFlock
+	cacheFlock = func(int, int) error { return fmt.Errorf("flock unsupported") }
+	t.Cleanup(func() { cacheFlock = originalFlock })
+
+	refreshed := patchbayCost(cacheDir, time.Nanosecond, now.Add(time.Second), env, server.Client())
+	if refreshed.Status != patchbayAvailable {
+		t.Errorf("refreshed status = %v, want available", refreshed.Status)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Errorf("requests = %d, want warm request plus refresh after flock failure", got)
 	}
 }

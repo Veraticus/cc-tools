@@ -281,7 +281,8 @@ When `PATCHBAY_CALLER_KEY_FILE` is set, the statusline asks Patchbay's
 `/_patchbay/usage/summary` API for the local-midnight-to-now daily total. Set
 `CC_TOOLS_PATCHBAY_URL` to Patchbay's root URL, or omit it to use
 `http://127.0.0.1:4100`; leave both variables unset to retain transcript-based
-cost display. Costs stay integer nano-USD through half-even cent rounding. A
+cost display. The URL must use `https`, except `http` is allowed for
+`127.0.0.0/8`, `::1`, and `localhost`; URL userinfo is rejected. Costs stay integer nano-USD through half-even cent rounding. A
 trailing `~` means Patchbay was unreachable and the chip fell back wholly to
 legacy transcript data. `ERR` means the configured API, caller key, or response
 is broken, so no cost number is shown. A Patchbay-backed rate-limit alarm carries

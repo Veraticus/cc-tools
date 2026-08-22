@@ -86,7 +86,7 @@ func patchbayCost(
 	if config.URL == "" && config.KeyFile == "" {
 		return patchbayResult{Status: patchbayUnconfigured}
 	}
-	if config.KeyFile == "" {
+	if config.KeyFile == "" || !validPatchbayBaseURL(config.URL) {
 		return patchbayResult{Status: patchbayError}
 	}
 	key, err := os.ReadFile(config.KeyFile)
@@ -115,13 +115,47 @@ func patchbayCost(
 
 	cacheName := patchbayCacheName(config.URL, config.KeyFile, keyInfo, windowStart)
 	var cached patchbayResult
-	if readFreshCache(root, cacheName, ttl, now, &cached) &&
-		(cached.Status == patchbayAvailable || cached.Status == patchbayUnavailable) {
+	if readFreshCache(root, cacheName, ttl, now, &cached) && patchbayCacheable(cached) {
 		return cached
 	}
 
-	result := fetchPatchbayCost(config.URL, callerKey, windowStart, now, client)
-	if result.Status == patchbayAvailable || result.Status == patchbayUnavailable {
+	var stale patchbayResult
+	hasStale := readCache(root, cacheName, &stale) && patchbayCacheable(stale)
+	lock := tryCacheRefillLock(root, cacheName)
+	switch lock.status {
+	case cacheRefillLockHeld:
+		if hasStale {
+			return stale
+		}
+		return fetchAndCachePatchbayCost(root, cacheName, config.URL, callerKey, windowStart, now, client)
+	case cacheRefillLockUnavailable:
+		return fetchAndCachePatchbayCost(root, cacheName, config.URL, callerKey, windowStart, now, client)
+	case cacheRefillLockAcquired:
+		defer releaseCacheRefillLock(lock.file)
+
+		// Another renderer may have refreshed the cache while this one waited to
+		// acquire the advisory lock.
+		if readFreshCache(root, cacheName, ttl, now, &cached) && patchbayCacheable(cached) {
+			return cached
+		}
+		return fetchAndCachePatchbayCost(root, cacheName, config.URL, callerKey, windowStart, now, client)
+	default:
+		return fetchAndCachePatchbayCost(root, cacheName, config.URL, callerKey, windowStart, now, client)
+	}
+}
+
+func patchbayCacheable(result patchbayResult) bool {
+	return result.Status == patchbayAvailable || result.Status == patchbayUnavailable
+}
+
+func fetchAndCachePatchbayCost(
+	root *os.Root,
+	cacheName, baseURL, callerKey string,
+	windowStart, now time.Time,
+	client *http.Client,
+) patchbayResult {
+	result := fetchPatchbayCost(baseURL, callerKey, windowStart, now, client)
+	if patchbayCacheable(result) {
 		writeCache(root, cacheName, result)
 	}
 	return result
@@ -207,7 +241,7 @@ func patchbayTransportUnavailable(err error) bool {
 
 func patchbayUsageSummaryURL(baseURL string, since, until time.Time) (string, error) {
 	parsed, err := url.Parse(baseURL)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+	if err != nil || !validPatchbayURL(parsed) {
 		return "", fmt.Errorf("invalid Patchbay URL")
 	}
 	parsed.Path = patchbayUsageSummaryPath
@@ -217,6 +251,25 @@ func patchbayUsageSummaryURL(baseURL string, since, until time.Time) (string, er
 	query.Set("until", until.Format(time.RFC3339))
 	parsed.RawQuery = query.Encode()
 	return parsed.String(), nil
+}
+
+func validPatchbayBaseURL(baseURL string) bool {
+	parsed, err := url.Parse(baseURL)
+	return err == nil && validPatchbayURL(parsed)
+}
+
+func validPatchbayURL(parsed *url.URL) bool {
+	if parsed.User != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return false
+	}
+	host := parsed.Hostname()
+	if host == "" {
+		return false
+	}
+	if parsed.Scheme == "https" {
+		return true
+	}
+	return strings.EqualFold(host, "localhost") || (net.ParseIP(host) != nil && net.ParseIP(host).IsLoopback())
 }
 
 func patchbayHTTPClient(client *http.Client) *http.Client {
