@@ -134,6 +134,23 @@ func TestInput_ContextWindow(t *testing.T) {
 	}
 }
 
+func TestComputeData_InputColumnsOverrideTerminalWidth(t *testing.T) {
+	deps := &Dependencies{
+		FileReader:    NewMockFileReader(),
+		CommandRunner: NewMockCommandRunner(),
+		EnvReader:     NewMockEnvReader(),
+		TerminalWidth: &MockTerminalWidth{width: 210},
+	}
+	sl := CreateStatusline(deps)
+	if err := sl.parseInput(strings.NewReader(`{"cwd":"/tmp","columns":80}`)); err != nil {
+		t.Fatalf("parseInput() error = %v", err)
+	}
+
+	if got := sl.computeData("/tmp").TermWidth; got != 80 {
+		t.Fatalf("TermWidth = %d, want caller-supplied width 80", got)
+	}
+}
+
 // assertFullPayload checks every new stdin field parsed from the
 // full-payload case of TestInputParse_NewStdinFields.
 func assertFullPayload(t *testing.T, in Input) {

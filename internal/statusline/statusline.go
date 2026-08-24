@@ -17,6 +17,10 @@ import (
 
 // Input represents the JSON input from stdin.
 type Input struct {
+	// Columns is an optional caller-supplied render width. Claude Code exports
+	// COLUMNS for its command hook; other harnesses can only pass structured
+	// input, so a positive value here takes precedence over the environment.
+	Columns int `json:"columns"`
 	// SessionID keys the agents-state file the subagent hook writes
 	// (agents.go); empty or malformed ids simply disable the
 	// running-agents model-chip swap.
@@ -293,10 +297,15 @@ func (s *Statusline) getCurrentDir() string {
 }
 
 func (s *Statusline) computeData(currentDir string) *CachedData {
+	termWidth := s.input.Columns
+	if termWidth <= 0 {
+		termWidth = s.deps.TerminalWidth.GetWidth()
+	}
+
 	data := &CachedData{
 		CurrentDir:     currentDir,
 		TranscriptPath: s.input.TranscriptPath,
-		TermWidth:      s.deps.TerminalWidth.GetWidth(),
+		TermWidth:      termWidth,
 		ModelID:        s.input.Model.ID,
 	}
 

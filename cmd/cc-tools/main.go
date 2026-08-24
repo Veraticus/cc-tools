@@ -95,6 +95,7 @@ Commands:
 
 Examples:
   echo '{"cwd": "/path"}' | cc-tools statusline
+  cc-tools statusline '{"cwd":"/path","columns":100}'
   cc-tools mcp list
   cc-tools mcp enable jira
   cc-tools resolve --type=k8s --raw="arn:aws:eks:us-east-1:123:cluster/prod"
@@ -105,8 +106,7 @@ Examples:
 func runStatusline() {
 	out := output.NewTerminal(os.Stdout, os.Stderr)
 
-	// Read stdin
-	input, err := io.ReadAll(os.Stdin)
+	input, err := readStatuslineInput(os.Args[2:], os.Stdin)
 	if err != nil {
 		// Fallback prompt output to stdout
 		out.Raw(" > ")
@@ -124,6 +124,24 @@ func runStatusline() {
 	}
 	// Output statusline result to stdout
 	out.Raw(result)
+}
+
+// readStatuslineInput preserves Claude's stdin command-hook contract while
+// allowing harness extensions without stdin support to pass the same JSON as
+// one positional argument.
+func readStatuslineInput(args []string, stdin io.Reader) ([]byte, error) {
+	switch len(args) {
+	case 0:
+		input, err := io.ReadAll(stdin)
+		if err != nil {
+			return nil, fmt.Errorf("reading statusline stdin: %w", err)
+		}
+		return input, nil
+	case 1:
+		return []byte(args[0]), nil
+	default:
+		return nil, fmt.Errorf("statusline accepts at most one JSON argument")
+	}
 }
 
 func runStatuslineWithInput(reader io.Reader) (string, error) {
