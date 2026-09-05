@@ -1,14 +1,19 @@
 import { pathToFileURL } from 'node:url';
 import { compose, validateRequest } from './compose.mjs';
+import { quota, validateQuotaRequest } from './quota.mjs';
 
 const maximumInputBytes = 64 * 1024;
 const totalBudgetMs = 15000;
 const cleanupBudgetMs = 25;
 
-/** @typedef {import('./compose.mjs').Request} Request */
-/** @typedef {import('./compose.mjs').Result} Result */
+/** @typedef {import('./compose.mjs').Request} ComposeRequest */
+/** @typedef {import('./compose.mjs').Result} ComposeResult */
+/** @typedef {import('./quota.mjs').QuotaRequest} QuotaRequest */
+/** @typedef {import('./quota.mjs').QuotaResult} QuotaResult */
+/** @typedef {ComposeRequest|QuotaRequest} Request */
+/** @typedef {ComposeResult|QuotaResult} Result */
 /** @typedef {{[Symbol.asyncIterator](): AsyncIterator<Uint8Array>, destroy?: () => void}} InputStream */
-/** @typedef {{stdin?: InputStream, write?: (line: string) => void|Promise<void>, compose?: typeof compose, timeoutMs?: number}} CliDependencies */
+/** @typedef {{stdin?: InputStream, write?: (line: string) => void|Promise<void>, compose?: typeof compose, quota?: typeof quota, timeoutMs?: number}} CliDependencies */
 /** @typedef {{kind: 'request', request: Request}|{kind: 'invalid'}|{kind: 'timeout'}} ReadResult */
 /** @typedef {{kind: 'item', item: IteratorResult<Uint8Array>}|{kind: 'error'}} NextResult */
 
@@ -17,14 +22,28 @@ function invalidRequest() {
   return { version: 1, ok: false, error: 'invalid_request' };
 }
 
-/** @returns {Result} */
+/** @returns {ComposeResult} */
 function generationFailed() {
   return { version: 1, ok: false, error: 'generation_failed' };
+}
+
+/** @returns {QuotaResult} */
+function quotaFailed() {
+  return { version: 1, ok: false, error: 'fetch_failed' };
 }
 
 /** @returns {Result} */
 function timedOut() {
   return { version: 1, ok: false, error: 'timeout' };
+}
+
+/** @param {unknown} value @returns {Request|undefined} */
+function validateInput(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const operation = /** @type {Record<string, unknown>} */ (value).operation;
+  if (operation === 'compose') return validateRequest(value);
+  if (operation === 'quota') return validateQuotaRequest(value);
+  return undefined;
 }
 
 /** @param {InputStream} stdin @param {AsyncIterator<Uint8Array>} iterator */
@@ -97,7 +116,7 @@ async function readRequest(stdin, timeoutMs) {
     }
     if (!raw) return { kind: 'invalid' };
     try {
-      const request = validateRequest(JSON.parse(raw));
+      const request = validateInput(JSON.parse(raw));
       return request ? { kind: 'request', request } : { kind: 'invalid' };
     } catch {
       return { kind: 'invalid' };
@@ -141,10 +160,18 @@ export async function runCli(dependencies = {}) {
     if (remaining <= 0) {
       result = timedOut();
     } else {
-      try {
-        result = await (dependencies.compose ?? compose)(input.request, { timeoutMs: remaining });
-      } catch {
-        result = generationFailed();
+      if (input.request.operation === 'compose') {
+        try {
+          result = await (dependencies.compose ?? compose)(input.request, { timeoutMs: remaining });
+        } catch {
+          result = generationFailed();
+        }
+      } else {
+        try {
+          result = await (dependencies.quota ?? quota)(input.request, { timeoutMs: remaining });
+        } catch {
+          result = quotaFailed();
+        }
       }
     }
   }

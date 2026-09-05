@@ -8,7 +8,9 @@ import { compose } from './compose.mjs';
 
 /** @typedef {'minimal'|'low'|'medium'|'high'|'xhigh'|'max'} ThinkingLevel */
 /** @typedef {{version: 1, operation: 'compose', model: {provider: string, id: string, thinking: ThinkingLevel}, input: {user: string, assistant: string}, label: {current: string, refresh: boolean}}} Request */
+/** @typedef {import('./quota.mjs').QuotaRequest} QuotaRequest */
 /** @typedef {{version: 1, ok: true, body: string, label?: string}|{version: 1, ok: false, error: 'invalid_request'|'unavailable_model'|'generation_failed'|'timeout'|'invalid_output'}} Result */
+/** @typedef {import('./quota.mjs').QuotaResult} QuotaResult */
 /** @typedef {{[Symbol.asyncIterator](): AsyncIterator<Uint8Array>, destroy?: () => void}} InputStream */
 /** @typedef {{code: number|null, signal: NodeJS.Signals|null, stdout: string, stderr: string}} ChildOutcome */
 /** @typedef {import('@earendil-works/pi-ai').Model<import('@earendil-works/pi-ai').Api>} PiModel */
@@ -27,6 +29,23 @@ const requestValue = {
   label: { current: '', refresh: false },
 };
 const request = JSON.stringify(requestValue);
+/** @type {QuotaRequest} */
+const quotaRequestValue = {
+  version: 1,
+  operation: 'quota',
+  model: { provider: 'openai-codex', id: 'gpt-5.6-luna', base_url: 'https://chatgpt.com/backend-api' },
+};
+const quotaRequest = JSON.stringify(quotaRequestValue);
+/** @type {QuotaResult} */
+const quotaSuccess = {
+  version: 1,
+  ok: true,
+  provider: 'openai-codex',
+  base_url: 'https://chatgpt.com/backend-api',
+  account_key: '30a7b46a4904936da76ec3f2a807d1fd8014b278ae2ea426d45443dee6853258',
+  fetched_at: 1_700_000_000_000,
+  windows: { five_hour: null, weekly: null },
+};
 const entryUrl = new URL('./cli.mjs', import.meta.url).href;
 /** @type {PiModel} */
 const childModel = {
@@ -61,7 +80,7 @@ function delayedStream(chunk, delayMs) {
   };
 }
 
-/** @param {'open-stdin'|'oversized-stdin'|'ref-provider'} mode @returns {import('node:child_process').ChildProcessWithoutNullStreams} */
+/** @param {'open-stdin'|'oversized-stdin'|'ref-provider'|'ref-quota'} mode @returns {import('node:child_process').ChildProcessWithoutNullStreams} */
 function spawnFixture(mode) {
   const child = spawn(process.execPath, [fileURLToPath(import.meta.url), mode], {
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -107,6 +126,14 @@ if (fixtureMode === 'open-stdin') {
   await runCliEntrypoint({
     timeoutMs: 250,
     compose: (value, options) => compose(value, { ...options, runtimeFactory }),
+  });
+} else if (fixtureMode === 'ref-quota') {
+  await runCliEntrypoint({
+    timeoutMs: 250,
+    quota: async () => {
+      setInterval(() => {}, 1000);
+      return quotaSuccess;
+    },
   });
 } else {
 
@@ -244,20 +271,75 @@ test('CLI sends valid input through composition with only the positive remaining
   assert.equal(output, '{"version":1,"ok":true,"body":"Composition completed"}\n');
 });
 
-test('CLI does not start composition for invalid input', async () => {
-  let calls = 0;
+test('CLI does not start composition or quota auth for invalid or unknown operations', async () => {
+  let composeCalls = 0;
+  let quotaCalls = 0;
+  const inputs = [
+    {},
+    { ...quotaRequestValue, extra: 'PRIVATE-REQUEST-SENTINEL' },
+    { ...quotaRequestValue, operation: 'unknown' },
+  ];
+  for (const input of inputs) {
+    let output = '';
+    const code = await runCli({
+      stdin: streams([Buffer.from(JSON.stringify(input))]),
+      write: (line) => { output += line; },
+      compose: async () => {
+        composeCalls += 1;
+        return { version: 1, ok: false, error: 'generation_failed' };
+      },
+      quota: async () => {
+        quotaCalls += 1;
+        return { version: 1, ok: false, error: 'auth_unavailable' };
+      },
+    });
+    assert.equal(code, 1);
+    assert.equal(output, '{"version":1,"ok":false,"error":"invalid_request"}\n');
+    assert.equal(output.includes('PRIVATE-REQUEST-SENTINEL'), false);
+  }
+  assert.equal(composeCalls, 0);
+  assert.equal(quotaCalls, 0);
+});
+
+test('CLI delegates exact quota validation and passes only the positive remaining total budget', async () => {
   let output = '';
+  let calls = 0;
+  /** @type {unknown} */
+  let received;
+  /** @type {number|undefined} */
+  let receivedTimeout;
   const code = await runCli({
-    stdin: streams([Buffer.from('{}')]),
+    stdin: delayedStream(Buffer.from(quotaRequest), 20),
+    timeoutMs: 100,
     write: (line) => { output += line; },
     compose: async () => {
+      assert.fail('quota input must not reach composition');
+    },
+    quota: async (value, options) => {
       calls += 1;
-      return { version: 1, ok: false, error: 'generation_failed' };
+      received = value;
+      assert.ok(options);
+      receivedTimeout = options.timeoutMs;
+      return quotaSuccess;
     },
   });
+  assert.equal(code, 0);
+  assert.equal(calls, 1);
+  assert.deepEqual(received, quotaRequestValue);
+  assert.ok(receivedTimeout !== undefined && receivedTimeout > 0 && receivedTimeout < 100);
+  assert.equal(output, `${JSON.stringify(quotaSuccess)}\n`);
+});
+
+test('CLI maps a secret-bearing quota dependency failure to one safe fetch_failed result', async () => {
+  let output = '';
+  const code = await runCli({
+    stdin: streams([Buffer.from(quotaRequest)]),
+    write: (line) => { output += line; },
+    quota: async () => { throw new Error('QUOTA-AUTH-SECRET-SENTINEL'); },
+  });
   assert.equal(code, 1);
-  assert.equal(calls, 0);
-  assert.equal(output, '{"version":1,"ok":false,"error":"invalid_request"}\n');
+  assert.equal(output, '{"version":1,"ok":false,"error":"fetch_failed"}\n');
+  assert.equal(output.includes('SECRET-SENTINEL'), false);
 });
 
 test('CLI maps stalled stdin to timeout within its total request budget', async () => {
@@ -301,6 +383,16 @@ test('entrypoint flushes success and exits despite a fake provider ref-ed handle
   assert.equal(outcome.code, 0);
   assert.equal(outcome.signal, null);
   assert.equal(outcome.stdout, '{"version":1,"ok":true,"body":"Provider completed"}\n');
+  assert.equal(outcome.stderr, '');
+});
+
+test('entrypoint flushes one quota line with empty stderr and exits despite a local fake ref-ed handle', async () => {
+  const child = spawnFixture('ref-quota');
+  child.stdin.end(quotaRequest);
+  const outcome = await collectChild(child);
+  assert.equal(outcome.code, 0);
+  assert.equal(outcome.signal, null);
+  assert.equal(outcome.stdout, `${JSON.stringify(quotaSuccess)}\n`);
   assert.equal(outcome.stderr, '');
 });
 
