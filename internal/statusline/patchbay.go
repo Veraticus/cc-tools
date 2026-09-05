@@ -82,6 +82,17 @@ func patchbayCost(
 	env EnvReader,
 	client *http.Client,
 ) patchbayResult {
+	return patchbayCostWithLock(cacheDir, ttl, now, env, client, tryCacheRefillLock)
+}
+
+func patchbayCostWithLock(
+	cacheDir string,
+	ttl time.Duration,
+	now time.Time,
+	env EnvReader,
+	client *http.Client,
+	acquireLock func(*os.Root, string) cacheRefillLock,
+) patchbayResult {
 	config := patchbayConfigFromEnv(env)
 	if config.URL == "" && config.KeyFile == "" {
 		return patchbayResult{Status: patchbayUnconfigured}
@@ -89,16 +100,16 @@ func patchbayCost(
 	if config.KeyFile == "" || !validPatchbayBaseURL(config.URL) {
 		return patchbayResult{Status: patchbayError}
 	}
-	key, err := os.ReadFile(config.KeyFile)
-	if err != nil {
+	key, readErr := os.ReadFile(config.KeyFile)
+	if readErr != nil {
 		return patchbayResult{Status: patchbayError}
 	}
 	callerKey := strings.TrimSpace(string(key))
 	if callerKey == "" {
 		return patchbayResult{Status: patchbayError}
 	}
-	keyInfo, err := os.Stat(config.KeyFile)
-	if err != nil {
+	keyInfo, statErr := os.Stat(config.KeyFile)
+	if statErr != nil {
 		return patchbayResult{Status: patchbayError}
 	}
 
@@ -114,6 +125,21 @@ func patchbayCost(
 	defer func() { _ = root.Close() }()
 
 	cacheName := patchbayCacheName(config.URL, config.KeyFile, keyInfo, windowStart)
+	return cachedPatchbayCost(
+		root, cacheName, ttl, now, config.URL, callerKey, windowStart, client, acquireLock,
+	)
+}
+
+func cachedPatchbayCost(
+	root *os.Root,
+	cacheName string,
+	ttl time.Duration,
+	now time.Time,
+	baseURL, callerKey string,
+	windowStart time.Time,
+	client *http.Client,
+	acquireLock func(*os.Root, string) cacheRefillLock,
+) patchbayResult {
 	var cached patchbayResult
 	if readFreshCache(root, cacheName, ttl, now, &cached) && patchbayCacheable(cached) {
 		return cached
@@ -121,15 +147,14 @@ func patchbayCost(
 
 	var stale patchbayResult
 	hasStale := readCache(root, cacheName, &stale) && patchbayCacheable(stale)
-	lock := tryCacheRefillLock(root, cacheName)
+	lock := acquireLock(root, cacheName)
 	switch lock.status {
 	case cacheRefillLockHeld:
 		if hasStale {
 			return stale
 		}
-		return fetchAndCachePatchbayCost(root, cacheName, config.URL, callerKey, windowStart, now, client)
 	case cacheRefillLockUnavailable:
-		return fetchAndCachePatchbayCost(root, cacheName, config.URL, callerKey, windowStart, now, client)
+		// Fetch fresh without a lock when the locking facility is unavailable.
 	case cacheRefillLockAcquired:
 		defer releaseCacheRefillLock(lock.file)
 
@@ -138,10 +163,8 @@ func patchbayCost(
 		if readFreshCache(root, cacheName, ttl, now, &cached) && patchbayCacheable(cached) {
 			return cached
 		}
-		return fetchAndCachePatchbayCost(root, cacheName, config.URL, callerKey, windowStart, now, client)
-	default:
-		return fetchAndCachePatchbayCost(root, cacheName, config.URL, callerKey, windowStart, now, client)
 	}
+	return fetchAndCachePatchbayCost(root, cacheName, baseURL, callerKey, windowStart, now, client)
 }
 
 func patchbayCacheable(result patchbayResult) bool {

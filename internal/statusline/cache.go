@@ -27,8 +27,6 @@ const cacheDirPerm = 0o700
 // statusline from.
 const cacheHashBytes = 8
 
-var cacheFlock = syscall.Flock
-
 // openCacheRoot creates (or verifies) the per-uid subdirectory of
 // cacheDir that all TTL-cached statusline data lives in (git status,
 // transcript-derived cost, ...), and returns it as an opened os.Root
@@ -123,7 +121,7 @@ func readCache[T any](root *os.Root, name string, out *T) bool {
 		return false
 	}
 	var decoded T
-	if err := json.Unmarshal(data, &decoded); err != nil {
+	if decodeErr := json.Unmarshal(data, &decoded); decodeErr != nil {
 		return false
 	}
 	*out = decoded
@@ -147,13 +145,22 @@ type cacheRefillLock struct {
 // waiting. Contention permits a stale fallback; an unavailable locking facility
 // degrades to the pre-lock behavior of fetching fresh data.
 func tryCacheRefillLock(root *os.Root, name string) cacheRefillLock {
-	f, err := root.OpenFile(name+".lock", os.O_CREATE|os.O_WRONLY, cacheFilePerm)
-	if err != nil {
+	return tryCacheRefillLockWithFlock(root, name, syscall.Flock)
+}
+
+func tryCacheRefillLockWithFlock(
+	root *os.Root,
+	name string,
+	flock func(int, int) error,
+) cacheRefillLock {
+	f, openErr := root.OpenFile(name+".lock", os.O_CREATE|os.O_WRONLY, cacheFilePerm)
+	if openErr != nil {
 		return cacheRefillLock{status: cacheRefillLockUnavailable}
 	}
-	if err := cacheFlock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	flockErr := flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	if flockErr != nil {
 		_ = f.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+		if errors.Is(flockErr, syscall.EWOULDBLOCK) || errors.Is(flockErr, syscall.EAGAIN) {
 			return cacheRefillLock{status: cacheRefillLockHeld}
 		}
 		return cacheRefillLock{status: cacheRefillLockUnavailable}
@@ -162,7 +169,7 @@ func tryCacheRefillLock(root *os.Root, name string) cacheRefillLock {
 }
 
 func releaseCacheRefillLock(f *os.File) {
-	_ = cacheFlock(int(f.Fd()), syscall.LOCK_UN)
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 	_ = f.Close()
 }
 
@@ -181,11 +188,12 @@ func writeCache[T any](root *os.Root, name string, value T) {
 		return
 	}
 	defer func() { _ = root.Remove(tempName) }()
-	if n, err := f.Write(data); err != nil || n != len(data) {
+	n, writeErr := f.Write(data)
+	if writeErr != nil || n != len(data) {
 		_ = f.Close()
 		return
 	}
-	if err := f.Close(); err != nil {
+	if closeErr := f.Close(); closeErr != nil {
 		return
 	}
 	_ = root.Rename(tempName, name)

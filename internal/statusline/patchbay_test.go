@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -762,14 +763,14 @@ func TestPatchbayCost_StaleCacheRefreshesWhenRefillLockUnavailable(t *testing.T)
 	if !trusted {
 		t.Fatal("cache root should be trusted")
 	}
-	if err := root.Remove(cacheName + ".lock"); err != nil {
-		t.Fatal(err)
+	if removeErr := root.Remove(cacheName + ".lock"); removeErr != nil {
+		t.Fatal(removeErr)
 	}
-	if err := root.Mkdir(cacheName+".lock", cacheDirPerm); err != nil {
-		t.Fatal(err)
+	if mkdirErr := root.Mkdir(cacheName+".lock", cacheDirPerm); mkdirErr != nil {
+		t.Fatal(mkdirErr)
 	}
-	if err := root.Close(); err != nil {
-		t.Fatal(err)
+	if closeErr := root.Close(); closeErr != nil {
+		t.Fatal(closeErr)
 	}
 
 	refreshed := patchbayCost(cacheDir, time.Nanosecond, now.Add(time.Second), env, server.Client())
@@ -795,14 +796,50 @@ func TestPatchbayCost_InvalidURLRejectsPreexistingCache(t *testing.T) {
 		t.Fatal("cache root should be trusted")
 	}
 	cacheName := patchbayCacheName(invalidURL, keyFile, keyInfo, localMidnight(now))
-	writeCache(root, cacheName, patchbayResult{Status: patchbayAvailable, Summary: patchbaySummary{KnownCostNanoUSD: 12}})
-	if err := root.Close(); err != nil {
-		t.Fatal(err)
+	writeCache(root, cacheName, patchbayResult{
+		Status:  patchbayAvailable,
+		Summary: patchbaySummary{KnownCostNanoUSD: 12},
+	})
+	if closeErr := root.Close(); closeErr != nil {
+		t.Fatal(closeErr)
 	}
 
 	result := patchbayCost(cacheDir, time.Hour, now, patchbayEnv(invalidURL, keyFile), nil)
 	if result.Status != patchbayError {
 		t.Errorf("status = %v, want error instead of cached result", result.Status)
+	}
+}
+
+func TestTryCacheRefillLock_ClassifiesFlockResults(t *testing.T) {
+	root, trusted := openCacheRoot(t.TempDir())
+	if !trusted {
+		t.Fatal("cache root should be trusted")
+	}
+	defer func() { _ = root.Close() }()
+
+	tests := []struct {
+		name   string
+		flock  func(int, int) error
+		status cacheRefillLockStatus
+	}{
+		{name: "acquired", flock: func(int, int) error { return nil }, status: cacheRefillLockAcquired},
+		{name: "held", flock: func(int, int) error { return syscall.EWOULDBLOCK }, status: cacheRefillLockHeld},
+		{
+			name:   "unavailable",
+			flock:  func(int, int) error { return fmt.Errorf("unsupported") },
+			status: cacheRefillLockUnavailable,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			lock := tryCacheRefillLockWithFlock(root, test.name, test.flock)
+			if lock.status != test.status {
+				t.Errorf("status = %v, want %v", lock.status, test.status)
+			}
+			if lock.file != nil {
+				_ = lock.file.Close()
+			}
+		})
 	}
 }
 
@@ -821,11 +858,12 @@ func TestPatchbayCost_StaleCacheRefreshesWhenFlockFails(t *testing.T) {
 	if result := patchbayCost(cacheDir, time.Minute, now, env, server.Client()); result.Status != patchbayAvailable {
 		t.Fatalf("warm status = %v, want available", result.Status)
 	}
-	originalFlock := cacheFlock
-	cacheFlock = func(int, int) error { return fmt.Errorf("flock unsupported") }
-	t.Cleanup(func() { cacheFlock = originalFlock })
-
-	refreshed := patchbayCost(cacheDir, time.Nanosecond, now.Add(time.Second), env, server.Client())
+	flockUnavailable := func(*os.Root, string) cacheRefillLock {
+		return cacheRefillLock{status: cacheRefillLockUnavailable}
+	}
+	refreshed := patchbayCostWithLock(
+		cacheDir, time.Nanosecond, now.Add(time.Second), env, server.Client(), flockUnavailable,
+	)
 	if refreshed.Status != patchbayAvailable {
 		t.Errorf("refreshed status = %v, want available", refreshed.Status)
 	}
