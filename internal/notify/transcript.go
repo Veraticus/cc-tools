@@ -145,11 +145,12 @@ type LiveTask struct {
 // transcriptRecord is the subset of a transcript JSONL line's shape that
 // ScanTranscript cares about. Unknown fields are ignored by encoding/json.
 type transcriptRecord struct {
-	Type      string      `json:"type"`
-	Timestamp string      `json:"timestamp"`
-	Content   string      `json:"content"`
-	IsMeta    bool        `json:"isMeta"`
-	Message   *rawMessage `json:"message"`
+	Type      string          `json:"type"`
+	Timestamp string          `json:"timestamp"`
+	Content   string          `json:"content"`
+	IsMeta    bool            `json:"isMeta"`
+	UUID      json.RawMessage `json:"uuid"`
+	Message   *rawMessage     `json:"message"`
 	// ToolUseResult is the harness's own typed record of what a tool call
 	// did, attached to a user record alongside its tool_result content
 	// block. It is authoritative over ack prose for task liveness: a
@@ -179,6 +180,7 @@ type TeammateActivity struct {
 // human-typed messages and system reminders, and an array of contentBlock
 // for assistant tool_use turns and user tool_result turns.
 type rawMessage struct {
+	ID      json.RawMessage `json:"id"`
 	Role    string          `json:"role"`
 	Content json.RawMessage `json:"content"`
 }
@@ -337,6 +339,13 @@ type ScanResult struct {
 	// via truncateHead so the end of the message (the ask or conclusion)
 	// survives truncation.
 	LastAssistantText string
+	// LastAssistantUUID and LastAssistantMessageID name the most recent
+	// decoded assistant record. That record can differ from the one retained
+	// in LastAssistantText when its content has no text. Malformed trailing
+	// lines remain skipped and therefore do not provide terminal-transcript
+	// reliability by themselves.
+	LastAssistantUUID      string
+	LastAssistantMessageID string
 
 	// FirstTimestamp and LastTimestamp are the first and last top-level
 	// "timestamp" values that parsed successfully, across every record type
@@ -370,9 +379,11 @@ type scanState struct {
 	teammates     map[string]*TeammateActivity
 	teammateOrder []string
 
-	lastUserMessage     string
-	lastSubstantiveUser string
-	lastAssistantText   string
+	lastUserMessage        string
+	lastSubstantiveUser    string
+	lastAssistantText      string
+	lastAssistantUUID      string
+	lastAssistantMessageID string
 
 	firstTimestamp time.Time
 	lastTimestamp  time.Time
@@ -418,16 +429,18 @@ func ScanTranscript(r io.Reader) (ScanResult, error) {
 // result assembles the accumulated scan state into a ScanResult.
 func (s *scanState) result() ScanResult {
 	return ScanResult{
-		Goal:                s.goal,
-		LiveTasks:           s.tasks(),
-		Teammates:           s.teammateActivities(),
-		LastUserMessage:     s.lastUserMessage,
-		LastSubstantiveUser: s.lastSubstantiveUser,
-		LastAssistantText:   s.lastAssistantText,
-		FirstTimestamp:      s.firstTimestamp,
-		LastTimestamp:       s.lastTimestamp,
-		UserTurns:           s.userTurns,
-		BytesScanned:        s.bytesScanned,
+		Goal:                   s.goal,
+		LiveTasks:              s.tasks(),
+		Teammates:              s.teammateActivities(),
+		LastUserMessage:        s.lastUserMessage,
+		LastSubstantiveUser:    s.lastSubstantiveUser,
+		LastAssistantText:      s.lastAssistantText,
+		LastAssistantUUID:      s.lastAssistantUUID,
+		LastAssistantMessageID: s.lastAssistantMessageID,
+		FirstTimestamp:         s.firstTimestamp,
+		LastTimestamp:          s.lastTimestamp,
+		UserTurns:              s.userTurns,
+		BytesScanned:           s.bytesScanned,
 	}
 }
 
@@ -451,6 +464,8 @@ func (s *scanState) processLine(line []byte) {
 	}
 	switch rec.Message.Role {
 	case "assistant":
+		s.lastAssistantUUID = optionalString(rec.UUID)
+		s.lastAssistantMessageID = optionalString(rec.Message.ID)
 		s.processAssistantMessage(rec.Message.Content)
 	case "user":
 		s.processUserMessage(rec.Message.Content, rec.ToolUseResult, rec.Timestamp)
@@ -464,6 +479,16 @@ func (s *scanState) processLine(line []byte) {
 		}
 		s.captureUserText(rec.Message.Content, text, isPlain, rec.IsMeta)
 	}
+}
+
+// optionalString decodes optional identity metadata without making a
+// wrong-typed value invalidate the rest of its transcript record.
+func optionalString(raw json.RawMessage) string {
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return ""
+	}
+	return value
 }
 
 // recordTimestamp updates the running first/last timestamps from a

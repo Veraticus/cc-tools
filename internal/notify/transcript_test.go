@@ -492,6 +492,153 @@ func TestScanTranscriptMalformedLinesSkipped(t *testing.T) {
 	}
 }
 
+func TestScanTranscriptAssistantIdentity(t *testing.T) {
+	tests := []struct {
+		name          string
+		transcript    string
+		wantUUID      string
+		wantMessageID string
+		wantText      string
+		wantUserTurns int
+		wantLiveTasks int
+		wantLastTime  string
+	}{
+		{name: "empty input"},
+		{
+			name:          "distinct identities preserved",
+			transcript:    `{"type":"assistant","uuid":"uuid-1","timestamp":"2026-07-05T01:00:00Z","message":{"id":"msg-1","role":"assistant","content":[{"type":"text","text":"done"}]}}` + "\n",
+			wantUUID:      "uuid-1",
+			wantMessageID: "msg-1",
+			wantText:      "done",
+			wantLastTime:  "2026-07-05T01:00:00Z",
+		},
+		{
+			name: "identical text latest identity wins",
+			transcript: `{"type":"assistant","uuid":"uuid-1","message":{"id":"msg-1","role":"assistant","content":[{"type":"text","text":"same"}]}}` + "\n" +
+				`{"type":"assistant","uuid":"uuid-2","message":{"id":"msg-2","role":"assistant","content":[{"type":"text","text":"same"}]}}` + "\n",
+			wantUUID:      "uuid-2",
+			wantMessageID: "msg-2",
+			wantText:      "same",
+		},
+		{
+			name: "non-assistant rows do not replace identity",
+			transcript: `{"type":"assistant","uuid":"uuid-1","message":{"id":"msg-1","role":"assistant","content":[{"type":"text","text":"kept"}]}}` + "\n" +
+				`{"type":"user","uuid":"user-uuid","message":{"id":"user-msg","role":"user","content":"hello there"}}` + "\n" +
+				`{"type":"attachment","uuid":"attachment-uuid","attachment":{}}` + "\n" +
+				`{"type":"system","uuid":"system-uuid","message":{"id":"system-msg","role":"system","content":"notice"}}` + "\n" +
+				`{"type":"progress","uuid":"message-less"}` + "\n",
+			wantUUID:      "uuid-1",
+			wantMessageID: "msg-1",
+			wantText:      "kept",
+			wantUserTurns: 1,
+		},
+		{
+			name: "missing uuid independently clears",
+			transcript: `{"type":"assistant","uuid":"old-uuid","message":{"id":"old-msg","role":"assistant","content":[{"type":"text","text":"old"}]}}` + "\n" +
+				`{"type":"assistant","message":{"id":"new-msg","role":"assistant","content":[{"type":"text","text":"new"}]}}` + "\n",
+			wantMessageID: "new-msg",
+			wantText:      "new",
+		},
+		{
+			name: "empty uuid independently clears",
+			transcript: `{"type":"assistant","uuid":"old-uuid","message":{"id":"old-msg","role":"assistant","content":[{"type":"text","text":"old"}]}}` + "\n" +
+				`{"type":"assistant","uuid":"","message":{"id":"new-msg","role":"assistant","content":[{"type":"text","text":"new"}]}}` + "\n",
+			wantMessageID: "new-msg",
+			wantText:      "new",
+		},
+		{
+			name: "empty message id independently clears",
+			transcript: `{"type":"assistant","uuid":"old-uuid","message":{"id":"old-msg","role":"assistant","content":[{"type":"text","text":"old"}]}}` + "\n" +
+				`{"type":"assistant","uuid":"new-uuid","message":{"id":"","role":"assistant","content":[{"type":"text","text":"new"}]}}` + "\n",
+			wantUUID: "new-uuid",
+			wantText: "new",
+		},
+		{
+			name: "missing message id independently clears",
+			transcript: `{"type":"assistant","uuid":"old-uuid","message":{"id":"old-msg","role":"assistant","content":[{"type":"text","text":"old"}]}}` + "\n" +
+				`{"type":"assistant","uuid":"new-uuid","message":{"role":"assistant","content":[{"type":"text","text":"new"}]}}` + "\n",
+			wantUUID: "new-uuid",
+			wantText: "new",
+		},
+		{
+			name: "both missing clear after known identities",
+			transcript: `{"type":"assistant","uuid":"old-uuid","message":{"id":"old-msg","role":"assistant","content":[{"type":"text","text":"old"}]}}` + "\n" +
+				`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"new"}]}}` + "\n",
+			wantText: "new",
+		},
+		{
+			name: "tool-only assistant replaces identity retaining text",
+			transcript: `{"type":"assistant","uuid":"old-uuid","message":{"id":"old-msg","role":"assistant","content":[{"type":"text","text":"retained"}]}}` + "\n" +
+				`{"type":"assistant","uuid":"tool-uuid","message":{"id":"tool-msg","role":"assistant","content":[{"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"true"}}]}}` + "\n",
+			wantUUID:      "tool-uuid",
+			wantMessageID: "tool-msg",
+			wantText:      "retained",
+		},
+		{
+			name: "empty-content assistant replaces identity retaining text",
+			transcript: `{"type":"assistant","uuid":"old-uuid","message":{"id":"old-msg","role":"assistant","content":[{"type":"text","text":"retained"}]}}` + "\n" +
+				`{"type":"assistant","uuid":"empty-uuid","message":{"id":"empty-msg","role":"assistant","content":[]}}` + "\n",
+			wantUUID:      "empty-uuid",
+			wantMessageID: "empty-msg",
+			wantText:      "retained",
+		},
+		{
+			name: "wrong typed identities clear while useful fields survive",
+			transcript: `{"type":"assistant","uuid":"old-uuid","message":{"id":"old-msg","role":"assistant","content":[{"type":"text","text":"old"}]}}` + "\n" +
+				`{"type":"assistant","uuid":42,"timestamp":"2026-07-05T02:00:00Z","message":{"id":{"bad":true},"role":"assistant","content":[{"type":"text","text":"useful"},{"type":"tool_use","id":"tool-2","name":"Bash","input":{"command":"sleep 1","description":"task","run_in_background":true}}]}}` + "\n" +
+				`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-2","content":"running"}]},"toolUseResult":{"backgroundTaskId":"task-2"}}` + "\n",
+			wantText:      "useful",
+			wantLiveTasks: 1,
+			wantLastTime:  "2026-07-05T02:00:00Z",
+		},
+		{
+			name: "array and null identities clear independently",
+			transcript: `{"type":"assistant","uuid":"old-uuid","message":{"id":"old-msg","role":"assistant","content":[{"type":"text","text":"old"}]}}` + "\n" +
+				`{"type":"assistant","uuid":["bad"],"message":{"id":null,"role":"assistant","content":[{"type":"text","text":"still useful"}]}}` + "\n",
+			wantText: "still useful",
+		},
+		{
+			name:          "malformed JSON skipped then valid assistant captured",
+			transcript:    "{not json}\n" + `{"type":"assistant","uuid":"valid-uuid","message":{"id":"valid-msg","role":"assistant","content":[{"type":"text","text":"valid"}]}}` + "\n",
+			wantUUID:      "valid-uuid",
+			wantMessageID: "valid-msg",
+			wantText:      "valid",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res, err := ScanTranscript(strings.NewReader(tt.transcript))
+			if err != nil {
+				t.Fatalf("ScanTranscript returned error: %v", err)
+			}
+			if res.LastAssistantUUID != tt.wantUUID {
+				t.Errorf("LastAssistantUUID = %q, want %q", res.LastAssistantUUID, tt.wantUUID)
+			}
+			if res.LastAssistantMessageID != tt.wantMessageID {
+				t.Errorf(
+					"LastAssistantMessageID = %q, want %q",
+					res.LastAssistantMessageID,
+					tt.wantMessageID,
+				)
+			}
+			if res.LastAssistantText != tt.wantText {
+				t.Errorf("LastAssistantText = %q, want %q", res.LastAssistantText, tt.wantText)
+			}
+			if res.UserTurns != tt.wantUserTurns {
+				t.Errorf("UserTurns = %d, want %d", res.UserTurns, tt.wantUserTurns)
+			}
+			if len(res.LiveTasks) != tt.wantLiveTasks {
+				t.Errorf("len(LiveTasks) = %d, want %d", len(res.LiveTasks), tt.wantLiveTasks)
+			}
+			if tt.wantLastTime != "" &&
+				!res.LastTimestamp.Equal(parseTestTimestamp(t, tt.wantLastTime)) {
+				t.Errorf("LastTimestamp = %v, want %s", res.LastTimestamp, tt.wantLastTime)
+			}
+		})
+	}
+}
+
 func TestScanTranscriptEmptyInput(t *testing.T) {
 	res, err := ScanTranscript(strings.NewReader(""))
 	if err != nil {
@@ -517,6 +664,12 @@ func TestScanTranscriptEmptyInput(t *testing.T) {
 	}
 	if res.LastAssistantText != "" {
 		t.Errorf("LastAssistantText = %q, want empty", res.LastAssistantText)
+	}
+	if res.LastAssistantUUID != "" {
+		t.Errorf("LastAssistantUUID = %q, want empty", res.LastAssistantUUID)
+	}
+	if res.LastAssistantMessageID != "" {
+		t.Errorf("LastAssistantMessageID = %q, want empty", res.LastAssistantMessageID)
 	}
 	if !res.FirstTimestamp.IsZero() {
 		t.Errorf("FirstTimestamp = %v, want zero", res.FirstTimestamp)
