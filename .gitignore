@@ -27,3 +27,6 @@ go.work.sum
 # Binary outputs (just in case)
 /cc-tools
 result
+
+# Node dependencies
+/node_modules/

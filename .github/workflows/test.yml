@@ -10,6 +10,23 @@ env:
   GO_VERSION: '1.24.5'
 
 jobs:
+  node:
+    name: Node helper
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    - name: Set up Node 24
+      uses: actions/setup-node@v4
+      with:
+        node-version: '24'
+    - name: Install Node dependencies
+      run: npm ci --ignore-scripts
+    - name: Run Node tests
+      run: npm test
+    - name: Typecheck Node helper
+      run: npm run typecheck
+
   test:
     name: Test
     runs-on: ${{ matrix.os }}
