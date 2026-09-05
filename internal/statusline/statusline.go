@@ -17,6 +17,9 @@ import (
 
 // Input represents the JSON input from stdin.
 type Input struct {
+	// Harness identifies the caller. Pi quota rendering is intentionally
+	// opt-in and only applies when this is exactly "pi".
+	Harness string `json:"harness"`
 	// Columns is an optional caller-supplied render width. Claude Code exports
 	// COLUMNS for its command hook; other harnesses can only pass structured
 	// input, so a positive value here takes precedence over the environment.
@@ -56,9 +59,10 @@ type Input struct {
 	// distinction drives whether rate-limit chips or a cost chip render,
 	// and (see costSource) whether transcript-derived anthropic-backend
 	// rows price at $0.
-	RateLimits *RateLimitsInput `json:"rate_limits"`
-	Effort     *EffortInput     `json:"effort"`
-	PR         *PRInput         `json:"pr"`
+	RateLimits   *RateLimitsInput   `json:"rate_limits"`
+	StewardQuota *StewardQuotaInput `json:"steward_quota"`
+	Effort       *EffortInput       `json:"effort"`
+	PR           *PRInput           `json:"pr"`
 }
 
 // CostInput is the session cost summary from stdin's "cost" object.
@@ -84,6 +88,30 @@ type RateLimitWindow struct {
 	ResetsAt       int64   `json:"resets_at"`
 }
 
+// StewardQuotaInput is the normalized, renderer-owned Pi quota namespace.
+// Pointer scalar fields preserve the distinction between an explicit zero and
+// a missing/null value during validation.
+type StewardQuotaInput struct {
+	Provider  string                   `json:"provider"`
+	BaseURL   string                   `json:"base_url"`
+	FetchedAt *int64                   `json:"fetched_at"`
+	Stale     *bool                    `json:"stale"`
+	Windows   StewardQuotaWindowsInput `json:"windows"`
+}
+
+// StewardQuotaWindowsInput contains the two upstream Codex quota windows.
+type StewardQuotaWindowsInput struct {
+	FiveHour *StewardQuotaWindowInput `json:"five_hour"`
+	Weekly   *StewardQuotaWindowInput `json:"weekly"`
+}
+
+// StewardQuotaWindowInput is one normalized remaining-capacity window. Pi
+// timestamps are Unix milliseconds, unlike Claude's second-based rate limits.
+type StewardQuotaWindowInput struct {
+	RemainingPercent *float64 `json:"remaining_percent"`
+	ResetAt          *int64   `json:"reset_at"`
+}
+
 // EffortInput is stdin's "effort" object. Level is one of
 // low|medium|high|xhigh|max.
 type EffortInput struct {
@@ -100,8 +128,10 @@ type PRInput struct {
 
 // CachedData represents cached statusline data.
 type CachedData struct {
-	ModelID      string
-	ModelDisplay string
+	ModelID       string
+	ModelProvider string
+	ModelDisplay  string
+	Harness       string
 	// AgentsDisplay is the running-agents summary ("2×O5 · sol ×XH")
 	// from ReadAgentsDisplay; "" when no agents are running. Non-empty
 	// swaps the model chip's text and icon (see Render).
@@ -119,6 +149,8 @@ type CachedData struct {
 	Devspace       string
 	TermWidth      int
 	RateLimits     *RateLimitsInput
+	StewardQuota   *StewardQuotaInput
+	PiQuota        *piQuotaState
 	Cost           CostInput
 	Effort         *EffortInput
 	PR             *PRInput
@@ -307,6 +339,9 @@ func (s *Statusline) computeData(currentDir string) *CachedData {
 		TranscriptPath: s.input.TranscriptPath,
 		TermWidth:      termWidth,
 		ModelID:        s.input.Model.ID,
+		ModelProvider:  s.input.Model.Provider,
+		Harness:        s.input.Harness,
+		StewardQuota:   s.input.StewardQuota,
 	}
 
 	// Model display name (abbreviated to first-letter + version, e.g.
@@ -490,6 +525,8 @@ func (s *Statusline) getK8sContext() string {
 	return ""
 }
 
+const unknownLabel = "unknown"
+
 func (s *Statusline) getHostname() string {
 	// Check for test override
 	if override := s.deps.EnvReader.Get("CLAUDE_STATUSLINE_HOSTNAME"); override != "" {
@@ -515,7 +552,7 @@ func (s *Statusline) getHostname() string {
 		}
 	}
 
-	return "unknown"
+	return unknownLabel
 }
 
 const devspacePlanetMercury = "mercury"

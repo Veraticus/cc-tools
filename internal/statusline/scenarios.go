@@ -33,7 +33,10 @@ const scenarioProjectDir = "/workspace/demo-project"
 // scenarioHome is the HOME value handed to scenarios' EnvReader (used
 // for the gcloud config dir and the default kubeconfig path). It is
 // unrelated to the real process HOME env var formatPath reads.
-const scenarioHome = "/home/fixture"
+const (
+	scenarioHome       = "/home/fixture"
+	scenarioHomeEnvKey = "HOME"
+)
 
 // scenarioModelDisplay is the fixed model display name fed to every
 // scenario's Input. abbreviateModel turns this into "S4.5".
@@ -64,13 +67,17 @@ func Scenarios() []Scenario {
 	rlWidths := []int{200, 80, 50}
 	rlStates := []string{"rl-normal", "rl-extra", "rl-cost"}
 
+	quotaWidths := []int{40, 60, 80, 200}
+	quotaStates := []string{piQuotaFreshLabel, piQuotaStaleLabel, unknownLabel, piQuotaPartialState}
+
 	// squeezeScenarioCount is the number of squeeze scenarios appended
 	// below: rl-extra's alarm squeeze and rl-cost-squeeze's session-only
 	// degradation.
 	const squeezeScenarioCount = 2
 	scenarios := make(
 		[]Scenario, 0,
-		len(widths)*len(contexts)*len(gitStates)*len(envStates)+len(rlWidths)*len(rlStates)+squeezeScenarioCount,
+		len(widths)*len(contexts)*len(gitStates)*len(envStates)+len(rlWidths)*len(rlStates)+
+			squeezeScenarioCount+len(quotaWidths)*len(quotaStates),
 	)
 	for _, width := range widths {
 		for _, ctx := range contexts {
@@ -104,6 +111,15 @@ func Scenarios() []Scenario {
 		buildRLScenario(rlSqueezeScenarioWidth, "rl-cost-squeeze"),
 	)
 
+	// Pi quota is an opt-in subset rather than another matrix axis. These
+	// sixteen fixtures cover each freshness/partial state at the three narrow
+	// widths and one wide width used by the renderer contract.
+	for _, quotaState := range quotaStates {
+		for _, width := range quotaWidths {
+			scenarios = append(scenarios, buildPiQuotaScenario(width, quotaState))
+		}
+	}
+
 	return scenarios
 }
 
@@ -115,6 +131,79 @@ func Scenarios() []Scenario {
 func scenarioFixedNow() time.Time {
 	const fixedUnixSeconds = 1751700000
 	return time.Unix(fixedUnixSeconds, 0)
+}
+
+const (
+	piQuotaScenarioFiveHourRemaining = 75.0
+	piQuotaScenarioWeeklyRemaining   = 20.0
+	piQuotaScenarioFiveHourResetIn   = 2 * time.Hour
+	piQuotaScenarioWeeklyResetIn     = 3 * 24 * time.Hour
+	piQuotaScenarioStaleAge          = 6 * time.Minute
+	piQuotaScenarioContext           = 42
+	piQuotaPartialState              = "partial"
+)
+
+// buildPiQuotaScenario constructs one of the sixteen deterministic Pi quota
+// fixtures. All values flow through JSON marshal, Generate, CachedData, and the
+// real renderer; no fixture bypasses namespace or freshness validation.
+func buildPiQuotaScenario(width int, stateName string) Scenario {
+	now := scenarioFixedNow()
+	fetchedAt := now.UnixMilli()
+	stale := false
+	fiveHourRemaining := piQuotaScenarioFiveHourRemaining
+	fiveHourReset := now.Add(piQuotaScenarioFiveHourResetIn).UnixMilli()
+	weeklyRemaining := piQuotaScenarioWeeklyRemaining
+	weeklyReset := now.Add(piQuotaScenarioWeeklyResetIn).UnixMilli()
+
+	quota := &StewardQuotaInput{
+		Provider:  requiredPiProvider,
+		BaseURL:   requiredPiBaseURL,
+		FetchedAt: &fetchedAt,
+		Stale:     &stale,
+		Windows: StewardQuotaWindowsInput{
+			FiveHour: &StewardQuotaWindowInput{
+				RemainingPercent: &fiveHourRemaining,
+				ResetAt:          &fiveHourReset,
+			},
+			Weekly: &StewardQuotaWindowInput{
+				RemainingPercent: &weeklyRemaining,
+				ResetAt:          &weeklyReset,
+			},
+		},
+	}
+
+	switch stateName {
+	case piQuotaStaleLabel:
+		fetchedAt = now.Add(-piQuotaScenarioStaleAge).UnixMilli()
+		stale = true
+	case unknownLabel:
+		fetchedAt = 0
+		quota.Windows.FiveHour = nil
+		quota.Windows.Weekly = nil
+	case piQuotaPartialState:
+		quota.Windows.Weekly = nil
+	case piQuotaFreshLabel:
+	}
+
+	input := Input{Harness: requiredPiHarness, StewardQuota: quota}
+	input.Model.Provider = requiredPiProvider
+	input.Model.DisplayName = scenarioModelDisplay
+	input.ContextWindow.UsedPercentage = piQuotaScenarioContext
+	input.Workspace.ProjectDir = scenarioProjectDir
+
+	deps := &Dependencies{
+		FileReader:    newFixedFileReader(),
+		CommandRunner: newFixedCommandRunner(),
+		EnvReader:     newFixedEnvReader(map[string]string{scenarioHomeEnvKey: scenarioHome}),
+		TerminalWidth: fixedTerminalWidth(width),
+		CacheDir:      "",
+		CacheDuration: 0,
+		IconIndex:     func(int) int { return 0 },
+		Now:           scenarioFixedNow,
+	}
+
+	name := fmt.Sprintf("quota_%s_%d", stateName, width)
+	return Scenario{Name: name, Width: width, Input: input, Deps: deps}
 }
 
 // Fixture values for buildRLScenario's rate-limit/cost scenarios.
@@ -225,7 +314,7 @@ func buildRLScenario(width int, rlState string) Scenario {
 	}
 
 	fr := newFixedFileReader()
-	env := newFixedEnvReader(map[string]string{"HOME": scenarioHome})
+	env := newFixedEnvReader(map[string]string{scenarioHomeEnvKey: scenarioHome})
 
 	deps := &Dependencies{
 		FileReader:    fr,
@@ -280,7 +369,7 @@ func buildScenario(width int, ctxPercent float64, gitState, envState string) Sce
 	}
 
 	fr := newFixedFileReader()
-	env := newFixedEnvReader(map[string]string{"HOME": scenarioHome})
+	env := newFixedEnvReader(map[string]string{scenarioHomeEnvKey: scenarioHome})
 	cr := newFixedCommandRunner()
 
 	applyGitState(fr, cr, gitState)

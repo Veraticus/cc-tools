@@ -13,6 +13,17 @@ import (
 
 // Render renders the statusline with lipgloss styling and guaranteed fixed width.
 func (s *Statusline) Render(data *CachedData) string {
+	// Quota freshness is a render-time property: computeData may perform cost
+	// lookups after collecting the raw sample, and callers may render the same
+	// CachedData again after a freshness boundary. Keep the validated state on a
+	// local copy so every layout path shares one current snapshot without
+	// mutating caller-owned data.
+	renderData := *data
+	renderData.PiQuota = normalizePiQuota(
+		renderData.Harness, renderData.ModelProvider, renderData.StewardQuota, s.now(),
+	)
+	data = &renderData
+
 	termWidth := s.getTermWidth(data)
 	s.colors = CatppuccinMocha{}
 
@@ -60,17 +71,23 @@ func (s *Statusline) Render(data *CachedData) string {
 	}
 
 	// Build components with proper sizing that accounts for spacers.
-	// When the extra-usage alarm is active, its chip width is carved
-	// out of the budget offered to the left/right sections so their
-	// proportional truncation absorbs the squeeze — the alarm is an
-	// emergency signal and must never be the piece that loses its
-	// space to a long directory or a pile of env chips.
+	// Protected middle signals carve their width out of the budget offered to
+	// the left/right sections so proportional truncation absorbs the squeeze.
+	// Alarms reserve their full width; scoped Pi quota reserves its compact
+	// width so neither loses space to a long directory or a pile of env chips.
 	sectionBudget := contentWidth
-	if middleChipKind(data) == chipAlarm {
-		alarmWidth := runewidth.StringWidth(stripAnsi(s.buildMiddleChip(chipAlarm, data)))
+	switch kind := middleChipKind(data); kind {
+	case chipAlarm:
+		alarmWidth := runewidth.StringWidth(stripAnsi(s.buildMiddleChip(kind, data)))
 		if sectionBudget > alarmWidth {
 			sectionBudget -= alarmWidth
 		}
+	case chipPiQuota:
+		quotaWidth := runewidth.StringWidth(stripAnsi(s.buildPiQuotaChip(data.PiQuota, s.now(), true)))
+		if sectionBudget > quotaWidth {
+			sectionBudget -= quotaWidth
+		}
+	case chipNone, chipRateLimit, chipCost:
 	}
 	leftSection := s.buildLeftSection(dirPath, modelDisplay, modelIcon, effort, sectionBudget)
 	rightSection := s.buildRightSection(data, sectionBudget)
@@ -504,8 +521,9 @@ func (s *Statusline) buildMiddleSection(data *CachedData, width int) string {
 }
 
 // buildSqueezedMiddleSection handles a chip that remains too wide after
-// assembleMiddleCluster has dropped context. Alarms remain visible; a legacy
-// two-part cost may degrade to its session figure; every other chip blanks.
+// assembleMiddleCluster has dropped context. Alarms and scoped Pi quota remain
+// visible; a legacy two-part cost may degrade to its session figure; every
+// other chip blanks.
 func (s *Statusline) buildSqueezedMiddleSection(
 	data *CachedData,
 	contextEl string,
@@ -517,6 +535,9 @@ func (s *Statusline) buildSqueezedMiddleSection(
 			return s.buildSqueezedPatchbayAlarmChip(width)
 		}
 		return s.buildSqueezedAlarmChip(data.Cost, width)
+	}
+	if kind == chipPiQuota {
+		return s.buildSqueezedPiQuotaChip(data.PiQuota, s.now(), width)
 	}
 	if kind != chipCost || !data.CostFromTranscript {
 		return strings.Repeat(" ", width)
@@ -565,7 +586,7 @@ func assembleMiddleCluster(contextEl, chip string, width int) (string, int) {
 
 // chipKind enumerates which single chip (if any) accompanies the
 // context element in the wide-mode middle cluster. Exactly one of
-// {alarm, rate-limit, cost} renders alongside the context element —
+// {alarm, rate-limit, cost, Pi quota} renders alongside the context element —
 // never more than one.
 type chipKind int
 
@@ -574,14 +595,20 @@ const (
 	chipAlarm
 	chipRateLimit
 	chipCost
+	chipPiQuota
 )
 
 // middleChipKind decides which chip (if any) renders in the wide middle
-// cluster. A Patchbay error outranks every rate-limit state so broken accounting
-// cannot disappear. Otherwise an active 5h alarm wins, then the rate-limit
-// chip. Patchbay's available day total hides when both its known and unknown
-// counts are zero; an unconfigured Patchbay preserves the original legacy path.
+// cluster. Exact scoped Pi quota owns the slot before optional accounting and
+// decoration. Outside that scope, a Patchbay error outranks every rate-limit
+// state so broken accounting cannot disappear. Otherwise an active 5h alarm
+// wins, then the rate-limit chip. Patchbay's available day total hides when both
+// its known and unknown counts are zero; an unconfigured Patchbay preserves the
+// original legacy path.
 func middleChipKind(data *CachedData) chipKind {
+	if data.PiQuota != nil {
+		return chipPiQuota
+	}
 	if data.Patchbay.Status == patchbayError {
 		return chipCost
 	}
@@ -628,6 +655,8 @@ func (s *Statusline) buildMiddleChip(kind chipKind, data *CachedData) string {
 		return s.buildRateLimitChip(data.RateLimits, s.now())
 	case chipCost:
 		return s.buildCostChip(data)
+	case chipPiQuota:
+		return s.buildPiQuotaChip(data.PiQuota, s.now(), false)
 	case chipNone:
 		return ""
 	default:

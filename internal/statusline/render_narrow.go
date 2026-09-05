@@ -35,6 +35,7 @@ const (
 	kindContext = "context"
 	kindAlarm   = "alarm"
 	kindCost    = "cost"
+	kindPiQuota = "pi-quota"
 	kindBranch  = "branch"
 	kindEnv     = "env"
 )
@@ -72,9 +73,10 @@ func stripNarrowControl(s string) string {
 // pass adds the leading/trailing space padding plus chevrons /
 // curves. No ANSI escapes embedded.
 //
-// Kind is one of kindDir/kindContext/kindAlarm/kindCost/kindBranch/kindEnv —
-// used by the truncation pass to know which chips drop first under width
-// pressure and which never drop.
+// Kind is one of
+// kindDir/kindContext/kindAlarm/kindCost/kindPiQuota/kindBranch/kindEnv — used
+// by the truncation pass to know which chips drop first under width pressure
+// and which never drop.
 type narrowChip struct {
 	Color string
 	Body  string
@@ -82,12 +84,13 @@ type narrowChip struct {
 }
 
 // narrowChipCap is the maximum chip count for the narrow chain
-// (dir + context + alarm + branch + env). Used to pre-size the chip
+// (dir + context + one middle chip + branch + env). Used to pre-size the chip
 // slice.
 const narrowChipCap = 5
 
 // gatherNarrowChips returns the chip list for narrow mode in display
-// order: dir, context, optional alarm-or-cost, optional branch, optional env.
+// order: dir, context, optional protected quota/alarm or cost, optional branch,
+// optional env.
 // The context chip is always present (UsedPercentage is always
 // available, even if 0). The alert chip (extra-usage alarm or Patchbay/legacy
 // cost state) is included immediately after context when middleChipKind
@@ -137,8 +140,14 @@ func gatherNarrowChips(deps *Dependencies, data *CachedData) []narrowChip {
 				Kind:  kindCost,
 			})
 		}
+	case chipPiQuota:
+		chips = append(chips, narrowChip{
+			Color: piQuotaColor(data.PiQuota),
+			Body:  buildPiQuotaCompactBody(data.PiQuota, piQuotaRenderNow(deps)),
+			Kind:  kindPiQuota,
+		})
 	case chipNone, chipRateLimit:
-		// Narrow mode has no rate-limit-only chip.
+		// Narrow mode has no Claude rate-limit-only chip.
 	}
 
 	// Narrow mode's branch chip stays branch-only — no dirty/ahead/behind
@@ -406,11 +415,10 @@ func narrowChainWidth(chips []narrowChip) int {
 // (center-aligned content + colored padding) to absorb it. When chips
 // overflow, they're dropped in priority order:
 // env → branch → truncate-dir-to-leaf → drop-context → drop-cost → truncate-dir
-// with ellipsis. The alarm chip (kindAlarm) is deliberately absent
-// from this drop order — dropOneNarrowChip never removes it, so it
-// survives even the drop-context step and only ever loses width
-// pressure to the dir chip's own truncation. It is an emergency
-// signal (epic requirement) and must never be muted or downgraded.
+// with ellipsis. Alarm and Pi quota chips are deliberately absent from this
+// drop order. They survive the drop-context step and only lose width pressure
+// to directory truncation; a quota that cannot fit intact becomes an honest
+// summary marker rather than a clipped metric.
 //
 // Pure function: returns a new slice; input is not mutated.
 func fitNarrowChain(chips []narrowChip, budget int) []narrowChip {
@@ -458,9 +466,9 @@ func fitNarrowChain(chips []narrowChip, budget int) []narrowChip {
 
 // fitNarrowLastResort computes the final chain once dropOneNarrowChip can no
 // longer shed a chip — the terminal step of fitNarrowChain's fit loop. The
-// survivors are dir plus, possibly, the never-dropped alarm chip
-// (dropOneNarrowChip never removes kindAlarm). It computes the dir body's
-// budget from the ACTUAL surviving chain — not from an "dir is alone"
+// survivors are dir plus, possibly, a never-dropped alarm or Pi quota chip. It
+// computes the dir body's budget from the ACTUAL surviving chain — not from a
+// "dir is alone"
 // assumption — by subtracting the other survivors' body widths and the real
 // chain overhead for this chip count. Always returns; there is no further
 // step after this one.
@@ -474,29 +482,35 @@ func fitNarrowLastResort(work []narrowChip, budget int) []narrowChip {
 	target := budget - overhead - othersWidth
 
 	if len(others) > 0 && target < 1 {
-		// Dir can't fit even at 1 cell alongside the surviving
-		// alarm chip. Drop dir and keep the survivors — the
-		// alarm is the emergency signal and must never drop.
+		// Dir can't fit even at 1 cell alongside the protected middle
+		// chip. Drop dir and keep the survivor — it must never disappear
+		// under width pressure.
 		work = others
 		overhead = narrowChainOverhead(len(work))
 		remaining := budget - overhead
 		for i, c := range work {
-			if c.Kind != kindAlarm {
+			if c.Kind != kindAlarm && c.Kind != kindPiQuota {
 				continue
 			}
 			width := runewidth.StringWidth(c.Body)
 			body := c.Body
 			switch {
+			case width > remaining && c.Kind == kindPiQuota:
+				// A clipped quota percentage can look authoritative. Use
+				// the honest quota summary marker at pathological widths.
+				body = fitPiQuotaBody(body, max(1, remaining))
 			case width > remaining:
 				// Still over budget with just the survivors —
 				// truncate the alarm body rather than return an
 				// overflowing chain.
 				body = truncateText(body, max(1, remaining))
-			case width < remaining:
+			}
+			bodyWidth := runewidth.StringWidth(body)
+			if bodyWidth < remaining {
 				// Under budget — pad with trailing spaces so the
 				// chain still lands on exactly `budget`, mirroring
 				// the main fit loop's slack-padding branch.
-				body += strings.Repeat(" ", remaining-width)
+				body += strings.Repeat(" ", remaining-bodyWidth)
 			}
 			work[i] = narrowChip{
 				Color: c.Color,
@@ -519,8 +533,8 @@ func fitNarrowLastResort(work []narrowChip, budget int) []narrowChip {
 
 // dropOneNarrowChip drops a single chip per priority: env → branch →
 // truncate-dir-to-leaf → drop-context → drop-cost. Returns
-// (modifiedSlice, true) when a drop/truncate happened, or (slice, false)
-// when only dir remains.
+// (modifiedSlice, true) when a drop/truncate happened, or (slice, false) when
+// only dir and any protected alarm/quota chip remain.
 func dropOneNarrowChip(chips []narrowChip) ([]narrowChip, bool) {
 	if idx := indexOfKind(chips, kindEnv); idx >= 0 {
 		return removeAt(chips, idx), true
