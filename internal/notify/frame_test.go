@@ -10,6 +10,7 @@ import (
 func TestFrame_EncodeDecode_RoundTrip(t *testing.T) {
 	f := Frame{
 		HookInput: HookInput{
+			SchemaVersion: 1, Harness: harnessClaude, CompletionID: "assistant-uuid-1",
 			SessionID: "sess-1", TranscriptPath: "/tmp/t.jsonl", CWD: "/home/user/project",
 			HookEventName: "Stop", LastAssistantMessage: "All done here.",
 		},

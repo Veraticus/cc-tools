@@ -116,6 +116,146 @@ func TestDispatchNotify_ReachableSocket_WritesFrameAndSkipsFallback(t *testing.T
 	}
 }
 
+func TestRunNotifyCommandHarnessFlagReachesNormalizedCodexFrame(t *testing.T) {
+	runtimeDir := t.TempDir()
+	sockPath := filepath.Join(runtimeDir, "cc-tools", "notifyd.sock")
+	if err := os.MkdirAll(filepath.Dir(sockPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	frames := make(chan notify.Frame, 1)
+	go func() {
+		conn, acceptErr := ln.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		frame, decodeErr := notify.DecodeFrame(conn)
+		if decodeErr == nil {
+			frames <- frame
+		}
+	}()
+
+	payload := `{"session_id":"thread-flag","turn_id":"turn-flag",` +
+		`"hook_event_name":"Stop","cwd":"/tmp"}`
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	t.Setenv("CC_TOOLS_NTFY_URL", "http://unused.invalid/topic")
+	t.Setenv("CC_TOOLS_NTFY_DISABLED", "false")
+	var stdout, stderr bytes.Buffer
+	exitCode := runNotifyCommandWithIO(
+		[]string{"--harness=codex", "--state-base=" + t.TempDir()},
+		strings.NewReader(payload),
+		&stdout,
+		&stderr,
+	)
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
+	}
+	if stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("stdout = %q, stderr = %q", stdout.String(), stderr.String())
+	}
+
+	select {
+	case frame := <-frames:
+		in := frame.HookInput
+		if in.Harness != "codex" || in.HookEventName != "TurnComplete" ||
+			in.CompletionID != "turn-flag" || in.SessionID != "thread-flag" {
+			t.Fatalf("frame = %+v", frame)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runNotifyCommand did not send a frame")
+	}
+}
+
+func TestDispatchNotify_ExplicitCodexStopWritesNormalizedFrame(t *testing.T) {
+	sockPath := filepath.Join(t.TempDir(), "notifyd.sock")
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	frames := make(chan notify.Frame, 1)
+	go func() {
+		conn, acceptErr := ln.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		frame, decodeErr := notify.DecodeFrame(conn)
+		if decodeErr == nil {
+			frames <- frame
+		}
+	}()
+	cfg := testNotifyClientConfig(t, sockPath)
+	cfg.DryRun = false
+	cfg.Harness = "codex"
+	var stdout, stderr bytes.Buffer
+	dispatchNotify(
+		context.Background(),
+		cfg,
+		strings.NewReader(
+			`{"session_id":"thread-1","turn_id":"turn-1","hook_event_name":"Stop","cwd":"/tmp"}`,
+		),
+		&stdout,
+		&stderr,
+	)
+	select {
+	case frame := <-frames:
+		if frame.HookInput.Harness != "codex" || frame.HookInput.HookEventName != "TurnComplete" ||
+			frame.HookInput.CompletionID != "turn-1" {
+			t.Fatalf("frame = %+v", frame)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not receive normalized Codex frame")
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestDispatchNotify_CanonicalHarnessMismatchDoesNotCallDaemon(t *testing.T) {
+	sockPath := filepath.Join(t.TempDir(), "notifyd.sock")
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	called := make(chan struct{}, 1)
+	go func() {
+		conn, acceptErr := ln.Accept()
+		if acceptErr == nil {
+			called <- struct{}{}
+			_ = conn.Close()
+		}
+	}()
+	cfg := testNotifyClientConfig(t, sockPath)
+	cfg.DryRun = false
+	cfg.Harness = "codex"
+	var stdout, stderr bytes.Buffer
+	dispatchNotify(
+		context.Background(),
+		cfg,
+		strings.NewReader(
+			`{"schema_version":1,"harness":"pi","session_id":"p","completion_id":"c","hook_event_name":"TurnComplete"}`,
+		),
+		&stdout,
+		&stderr,
+	)
+	select {
+	case <-called:
+		t.Fatal("mismatched canonical payload called daemon")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if !strings.Contains(stderr.String(), "harness mismatch") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
 func TestDispatchNotify_UnreachableSocket_OutcomeSend_DeterministicFallback(t *testing.T) {
 	sockPath := filepath.Join(t.TempDir(), "no-daemon-here.sock")
 	cfg := testNotifyClientConfig(t, sockPath)

@@ -52,6 +52,36 @@ func TestDecisionLog_AppendRoundTripsParse(t *testing.T) {
 	}
 }
 
+func TestDecisionLogCompletionIdentityJSON(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "decisions.jsonl")
+	log := DecisionLog{Path: path}
+	if err := log.Append(
+		DecisionRecord{Harness: harnessPi, CompletionID: "completion-1"},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Append(DecisionRecord{Harness: harnessClaude}); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(mustReadLog(t, path))), "\n")
+	if !strings.Contains(lines[0], `"harness":"pi"`) ||
+		!strings.Contains(lines[0], `"completion_id":"completion-1"`) {
+		t.Fatalf("identified record = %s", lines[0])
+	}
+	if strings.Contains(lines[1], "completion_id") {
+		t.Fatalf("unidentified record leaked completion id: %s", lines[1])
+	}
+}
+
+func mustReadLog(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
 func TestDecisionLog_RotatesBeforeAppendPastFiveMB(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "decisions.jsonl")
 	l := DecisionLog{Path: path}

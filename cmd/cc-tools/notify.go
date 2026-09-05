@@ -60,12 +60,21 @@ const clientDialTimeout = 250 * time.Millisecond
 const disabledJudgeBin = "/nonexistent/cc-tools-notify-judge-disabled"
 
 func runNotifyCommand() {
+	if exitCode := runNotifyCommandWithIO(os.Args[2:], os.Stdin, os.Stdout, os.Stderr); exitCode != 0 {
+		os.Exit(exitCode)
+	}
+}
+
+// runNotifyCommandWithIO parses notify's command-line flags and runs the hook
+// client against explicit streams, returning the process exit code.
+func runNotifyCommandWithIO(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("notify", flag.ContinueOnError)
-	flags.SetOutput(os.Stderr)
+	flags.SetOutput(stderr)
 	dryRun := flags.Bool("dry-run", false, "print what would be sent instead of sending it")
+	harness := flags.String("harness", "", "explicit hook harness (claude-code, codex, or pi)")
 	stateBase := flags.String("state-base", defaultNotifyStateBase(), "root directory for per-session notify state")
-	if err := flags.Parse(os.Args[2:]); err != nil {
-		os.Exit(exitUsageError)
+	if err := flags.Parse(args); err != nil {
+		return exitUsageError
 	}
 
 	log := notify.DecisionLog{Path: filepath.Join(*stateBase, decisionLogName)}
@@ -73,8 +82,8 @@ func runNotifyCommand() {
 	sender.Host = notify.ShortHostname()
 
 	if !senderOK && !*dryRun {
-		_, _ = fmt.Fprintln(os.Stderr, "cc-tools notify: no ntfy URL configured, skipping")
-		os.Exit(0)
+		_, _ = fmt.Fprintln(stderr, "cc-tools notify: no ntfy URL configured, skipping")
+		return 0
 	}
 
 	selfBin, err := os.Executable()
@@ -84,25 +93,27 @@ func runNotifyCommand() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), notifyHookTimeout)
 	defer cancel()
-	payload := io.Reader(os.Stdin)
+	payload := stdin
 	if flags.NArg() == 1 {
 		// Codex passes its notification JSON as one argv value. Claude writes
 		// hook JSON to stdin. Normalize both before they reach dispatchNotify.
 		payload = strings.NewReader(flags.Arg(0))
 	} else if flags.NArg() > 1 {
-		_, _ = fmt.Fprintln(os.Stderr, "cc-tools notify: expected at most one JSON payload argument")
-		return
+		_, _ = fmt.Fprintln(stderr, "cc-tools notify: expected at most one JSON payload argument")
+		return 0
 	}
 
 	dispatchNotify(ctx, notifyClientConfig{
 		DryRun:      *dryRun,
+		Harness:     *harness,
 		Sender:      sender,
 		Log:         log,
 		Environ:     os.Environ(),
 		SelfBin:     selfBin,
 		SockPath:    notify.SocketPath(),
 		DialTimeout: clientDialTimeout,
-	}, payload, os.Stdout, os.Stderr)
+	}, payload, stdout, stderr)
+	return 0
 }
 
 // notifyClientConfig groups the dependencies dispatchNotify needs, resolved
@@ -112,6 +123,7 @@ func runNotifyCommand() {
 // globals.
 type notifyClientConfig struct {
 	DryRun      bool
+	Harness     string
 	Sender      notify.Sender
 	Log         notify.DecisionLog
 	Environ     []string
@@ -128,7 +140,7 @@ type notifyClientConfig struct {
 // Pipeline itself takes — the hook's own exit-0 contract is the caller's
 // responsibility (runNotifyCommand never exits nonzero from this path).
 func dispatchNotify(ctx context.Context, cfg notifyClientConfig, stdin io.Reader, stdout, stderr io.Writer) {
-	in, err := notify.ParseHookInput(stdin)
+	in, err := notify.ParseHookInputForHarness(stdin, cfg.Harness)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "cc-tools notify: %v\n", err)
 		return

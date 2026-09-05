@@ -346,6 +346,10 @@ type ScanResult struct {
 	// reliability by themselves.
 	LastAssistantUUID      string
 	LastAssistantMessageID string
+	// AssistantIdentityReliable reports whether the final decoded assistant
+	// record supplied at least one valid source identity without a later
+	// malformed record or invalidly encoded line.
+	AssistantIdentityReliable bool
 
 	// FirstTimestamp and LastTimestamp are the first and last top-level
 	// "timestamp" values that parsed successfully, across every record type
@@ -379,11 +383,12 @@ type scanState struct {
 	teammates     map[string]*TeammateActivity
 	teammateOrder []string
 
-	lastUserMessage        string
-	lastSubstantiveUser    string
-	lastAssistantText      string
-	lastAssistantUUID      string
-	lastAssistantMessageID string
+	lastUserMessage           string
+	lastSubstantiveUser       string
+	lastAssistantText         string
+	lastAssistantUUID         string
+	lastAssistantMessageID    string
+	assistantIdentityReliable bool
 
 	firstTimestamp time.Time
 	lastTimestamp  time.Time
@@ -429,25 +434,31 @@ func ScanTranscript(r io.Reader) (ScanResult, error) {
 // result assembles the accumulated scan state into a ScanResult.
 func (s *scanState) result() ScanResult {
 	return ScanResult{
-		Goal:                   s.goal,
-		LiveTasks:              s.tasks(),
-		Teammates:              s.teammateActivities(),
-		LastUserMessage:        s.lastUserMessage,
-		LastSubstantiveUser:    s.lastSubstantiveUser,
-		LastAssistantText:      s.lastAssistantText,
-		LastAssistantUUID:      s.lastAssistantUUID,
-		LastAssistantMessageID: s.lastAssistantMessageID,
-		FirstTimestamp:         s.firstTimestamp,
-		LastTimestamp:          s.lastTimestamp,
-		UserTurns:              s.userTurns,
-		BytesScanned:           s.bytesScanned,
+		Goal:                      s.goal,
+		LiveTasks:                 s.tasks(),
+		Teammates:                 s.teammateActivities(),
+		LastUserMessage:           s.lastUserMessage,
+		LastSubstantiveUser:       s.lastSubstantiveUser,
+		LastAssistantText:         s.lastAssistantText,
+		LastAssistantUUID:         s.lastAssistantUUID,
+		LastAssistantMessageID:    s.lastAssistantMessageID,
+		AssistantIdentityReliable: s.assistantIdentityReliable,
+		FirstTimestamp:            s.firstTimestamp,
+		LastTimestamp:             s.lastTimestamp,
+		UserTurns:                 s.userTurns,
+		BytesScanned:              s.bytesScanned,
 	}
 }
 
 func (s *scanState) processLine(line []byte) {
+	rawUTF8Valid := utf8.Valid(line)
 	var rec transcriptRecord
 	if err := json.Unmarshal(line, &rec); err != nil {
+		s.assistantIdentityReliable = false
 		return
+	}
+	if !rawUTF8Valid {
+		s.assistantIdentityReliable = false
 	}
 
 	s.recordTimestamp(rec.Timestamp)
@@ -464,8 +475,15 @@ func (s *scanState) processLine(line []byte) {
 	}
 	switch rec.Message.Role {
 	case "assistant":
-		s.lastAssistantUUID = optionalString(rec.UUID)
-		s.lastAssistantMessageID = optionalString(rec.Message.ID)
+		s.lastAssistantUUID = ""
+		s.lastAssistantMessageID = ""
+		s.assistantIdentityReliable = false
+		if rawUTF8Valid {
+			s.lastAssistantUUID = optionalString(rec.UUID)
+			s.lastAssistantMessageID = optionalString(rec.Message.ID)
+			s.assistantIdentityReliable = validCompletionID(s.lastAssistantUUID) ||
+				validCompletionID(s.lastAssistantMessageID)
+		}
 		s.processAssistantMessage(rec.Message.Content)
 	case "user":
 		s.processUserMessage(rec.Message.Content, rec.ToolUseResult, rec.Timestamp)

@@ -132,13 +132,13 @@ func Decide(in HookInput, scan ScanResult, env Env) Decision {
 	}
 
 	switch in.HookEventName {
-	case "SessionEnd":
+	case eventSessionEnd:
 		// Watchdog reaping on SessionEnd is Pipeline.Run's own concern (it
 		// intercepts SessionEnd and calls Watchdog.Reap before Decide is ever
 		// reached) — this case exists only so Decide, called directly, still
 		// resolves SessionEnd to a sensible silent decision.
 		return Decision{Outcome: OutcomeSilent, Reason: "session end"}
-	case "Stop":
+	case eventStop:
 		return decideStop(scan)
 	case eventTurnComplete:
 		return Decision{

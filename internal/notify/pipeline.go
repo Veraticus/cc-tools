@@ -157,6 +157,7 @@ func (p Pipeline) dedupeState() DedupeState {
 // is a documented fallback or a swallowed best-effort operation, never a
 // reason to fail the hook itself.
 func (p Pipeline) Run(ctx context.Context, in HookInput) error {
+	in.Harness = defaultHarness(in.Harness, in.HookEventName)
 	now := time.Now()
 	project := filepath.Base(in.CWD)
 	host := p.Host
@@ -173,7 +174,7 @@ func (p Pipeline) Run(ctx context.Context, in HookInput) error {
 		locus = host
 	}
 
-	if in.HookEventName == "SessionEnd" {
+	if in.HookEventName == eventSessionEnd {
 		if p.Watchdog != nil {
 			p.Watchdog.Reap(in.SessionID)
 		}
@@ -191,6 +192,7 @@ func (p Pipeline) Run(ctx context.Context, in HookInput) error {
 	if scanErr != nil {
 		reasonSuffix = fmt.Sprintf(" (transcript error: %s)", scanErr)
 	}
+	in.CompletionID = claudeCompletionID(in, res, scanErr)
 
 	// SinceLastNotifySame costs a state-file read plus a sha256 of the
 	// message, and only the blocked-tier Notification gates ever read it —
@@ -220,6 +222,32 @@ func (p Pipeline) Run(ctx context.Context, in HookInput) error {
 		p.handleJudge(ctx, in, res, env, now, project, locus, host, d, reasonSuffix)
 	}
 	return nil
+}
+
+func defaultHarness(harness, event string) string {
+	if harness != "" {
+		return harness
+	}
+	if event == eventTurnComplete {
+		return harnessCodex
+	}
+	return harnessClaude
+}
+
+func claudeCompletionID(in HookInput, res ScanResult, scanErr error) string {
+	if in.Harness != harnessClaude || in.HookEventName != eventStop {
+		return in.CompletionID
+	}
+	if scanErr != nil || !res.AssistantIdentityReliable {
+		return ""
+	}
+	if validCompletionID(res.LastAssistantUUID) {
+		return res.LastAssistantUUID
+	}
+	if validCompletionID(res.LastAssistantMessageID) {
+		return res.LastAssistantMessageID
+	}
+	return ""
 }
 
 func (p Pipeline) handleCodexTurnComplete(
@@ -770,13 +798,22 @@ func (p Pipeline) arm(in HookInput, res ScanResult, now time.Time, project, host
 	})
 }
 
-// logRecord appends rec to the decision log with Time/SessionID/Event
+// logRecord appends rec to the decision log with ingress identity and Time/SessionID/Event
 // filled from now/in. Append errors are swallowed: logging must never be
 // able to fail the hook.
 func (p Pipeline) logRecord(in HookInput, now time.Time, rec DecisionRecord) {
 	rec.Time = now
 	rec.SessionID = in.SessionID
 	rec.Event = in.HookEventName
+	rec.Harness = in.Harness
+	if rec.Harness == "" {
+		if in.HookEventName == eventTurnComplete {
+			rec.Harness = harnessCodex
+		} else {
+			rec.Harness = harnessClaude
+		}
+	}
+	rec.CompletionID = in.CompletionID
 	_ = p.Log.Append(rec)
 }
 

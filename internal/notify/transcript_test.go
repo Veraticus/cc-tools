@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -502,6 +503,7 @@ func TestScanTranscriptAssistantIdentity(t *testing.T) {
 		wantUserTurns int
 		wantLiveTasks int
 		wantLastTime  string
+		wantReliable  bool
 	}{
 		{name: "empty input"},
 		{
@@ -511,6 +513,7 @@ func TestScanTranscriptAssistantIdentity(t *testing.T) {
 			wantMessageID: "msg-1",
 			wantText:      "done",
 			wantLastTime:  "2026-07-05T01:00:00Z",
+			wantReliable:  true,
 		},
 		{
 			name: "identical text latest identity wins",
@@ -519,6 +522,7 @@ func TestScanTranscriptAssistantIdentity(t *testing.T) {
 			wantUUID:      "uuid-2",
 			wantMessageID: "msg-2",
 			wantText:      "same",
+			wantReliable:  true,
 		},
 		{
 			name: "non-assistant rows do not replace identity",
@@ -531,6 +535,7 @@ func TestScanTranscriptAssistantIdentity(t *testing.T) {
 			wantMessageID: "msg-1",
 			wantText:      "kept",
 			wantUserTurns: 1,
+			wantReliable:  true,
 		},
 		{
 			name: "missing uuid independently clears",
@@ -538,6 +543,7 @@ func TestScanTranscriptAssistantIdentity(t *testing.T) {
 				`{"type":"assistant","message":{"id":"new-msg","role":"assistant","content":[{"type":"text","text":"new"}]}}` + "\n",
 			wantMessageID: "new-msg",
 			wantText:      "new",
+			wantReliable:  true,
 		},
 		{
 			name: "empty uuid independently clears",
@@ -545,25 +551,34 @@ func TestScanTranscriptAssistantIdentity(t *testing.T) {
 				`{"type":"assistant","uuid":"","message":{"id":"new-msg","role":"assistant","content":[{"type":"text","text":"new"}]}}` + "\n",
 			wantMessageID: "new-msg",
 			wantText:      "new",
+			wantReliable:  true,
 		},
 		{
 			name: "empty message id independently clears",
 			transcript: `{"type":"assistant","uuid":"old-uuid","message":{"id":"old-msg","role":"assistant","content":[{"type":"text","text":"old"}]}}` + "\n" +
 				`{"type":"assistant","uuid":"new-uuid","message":{"id":"","role":"assistant","content":[{"type":"text","text":"new"}]}}` + "\n",
-			wantUUID: "new-uuid",
-			wantText: "new",
+			wantUUID:     "new-uuid",
+			wantText:     "new",
+			wantReliable: true,
 		},
 		{
 			name: "missing message id independently clears",
 			transcript: `{"type":"assistant","uuid":"old-uuid","message":{"id":"old-msg","role":"assistant","content":[{"type":"text","text":"old"}]}}` + "\n" +
 				`{"type":"assistant","uuid":"new-uuid","message":{"role":"assistant","content":[{"type":"text","text":"new"}]}}` + "\n",
-			wantUUID: "new-uuid",
-			wantText: "new",
+			wantUUID:     "new-uuid",
+			wantText:     "new",
+			wantReliable: true,
 		},
 		{
 			name: "both missing clear after known identities",
 			transcript: `{"type":"assistant","uuid":"old-uuid","message":{"id":"old-msg","role":"assistant","content":[{"type":"text","text":"old"}]}}` + "\n" +
 				`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"new"}]}}` + "\n",
+			wantText: "new",
+		},
+		{
+			name: "both empty clear after known identities",
+			transcript: `{"type":"assistant","uuid":"old-uuid","message":{"id":"old-msg","role":"assistant","content":[{"type":"text","text":"old"}]}}` + "\n" +
+				`{"type":"assistant","uuid":"","message":{"id":"","role":"assistant","content":[{"type":"text","text":"new"}]}}` + "\n",
 			wantText: "new",
 		},
 		{
@@ -573,6 +588,7 @@ func TestScanTranscriptAssistantIdentity(t *testing.T) {
 			wantUUID:      "tool-uuid",
 			wantMessageID: "tool-msg",
 			wantText:      "retained",
+			wantReliable:  true,
 		},
 		{
 			name: "empty-content assistant replaces identity retaining text",
@@ -581,6 +597,7 @@ func TestScanTranscriptAssistantIdentity(t *testing.T) {
 			wantUUID:      "empty-uuid",
 			wantMessageID: "empty-msg",
 			wantText:      "retained",
+			wantReliable:  true,
 		},
 		{
 			name: "wrong typed identities clear while useful fields survive",
@@ -603,6 +620,7 @@ func TestScanTranscriptAssistantIdentity(t *testing.T) {
 			wantUUID:      "valid-uuid",
 			wantMessageID: "valid-msg",
 			wantText:      "valid",
+			wantReliable:  true,
 		},
 	}
 
@@ -630,6 +648,13 @@ func TestScanTranscriptAssistantIdentity(t *testing.T) {
 			}
 			if len(res.LiveTasks) != tt.wantLiveTasks {
 				t.Errorf("len(LiveTasks) = %d, want %d", len(res.LiveTasks), tt.wantLiveTasks)
+			}
+			if res.AssistantIdentityReliable != tt.wantReliable {
+				t.Errorf(
+					"AssistantIdentityReliable = %t, want %t",
+					res.AssistantIdentityReliable,
+					tt.wantReliable,
+				)
 			}
 			if tt.wantLastTime != "" &&
 				!res.LastTimestamp.Equal(parseTestTimestamp(t, tt.wantLastTime)) {
@@ -891,5 +916,91 @@ func TestTruncateHeadWords(t *testing.T) {
 				t.Errorf("truncateHeadWords(%q, %d) = %q, invalid UTF-8", tt.s, tt.maxLen, got)
 			}
 		})
+	}
+}
+
+func TestScanTranscriptAssistantIdentityRejectsRawInvalidUTF8(t *testing.T) {
+	raw := []byte(
+		`{"type":"assistant","uuid":"old-uuid","message":{"id":"old-msg","role":"assistant",` +
+			`"content":[{"type":"text","text":"old"}]}}` + "\n" +
+			`{"type":"assistant","uuid":"`,
+	)
+	raw = append(raw, 0xff)
+	raw = append(
+		raw,
+		[]byte(
+			`","message":{"id":"msg-new","role":"assistant","content":[`+
+				`{"type":"text","text":"kept"},`+
+				`{"type":"tool_use","id":"tool-1","name":"Bash",`+
+				`"input":{"command":"sleep 1","run_in_background":true}}]}}`+"\n"+
+				`{"type":"user","message":{"role":"user","content":[`+
+				`{"type":"tool_result","tool_use_id":"tool-1","content":"running"}]},`+
+				`"toolUseResult":{"backgroundTaskId":"task-1"}}`+"\n",
+		)...,
+	)
+	res, err := ScanTranscript(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("ScanTranscript: %v", err)
+	}
+	if res.AssistantIdentityReliable || res.LastAssistantUUID != "" || res.LastAssistantMessageID != "" {
+		t.Fatalf("invalid raw identity was accepted: %+v", res)
+	}
+	if res.LastAssistantText != "kept" || len(res.LiveTasks) != 1 {
+		t.Fatalf("useful decoded data was discarded: %+v", res)
+	}
+}
+
+func TestScanTranscriptRawInvalidUTF8TailMakesIdentityUnreliable(t *testing.T) {
+	raw := []byte(
+		`{"type":"assistant","uuid":"uuid-1","message":` +
+			`{"id":"msg-1","role":"assistant","content":[{"type":"text","text":"kept"}]}}` + "\n" +
+			`{"type":"user","message":{"role":"user","content":"bad`,
+	)
+	raw = append(raw, 0xff)
+	raw = append(raw, []byte(` encoding"}}`+"\n")...)
+	res, err := ScanTranscript(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("ScanTranscript: %v", err)
+	}
+	if res.AssistantIdentityReliable {
+		t.Fatalf("identity remained reliable after invalidly encoded tail: %+v", res)
+	}
+	if res.LastAssistantText != "kept" || res.LastAssistantUUID != "uuid-1" {
+		t.Fatalf("useful assistant data lost: %+v", res)
+	}
+}
+
+func TestScanTranscriptValidAssistantRestoresIdentityReliability(t *testing.T) {
+	raw := []byte(`{"type":"assistant","uuid":"`)
+	raw = append(raw, 0xff)
+	raw = append(
+		raw,
+		[]byte(
+			`","message":{"id":"bad-msg","role":"assistant","content":[]}}`+"\n"+
+				`{"type":"assistant","uuid":"good-uuid","message":`+
+				`{"id":"good-msg","role":"assistant","content":[]}}`+"\n",
+		)...,
+	)
+	res, err := ScanTranscript(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("ScanTranscript: %v", err)
+	}
+	if !res.AssistantIdentityReliable || res.LastAssistantUUID != "good-uuid" ||
+		res.LastAssistantMessageID != "good-msg" {
+		t.Fatalf("valid assistant did not restore identity reliability: %+v", res)
+	}
+}
+
+func TestScanTranscriptAssistantIdentityReliability(t *testing.T) {
+	transcript := `{"type":"assistant","uuid":"uuid-1","message":{"id":"msg-1","role":"assistant","content":[{"type":"text","text":"kept"}]}}` + "\n" + `{bad tail}` + "\n"
+	res, err := ScanTranscript(strings.NewReader(transcript))
+	if err != nil {
+		t.Fatalf("ScanTranscript: %v", err)
+	}
+	if res.AssistantIdentityReliable {
+		t.Fatalf("identity remained reliable after malformed tail: %+v", res)
+	}
+	if res.LastAssistantText != "kept" || res.LastAssistantUUID != "uuid-1" {
+		t.Fatalf("useful assistant data lost: %+v", res)
 	}
 }

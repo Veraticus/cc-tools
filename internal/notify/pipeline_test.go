@@ -2472,3 +2472,193 @@ func TestPipeline_Arm_GoalNone_GoalArmedFalse(t *testing.T) {
 		t.Fatalf("armed = %+v, want one arm carrying GoalArmed false", wd.armed)
 	}
 }
+
+func TestPipelineClaudeCompletionIdentityFallbackAndBlanking(t *testing.T) {
+	validAssistant := `{"type":"assistant","uuid":"uuid-before-error","message":` +
+		`{"id":"msg-before-error","role":"assistant","content":[]}}` + "\n"
+	cases := []struct {
+		name       string
+		transcript string
+		missing    bool
+	}{
+		{name: "empty transcript"},
+		{name: "missing transcript path", missing: true},
+		{name: "missing transcript file", transcript: "missing"},
+		{name: "unreadable transcript", transcript: "unreadable"},
+		{
+			name:       "scanner read error after valid assistant",
+			transcript: validAssistant + strings.Repeat("x", maxLineBufferSize+1) + "\n",
+		},
+		{
+			name:       "malformed nonblank tail",
+			transcript: validAssistant + "{bad}\n",
+		},
+		{
+			name: "latest assistant IDs missing",
+			transcript: validAssistant +
+				`{"type":"assistant","message":{"role":"assistant","content":[]}}` + "\n",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			var transcriptPath string
+			switch {
+			case tt.missing:
+			case tt.transcript == "missing":
+				transcriptPath = filepath.Join(t.TempDir(), "does-not-exist.jsonl")
+			case tt.transcript == "unreadable":
+				transcriptPath = t.TempDir()
+			default:
+				transcriptPath = filepath.Join(t.TempDir(), "transcript.jsonl")
+				if err := os.WriteFile(transcriptPath, []byte(tt.transcript), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			stdout := &bytes.Buffer{}
+			p, logPath := newTestPipeline(t, stdout, "/nonexistent")
+			in := HookInput{
+				SessionID:            "sess-1",
+				TranscriptPath:       transcriptPath,
+				HookEventName:        eventStop,
+				Harness:              harnessClaude,
+				CompletionID:         "stale-supplied-id",
+				LastAssistantMessage: "fallback ran",
+			}
+			if err := p.Run(context.Background(), in); err != nil {
+				t.Fatal(err)
+			}
+			recs := readDecisionLog(t, logPath)
+			if len(recs) != 1 || recs[0].CompletionID != "" {
+				t.Fatalf("logged completion identity = %+v, want blank", recs)
+			}
+			if recs[0].Outcome != OutcomeSend.String() ||
+				!strings.Contains(recs[0].Body, "fallback ran") {
+				t.Fatalf("fallback did not run: %+v", recs[0])
+			}
+		})
+	}
+}
+
+func TestPipelineClaudeCompletionIdentityPriority(t *testing.T) {
+	cases := []struct {
+		name       string
+		transcript string
+		want       string
+	}{
+		{
+			name: "UUID has priority",
+			transcript: `{"type":"assistant","uuid":"uuid-1","message":` +
+				`{"id":"msg-1","role":"assistant","content":[]}}` + "\n",
+			want: "uuid-1",
+		},
+		{
+			name: "message ID is secondary",
+			transcript: `{"type":"assistant","message":` +
+				`{"id":"msg-1","role":"assistant","content":[]}}` + "\n",
+			want: "msg-1",
+		},
+		{
+			name: "invalid UUID falls back to message ID",
+			transcript: `{"type":"assistant","uuid":"bad\nUUID","message":` +
+				`{"id":"msg-1","role":"assistant","content":[]}}` + "\n",
+			want: "msg-1",
+		},
+		{
+			name: "bad prefix followed by valid assistant recovers",
+			transcript: "{bad}\n" + `{"type":"assistant","uuid":"uuid-recovered","message":` +
+				`{"id":"msg-recovered","role":"assistant","content":[]}}` + "\n",
+			want: "uuid-recovered",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "transcript.jsonl")
+			if err := os.WriteFile(path, []byte(tt.transcript), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			stdout := &bytes.Buffer{}
+			p, logPath := newTestPipeline(t, stdout, "/nonexistent")
+			if err := p.Run(context.Background(), HookInput{
+				SessionID:      "sess-1",
+				TranscriptPath: path,
+				HookEventName:  eventStop,
+				Harness:        harnessClaude,
+				CompletionID:   "stale-supplied-id",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			recs := readDecisionLog(t, logPath)
+			if len(recs) != 1 || recs[0].Harness != harnessClaude ||
+				recs[0].CompletionID != tt.want {
+				t.Fatalf("logged identity = %+v, want %q", recs, tt.want)
+			}
+		})
+	}
+}
+
+func TestPipelineDefaultsHarnessForOldCallers(t *testing.T) {
+	cases := []struct {
+		name           string
+		input          HookInput
+		wantHarness    string
+		wantCompletion string
+	}{
+		{
+			name:        "Claude lifecycle event",
+			input:       HookInput{SessionID: "claude-session", HookEventName: eventStop},
+			wantHarness: harnessClaude,
+		},
+		{
+			name: "legacy turn completion",
+			input: HookInput{
+				SessionID:            "codex-session",
+				HookEventName:        eventTurnComplete,
+				CompletionID:         "turn-1",
+				LastAssistantMessage: "done",
+			},
+			wantHarness:    harnessCodex,
+			wantCompletion: "turn-1",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			stdout := &bytes.Buffer{}
+			p, logPath := newTestPipeline(t, stdout, "/nonexistent")
+			if err := p.Run(context.Background(), tt.input); err != nil {
+				t.Fatal(err)
+			}
+			recs := readDecisionLog(t, logPath)
+			if len(recs) != 1 || recs[0].Harness != tt.wantHarness ||
+				recs[0].CompletionID != tt.wantCompletion {
+				t.Fatalf("logged ingress identity = %+v", recs)
+			}
+		})
+	}
+}
+
+func TestPipelineDistinctSameTextAssistantIDsLogDistinct(t *testing.T) {
+	stdout := &bytes.Buffer{}
+	p, logPath := newTestPipeline(t, stdout, "/nonexistent")
+	for i, id := range []string{"uuid-1", "uuid-2"} {
+		path := filepath.Join(t.TempDir(), "transcript.jsonl")
+		transcript := `{"type":"assistant","uuid":"` + id + `","message":` +
+			`{"id":"same-message-id","role":"assistant",` +
+			`"content":[{"type":"text","text":"same text"}]}}` + "\n"
+		if err := os.WriteFile(path, []byte(transcript), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.Run(context.Background(), HookInput{
+			SessionID:      "sess-1",
+			TranscriptPath: path,
+			HookEventName:  eventStop,
+			Harness:        harnessClaude,
+		}); err != nil {
+			t.Fatalf("Run() #%d: %v", i+1, err)
+		}
+	}
+	recs := readDecisionLog(t, logPath)
+	if len(recs) != 2 || recs[0].CompletionID != "uuid-1" || recs[1].CompletionID != "uuid-2" {
+		t.Fatalf("same-text decision identities = %+v, want distinct UUIDs", recs)
+	}
+}
