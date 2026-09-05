@@ -216,6 +216,7 @@ test('handles first label, KEEP, no refresh, and ordinary identifier punctuation
     [{ ...request, label: { current: 'Existing title here', refresh: true } }, '{"body":"Updated outcome","label":"KEEP"}', { version: 1, ok: true, body: 'Updated outcome' }],
     [{ ...request, label: { current: 'Existing title here', refresh: false } }, '{"body":"No refresh outcome"}', { version: 1, ok: true, body: 'No refresh outcome' }],
     [request, '{"body":"Issue #123 updates task_id and x*y in <identifier>.","label":"Track <identifier> status"}', { version: 1, ok: true, body: 'Issue #123 updates task_id and x*y in <identifier>.', label: 'Track <identifier> status' }],
+    [request, '{"body":"Version ~1 keeps task~id and unmatched~~ punctuation.","label":"Track task~id status"}', { version: 1, ok: true, body: 'Version ~1 keeps task~id and unmatched~~ punctuation.', label: 'Track task~id status' }],
   ];
   for (const [value, raw, expected] of cases) {
     assert.deepEqual(await composeText(raw, value), expected);
@@ -232,6 +233,7 @@ test('rejects trim-empty bodies and specified Markdown in bodies and labels', as
   const invalidBodies = [
     '   ',
     '**bold**',
+    'This is ~~obsolete~~.',
     '[link](https://example.com)',
     '# heading',
     '> quoted outcome',
@@ -246,6 +248,7 @@ test('rejects trim-empty bodies and specified Markdown in bodies and labels', as
 
   const invalidLabels = [
     '**bold label** words',
+    'Review ~~obsolete~~ outcome',
     '> quoted label words',
     '    indented label words',
     '<https://example.com> link label',
