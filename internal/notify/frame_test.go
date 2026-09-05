@@ -7,52 +7,52 @@ import (
 	"testing"
 )
 
-func TestFrame_EncodeDecode_RoundTrip(t *testing.T) {
-	f := Frame{
+func TestFrameEncodeDecodeRoundTripCarriesOnlyInvocationIdentityAndWorkspace(t *testing.T) {
+	frame := Frame{
 		HookInput: HookInput{
-			SchemaVersion: 1, Harness: harnessClaude, CompletionID: "assistant-uuid-1",
-			SessionID: "sess-1", TranscriptPath: "/tmp/t.jsonl", CWD: "/home/user/project",
-			HookEventName: "Stop", LastAssistantMessage: "All done here.",
+			SchemaVersion: 1, Harness: harnessClaude, SessionID: "session-1",
+			CompletionID: "assistant-uuid", TranscriptPath: "/tmp/transcript.jsonl",
+			CWD: "/work/project", HookEventName: eventStop,
+			LastAssistantMessage: "finished",
 		},
-		Workspace: "my-tmux-session",
-		Environ:   []string{"TMUX=/tmp/tmux-1000/default,1234,0", "CLAUDE_CONFIG_DIR=/home/user/.claude"},
+		Workspace: "earth:3",
 		DryRun:    true,
 	}
-
-	var buf bytes.Buffer
-	if err := EncodeFrame(&buf, f); err != nil {
-		t.Fatalf("EncodeFrame() error = %v", err)
+	var wire bytes.Buffer
+	if err := EncodeFrame(&wire, frame); err != nil {
+		t.Fatal(err)
 	}
-
-	got, err := DecodeFrame(&buf)
+	if strings.Contains(wire.String(), "environ") || strings.Contains(wire.String(), "parent_pid") ||
+		strings.Contains(wire.String(), "SECRET") {
+		t.Fatalf("wire contains removed process context: %s", wire.String())
+	}
+	got, err := DecodeFrame(&wire)
 	if err != nil {
-		t.Fatalf("DecodeFrame() error = %v", err)
+		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(got, f) {
-		t.Errorf("round trip = %+v, want %+v", got, f)
+	if !reflect.DeepEqual(got, frame) {
+		t.Errorf("round trip = %+v, want %+v", got, frame)
 	}
 }
 
-func TestFrame_Decode_IgnoresUnknownFields(t *testing.T) {
-	raw := `{"hook_input":{"session_id":"sess-2","hook_event_name":"SessionEnd"},"workspace":"w","environ":["A=1"],"future_field":"ignored"}`
-
+func TestFrameDecodeIgnoresLegacyEnvironmentParentAndUnknownFields(t *testing.T) {
+	raw := `{"hook_input":{"session_id":"session-2","hook_event_name":"SessionEnd"},` +
+		`"workspace":"w","environ":["SECRET=value"],"parent_pid":99,"future":"ignored"}`
 	got, err := DecodeFrame(strings.NewReader(raw))
 	if err != nil {
-		t.Fatalf("DecodeFrame() error = %v", err)
+		t.Fatal(err)
 	}
 	want := Frame{
-		HookInput: HookInput{SessionID: "sess-2", HookEventName: "SessionEnd"},
+		HookInput: HookInput{SessionID: "session-2", HookEventName: eventSessionEnd},
 		Workspace: "w",
-		Environ:   []string{"A=1"},
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("Decode() = %+v, want %+v", got, want)
+		t.Errorf("DecodeFrame() = %+v, want %+v", got, want)
 	}
 }
 
-func TestFrame_Decode_MalformedJSON_Errors(t *testing.T) {
-	_, err := DecodeFrame(strings.NewReader("not json{"))
-	if err == nil {
-		t.Fatal("DecodeFrame() error = nil, want error for malformed JSON")
+func TestFrameDecodeMalformedJSONErrors(t *testing.T) {
+	if _, err := DecodeFrame(strings.NewReader("not json{")); err == nil {
+		t.Fatal("DecodeFrame() error = nil")
 	}
 }

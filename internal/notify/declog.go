@@ -18,32 +18,27 @@ import (
 // rotation.
 const maxLogSizeBytes = 5 * 1024 * 1024
 
-// DecisionLog appends one JSON line per notification decision to Path — the
-// corpus used to tune the judge rubric.
+// DecisionLog appends one safe JSON line per notification decision to Path.
 type DecisionLog struct {
 	Path string
 }
 
-// DecisionRecord is one decision-log entry: what event came in, what the
-// pipeline decided, and (for judged evaluations) what the judge itself saw
-// and returned.
+// DecisionRecord retains ingress attribution, delivery content, and only
+// categorized composition diagnostics. It never stores prompts, process
+// environment, helper output, or raw subprocess errors.
 type DecisionRecord struct {
-	Time         time.Time `json:"time"`
-	SessionID    string    `json:"session_id"`
-	Event        string    `json:"event"`
-	Harness      string    `json:"harness"`
-	CompletionID string    `json:"completion_id,omitempty"`
-	Outcome      string    `json:"outcome"`
-	Reason       string    `json:"reason"`
-	Urgency      Urgency   `json:"urgency,omitempty"`
-	Title        string    `json:"title,omitempty"`
-	Body         string    `json:"body,omitempty"`
-	JudgeMode    string    `json:"judge_mode,omitempty"`
-	JudgeErr     string    `json:"judge_err,omitempty"`
-	JudgeMs      int64     `json:"judge_ms,omitempty"`
-	// Digest is the full digest text, set only for judged evaluations — this
-	// is the tuning corpus, so it is kept in full rather than truncated.
-	Digest string `json:"digest,omitempty"`
+	Time               time.Time `json:"time"`
+	SessionID          string    `json:"session_id"`
+	Event              string    `json:"event"`
+	Harness            string    `json:"harness"`
+	CompletionID       string    `json:"completion_id,omitempty"`
+	Outcome            string    `json:"outcome"`
+	Reason             string    `json:"reason"`
+	Urgency            Urgency   `json:"urgency,omitempty"`
+	Title              string    `json:"title,omitempty"`
+	Body               string    `json:"body,omitempty"`
+	CompositionOutcome string    `json:"composition_outcome,omitempty"`
+	CompositionError   string    `json:"composition_error,omitempty"`
 }
 
 // Append writes rec as one JSON line, creating Path's parent directory as

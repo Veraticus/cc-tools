@@ -2,225 +2,110 @@ package notify
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
-// maxNotificationTailLen bounds the fallback notification body when the
-// judge errors — HookInput.LastAssistantMessage on Stop events, and
-// HookInput.Message on Notification events: the tail (via truncateHeadWords)
-// is what carries the meaningful content, matching the head/tail convention
-// established in transcript.go/digest.go.
-const maxNotificationTailLen = 160
+const (
+	maxNotificationFallbackBytes = 160
+	maxNotificationBodyBytes     = 200
+	turnCompleteLabel            = "turn complete"
 
-const turnCompleteLabel = "turn complete"
+	compositionComposed = "composed"
+	compositionFallback = "fallback"
 
-// dryRunWouldArmWatchdogSuffix is appended to a decision's Reason whenever a
-// dry run reaches an arm-the-watchdog branch without actually arming it.
-const dryRunWouldArmWatchdogSuffix = " (would arm watchdog)"
+	compositionErrorIdentityUnavailable  = "completion identity unavailable"
+	compositionErrorUnavailable          = "composer unavailable"
+	compositionErrorDryRun               = "dry run"
+	compositionErrorInvalidConfiguration = "invalid configuration"
+	compositionErrorInvalidRequest       = "invalid compose request"
+	compositionErrorHelperUnavailable    = "helper unavailable"
+	compositionErrorHelperExecution      = "helper execution failed"
+	compositionErrorHelperTimeout        = "helper timed out"
+	compositionErrorHelperCanceled       = "helper canceled"
+	compositionErrorInvalidProtocol      = "invalid helper protocol"
+	compositionErrorRejectedRequest      = "helper rejected request"
+	compositionErrorModelUnavailable     = "helper model unavailable"
+	compositionErrorGenerationFailed     = "helper generation failed"
+	compositionErrorReportedTimeout      = "helper reported timeout"
+	compositionErrorInvalidOutput        = "helper output invalid"
+	compositionErrorInvalidResult        = "invalid compose result"
+	compositionErrorFailed               = "composition failed"
 
-// failOpenWindow is the quiet period for evaluator-failure fallbacks: Claude's
-// compose/decide paths apply it per session, while Codex applies it per running
-// locus. The first fail-open gets through; repeats are the same surfaced model
-// failure and need not each re-ping.
-const failOpenWindow = 10 * time.Minute
+	deliveryTimeout       = 11 * time.Second
+	deliveryFailureReason = "send failed"
+)
 
-const codexEvaluatorFailureClaimPrefix = "codex-evaluator-failure"
-
-// codexEvaluatorFailureClaimKey identifies one running locus without any
-// session or turn content. Length-prefixing each value keeps empty and
-// delimiter-bearing components unambiguous while preserving their exact text.
-func codexEvaluatorFailureClaimKey(pane, workspace, host, cwd string) string {
-	component := func(value string) string {
-		return fmt.Sprintf("%d:%s", len(value), value)
-	}
-	if pane != "" {
-		return codexEvaluatorFailureClaimPrefix + "\npane=" + component(pane) + "\ncwd=" + component(cwd)
-	}
-	if workspace != "" {
-		return codexEvaluatorFailureClaimPrefix + "\nworkspace=" + component(workspace) + "\ncwd=" + component(cwd)
-	}
-	if host != "" || cwd != "" {
-		return codexEvaluatorFailureClaimPrefix + "\nhost=" + component(host) + "\ncwd=" + component(cwd)
-	}
-	return codexEvaluatorFailureClaimPrefix + "\nunknown-locus"
+// Composer is the sole inference seam used by Pipeline. PiComposer is the
+// only production implementation; tests inject this minimal interface to
+// observe composition without invoking a model.
+type Composer interface {
+	Compose(context.Context, ComposeInput, ComposeLabel) (ComposeResult, error)
 }
 
-// DedupeState is Pipeline's interface onto per-session notify dedupe
-// (last-notify time and message hash) and broadcast-claim coordination, so
-// where that bookkeeping actually lives is a swappable concern: entirely in
-// memory and confined to one goroutine (MemoryState via loopState —
-// notifyd's dedupe store), or nowhere at all (NopState — the hook client's
-// inline fallback, and Pipeline.dedupeState's own default). sessionID keys
-// every session-scoped method because one DedupeState instance is shared
-// across every session a process handles.
-type DedupeState interface {
-	// SinceLastNotify returns how long before now sessionID last notified;
-	// negative means never. ctx carries no deadline today — it exists so
-	// the daemon's loopState implementation can bail out of its loop round
-	// trip on shutdown rather than storing ctx on itself.
-	SinceLastNotify(ctx context.Context, sessionID string, now time.Time) time.Duration
-	// SinceLastNotifySame returns how long before now sessionID last sent
-	// message verbatim; negative when never, or the last send differed.
-	SinceLastNotifySame(ctx context.Context, sessionID string, now time.Time, message string) time.Duration
-	// MarkNotified records t/message as sessionID's last notification.
-	MarkNotified(ctx context.Context, sessionID string, t time.Time, message string) error
-	// ClaimSend atomically resolves whether a send for sessionID may
-	// proceed at now — losing when the session already notified within
-	// window, winning (and recording now/message as the last notification
-	// in the same step) otherwise. Check and mark being one operation is
-	// the point: the pre-judge SinceLastNotify snapshot goes stale during
-	// the judge call, so two hook events racing through concurrent judge
-	// evaluations would otherwise both pass the gate and double-ping. The
-	// returned duration is how long before now the session last notified
-	// (negative when never), for the caller's decision-log reason. dryRun
-	// observes without recording.
-	ClaimSend(
-		ctx context.Context, sessionID string, now time.Time, message string, window time.Duration, dryRun bool,
-	) (bool, time.Duration)
-	// ClaimBroadcast atomically claims key for a window starting at now,
-	// reporting whether this call won; see MemoryState.ClaimBroadcast's
-	// first-claimant contract. dryRun observes without claiming.
-	ClaimBroadcast(ctx context.Context, key string, window time.Duration, now time.Time, dryRun bool) bool
-	// DeleteSession removes sessionID's dedupe record entirely, called on
-	// SessionEnd so a MemoryState-backed daemon does not accumulate one
-	// entry per session for its entire uptime — every session_id is a
-	// fresh UUID, so without eviction the map only grows. ctx lets the
-	// daemon's loopState implementation bail out of its loop round trip on
-	// shutdown, exactly as its other methods do.
-	DeleteSession(ctx context.Context, sessionID string)
-}
-
-// Pipeline is the top-level orchestrator for a single hook invocation: it
-// scans the transcript, computes the deterministic Decide() gates, and
-// routes to a plain send, silence, or the LLM judge — then delivers,
-// records session state, and appends a decision-log entry. It never
-// returns an error for a condition it can itself recover from: a failing
-// transcript scan, judge call, or notification send all degrade to a
-// documented fallback rather than losing the hook's exit code 0 contract.
+// Pipeline processes one normalized hook event. Completion eligibility and
+// urgency are deterministic; Composer may improve only the notification body.
 type Pipeline struct {
 	DryRun bool
-	Judge  Judge
-	// CodexJudge decides and composes TurnComplete notifications. Its zero
-	// value disables evaluation for the inline/no-daemon pipeline.
-	CodexJudge CodexJudge
-	Sender     Sender
-	Log        DecisionLog
-	// State is where dedupe/broadcast-claim bookkeeping lives. The zero
-	// value (nil) defaults to NopState{} — every session reports "never
-	// notified" — so only callers that want real dedupe (notifyd's
-	// loopState, backed by MemoryState) need to set it.
-	State   DedupeState
-	Environ []string
-	Stdout  io.Writer
-	SelfBin string
-	// Workspace is the tmux locator (session:window-index, see
-	// WorkspaceName) this hook's pane lives in, or "" outside tmux —
-	// background jobs included. Notification titles use it as the
-	// where-to-go segment, falling back to Host; judged and watchdog
-	// bodies carry it as a locatorSuffix trailer.
+
+	Composer Composer
+	// CompositionError records why daemon startup could not configure its
+	// composer. It is categorized before being logged and never exposed raw.
+	CompositionError error
+
+	Sender Sender
+	Log    DecisionLog
+	Stdout io.Writer
+
+	// Workspace is the calling hook's tmux locator, snapshotted from Frame.
 	Workspace string
-	// Host is the short hostname for titles and falls back to
-	// ShortHostname() when empty; tests inject a fixed value.
+	// Host is the short hostname used when Workspace is unavailable.
 	Host string
-	// ParentPID is the claude process that invoked this hook (Frame.
-	// ParentPID), forwarded into an armed watchdog's dead-session probe.
-	// The hook client's inline fallback leaves it zero (Watchdog is nil
-	// there anyway); the daemon overwrites it per connection from the
-	// frame, alongside Environ and Workspace.
-	ParentPID int
-	// Watchdog arms/reaps the in-daemon watchdog for a session with
-	// live/pending work. A nil Watchdog makes Pipeline.arm a no-op — the
-	// hook client's inline fallback's documented degraded mode (see
-	// Watchdog's doc comment).
-	Watchdog Watchdog
 }
 
-// dedupeState returns p.State, or NopState{} when State is unset — see the
-// State field's doc comment.
-//
-//nolint:ireturn // DedupeState is intentionally swappable (memory/nop); this is the field's single accessor.
-func (p Pipeline) dedupeState() DedupeState {
-	if p.State != nil {
-		return p.State
-	}
-	return NopState{}
-}
-
-// Run executes the pipeline for one hook payload. It always returns nil:
-// every failure mode (transcript scan, judge call, watchdog arm, delivery)
-// is a documented fallback or a swallowed best-effort operation, never a
-// reason to fail the hook itself.
-func (p Pipeline) Run(ctx context.Context, in HookInput) error {
-	in.Harness = defaultHarness(in.Harness, in.HookEventName)
+// Run processes one event and always returns nil. Transcript, composition,
+// logging, and delivery failures degrade without changing the hook's exit-0
+// contract.
+func (pipeline Pipeline) Run(ctx context.Context, input HookInput) error {
+	input.Harness = defaultHarness(input.Harness, input.HookEventName)
 	now := time.Now()
-	project := filepath.Base(in.CWD)
-	host := p.Host
+	project := filepath.Base(input.CWD)
+	host := pipeline.Host
 	if host == "" {
 		host = ShortHostname()
 	}
-	// The where-to-go segment of generic notification titles: the tmux
-	// workspace when the session lives in one, the machine otherwise. A
-	// ping's urgency already rides the ntfy sound/priority and its content
-	// rides the body, so a generic label ("needs input") would waste the
-	// title slot on what the ping itself already says.
-	locus := p.Workspace
+	locus := pipeline.Workspace
 	if locus == "" {
 		locus = host
 	}
 
-	if in.HookEventName == eventSessionEnd {
-		if p.Watchdog != nil {
-			p.Watchdog.Reap(in.SessionID)
-		}
-		p.dedupeState().DeleteSession(ctx, in.SessionID)
-		p.logRecord(in, now, DecisionRecord{Outcome: OutcomeSilent.String(), Reason: "session end"})
+	var scan ScanResult
+	var scanErr error
+	if input.Harness == harnessClaude && input.HookEventName == eventStop {
+		scan, scanErr = pipeline.scanTranscript(input.TranscriptPath)
+		input.CompletionID = claudeCompletionID(input, scan, scanErr)
+	}
+
+	decision := Decide(input, scan)
+	if decision.Outcome == OutcomeSilent {
+		pipeline.logRecord(input, now, DecisionRecord{
+			Outcome: decision.Outcome.String(), Reason: decision.Reason,
+		})
 		return nil
 	}
 
-	var res ScanResult
-	var scanErr error
-	if in.HookEventName != eventTurnComplete && in.TranscriptPath != "" {
-		res, scanErr = p.scanTranscript(in.TranscriptPath)
+	if input.HookEventName == eventStop || input.HookEventName == eventTurnComplete {
+		pipeline.handleCompletion(ctx, input, scan, now, project, locus, decision)
+		return nil
 	}
-	reasonSuffix := ""
-	if scanErr != nil {
-		reasonSuffix = fmt.Sprintf(" (transcript error: %s)", scanErr)
-	}
-	in.CompletionID = claudeCompletionID(in, res, scanErr)
-
-	// SinceLastNotifySame costs a state-file read plus a sha256 of the
-	// message, and only the blocked-tier Notification gates ever read it —
-	// so the dominant Stop path (every assistant-turn end) skips it, keeping
-	// the sentinel that means "never/differs" instead.
-	sinceSame := neverNotifiedDuration
-	if in.HookEventName == eventNotification {
-		sinceSame = p.dedupeState().SinceLastNotifySame(ctx, in.SessionID, now, in.Message)
-	}
-	env := Env{
-		SinceLastNotify:     p.dedupeState().SinceLastNotify(ctx, in.SessionID, now),
-		SinceLastNotifySame: sinceSame,
-		Broadcast:           p.broadcastFacts(ctx, in, now),
-	}
-	d := Decide(in, res, env)
-
-	switch d.Outcome {
-	case OutcomeSilent:
-		p.handleSilent(in, res, now, project, host, d, reasonSuffix)
-	case OutcomeSend:
-		if in.HookEventName == eventTurnComplete {
-			p.handleCodexTurnComplete(ctx, in, now, project, locus, host, d, reasonSuffix)
-		} else {
-			p.handleSend(ctx, in, now, project, locus, host, d, reasonSuffix)
-		}
-	case OutcomeJudge:
-		p.handleJudge(ctx, in, res, env, now, project, locus, host, d, reasonSuffix)
-	}
+	pipeline.handleInput(ctx, input, now, project, locus, host, decision)
 	return nil
 }
 
@@ -234,615 +119,448 @@ func defaultHarness(harness, event string) string {
 	return harnessClaude
 }
 
-func claudeCompletionID(in HookInput, res ScanResult, scanErr error) string {
-	if in.Harness != harnessClaude || in.HookEventName != eventStop {
-		return in.CompletionID
+// claudeCompletionID preserves the reliable native identity order: a valid
+// terminal assistant UUID wins, then message.id. Claude-supplied IDs are
+// never trusted when the transcript cannot establish terminal identity.
+func claudeCompletionID(input HookInput, scan ScanResult, scanErr error) string {
+	if input.Harness != harnessClaude || input.HookEventName != eventStop {
+		return input.CompletionID
 	}
-	if scanErr != nil || !res.AssistantIdentityReliable {
+	if scanErr != nil || !scan.AssistantIdentityReliable {
 		return ""
 	}
-	if validCompletionID(res.LastAssistantUUID) {
-		return res.LastAssistantUUID
+	if validCompletionID(scan.LastAssistantUUID) {
+		return scan.LastAssistantUUID
 	}
-	if validCompletionID(res.LastAssistantMessageID) {
-		return res.LastAssistantMessageID
+	if validCompletionID(scan.LastAssistantMessageID) {
+		return scan.LastAssistantMessageID
 	}
 	return ""
 }
 
-func (p Pipeline) handleCodexTurnComplete(
+func (pipeline Pipeline) handleCompletion(
 	ctx context.Context,
-	in HookInput,
+	input HookInput,
+	scan ScanResult,
 	now time.Time,
-	project, locus, host string,
-	d Decision,
-	reasonSuffix string,
+	project string,
+	locus string,
+	decision Decision,
 ) {
-	if p.DryRun || p.CodexJudge.Bin == "" {
-		p.handleCodexEvaluatorFailure(
-			ctx, in, now, project, locus, host, d.Reason, reasonSuffix, nil, "", 0,
-		)
-		return
-	}
+	body := completionFallbackBody(input.LastAssistantMessage)
+	compositionOutcome := compositionFallback
+	compositionError := ""
 
-	digest := codexTurnDigest(in)
-	start := time.Now()
-	verdict, jerr := p.CodexJudge.Evaluate(ctx, digest)
-	judgeMs := time.Since(start).Milliseconds()
-	if jerr != nil {
-		p.handleCodexEvaluatorFailure(
-			ctx, in, now, project, locus, host, d.Reason, reasonSuffix, jerr, digest, judgeMs,
-		)
-		return
-	}
-	if !verdict.Notify {
-		p.logCodexTurn(
-			in, now, OutcomeSilent.String(), verdict.Reason+reasonSuffix,
-			Notification{}, nil, digest, judgeMs,
-		)
-		return
-	}
-
-	task := verdict.Task
-	if task == "" {
-		task = turnCompleteLabel
-	}
-	body := verdict.Body
-	if body == "" {
-		body = turnCompleteLabel
-	}
-	title := project + " · " + task
-	if verdict.Urgency == UrgencyBlocked {
-		title = project + " · Needs input · " + task
-	}
-	n := Notification{
-		Title:   title,
-		Body:    codexBodyWithLocator(body, locatorSuffix(p.Workspace, host)),
-		Urgency: verdict.Urgency,
-	}
-	sendSuffix := p.deliverCodexTurn(ctx, in, now, n)
-	p.logCodexTurn(
-		in, now, OutcomeSend.String(), verdict.Reason+reasonSuffix+sendSuffix, n, nil, digest, judgeMs,
-	)
-}
-
-// handleCodexEvaluatorFailure applies one atomic, locus-wide claim to both
-// disabled evaluators and evaluator errors before delivering their shared
-// deterministic fallback. A lost claim is still logged, but never carries
-// notification fields that could be mistaken for a delivered ping.
-func (p Pipeline) handleCodexEvaluatorFailure(
-	ctx context.Context,
-	in HookInput,
-	now time.Time,
-	project, locus, host string,
-	reason, reasonSuffix string,
-	jerr error,
-	digest string,
-	judgeMs int64,
-) {
-	if jerr != nil {
-		jerr = errors.New(truncateWords(strings.ToValidUTF8(jerr.Error(), ""), maxErrSnippetBytes))
-	}
-	pane := parseEnviron(p.Environ)["TMUX_PANE"]
-	key := codexEvaluatorFailureClaimKey(pane, p.Workspace, host, in.CWD)
-	claimNow := time.Now()
-	if !p.dedupeState().ClaimBroadcast(ctx, key, failOpenWindow, claimNow, p.DryRun) {
-		suppressedReason := truncateWords(
-			reason+reasonSuffix+" (codex evaluator failure suppressed)",
-			maxErrSnippetBytes,
-		)
-		p.logCodexTurn(
-			in, now, OutcomeSilent.String(), suppressedReason, Notification{}, jerr, digest, judgeMs,
-		)
-		return
-	}
-
-	n := codexTurnFallback(in, project, locus)
-	sendSuffix := p.deliverCodexTurn(ctx, in, now, n)
-	p.logCodexTurn(
-		in, now, OutcomeSend.String(), reason+reasonSuffix+sendSuffix, n, jerr, digest, judgeMs,
-	)
-}
-
-func (p Pipeline) deliverCodexTurn(
-	ctx context.Context,
-	in HookInput,
-	now time.Time,
-	n Notification,
-) string {
-	sendSuffix := p.deliver(ctx, n)
-	if !p.DryRun {
-		_ = p.dedupeState().MarkNotified(ctx, in.SessionID, now, n.Body)
-	}
-	return sendSuffix
-}
-
-func codexTurnDigest(in HookInput) string {
-	return "USER INPUT\n" + in.Message + "\n\nFINAL ASSISTANT MESSAGE\n" + in.LastAssistantMessage
-}
-
-func codexTurnFallback(in HookInput, project, locus string) Notification {
-	body := truncateHeadWords(normalizeCodexPlainText(in.LastAssistantMessage), maxNotificationTailLen)
-	if body == "" {
-		body = turnCompleteLabel
-	}
-	return Notification{Title: project + " · " + locus, Body: body, Urgency: UrgencyDone}
-}
-
-func codexBodyWithLocator(summary, suffix string) string {
-	summary = strings.ToValidUTF8(summary, "")
-	suffix = strings.ToValidUTF8(suffix, "")
-	if suffix == "" {
-		return truncateWords(summary, maxBodyBytes)
-	}
-	if len(suffix) >= maxBodyBytes {
-		return truncateWords(suffix, maxBodyBytes)
-	}
-
-	summaryBudget := maxBodyBytes - len(suffix)
-	if len(summary) > summaryBudget && summaryBudget < len(truncationEllipsis) {
-		return suffix
-	}
-	return truncateWords(summary, summaryBudget) + suffix
-}
-
-func (p Pipeline) logCodexTurn(
-	in HookInput,
-	now time.Time,
-	outcome string,
-	reason string,
-	n Notification,
-	jerr error,
-	digest string,
-	judgeMs int64,
-) {
-	rec := DecisionRecord{
-		Outcome: outcome, Reason: reason,
-		Urgency: n.Urgency, Title: n.Title, Body: n.Body,
-		JudgeMs: judgeMs, Digest: digest,
-	}
-	if jerr != nil {
-		rec.JudgeErr = jerr.Error()
-	}
-	p.logRecord(in, now, rec)
-}
-
-// scanTranscript opens and scans path, returning a zero ScanResult on any
-// failure (open or scan) so the caller can fall back to a pass-through
-// decision rather than losing the hook event entirely.
-func (p Pipeline) scanTranscript(path string) (ScanResult, error) {
-	f, err := os.Open(path) //nolint:gosec // Path comes from the hook's own payload
-	if err != nil {
-		return ScanResult{}, fmt.Errorf("opening transcript: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	res, err := ScanTranscript(f)
-	if err != nil {
-		return ScanResult{}, fmt.Errorf("scanning transcript: %w", err)
-	}
-	return res, nil
-}
-
-// handleSilent implements the OutcomeSilent branch: log the silence, and
-// either arm the watchdog (real run) or note that it would have (dry run).
-func (p Pipeline) handleSilent(
-	in HookInput,
-	res ScanResult,
-	now time.Time,
-	project, host string,
-	d Decision,
-	reasonSuffix string,
-) {
-	reason := d.Reason + reasonSuffix
-	if d.ArmWatchdog {
-		if p.DryRun {
-			reason += dryRunWouldArmWatchdogSuffix
+	switch {
+	case pipeline.DryRun:
+		compositionError = compositionErrorDryRun
+	case !validCompletionID(input.CompletionID):
+		compositionError = compositionErrorIdentityUnavailable
+	case pipeline.Composer == nil:
+		if pipeline.CompositionError != nil {
+			compositionError = safeCompositionError(pipeline.CompositionError)
 		} else {
-			p.arm(in, res, now, project, host)
+			compositionError = compositionErrorUnavailable
+		}
+	default:
+		result, err := pipeline.Composer.Compose(
+			ctx,
+			completionComposeInput(input, scan),
+			ComposeLabel{Current: "", Refresh: false},
+		)
+		switch {
+		case err != nil:
+			compositionError = safeCompositionError(err)
+		case !validPiBody(result.Body):
+			compositionError = compositionErrorInvalidResult
+		default:
+			body = truncateWords(result.Body, maxNotificationBodyBytes)
+			compositionOutcome = compositionComposed
 		}
 	}
-	p.logRecord(in, now, DecisionRecord{Outcome: OutcomeSilent.String(), Reason: reason})
-}
 
-// handleSend implements the OutcomeSend branch: a deterministic send with
-// no judge involved. The title's second segment is where to go, not what
-// happened — the ping's sound/priority and body already carry the what. A
-// broadcast is about a headless job, so the receiving session's workspace
-// would be misleading; those use the host.
-func (p Pipeline) handleSend(
-	ctx context.Context,
-	in HookInput,
-	now time.Time,
-	project, locus, host string,
-	d Decision,
-	reasonSuffix string,
-) {
-	body := d.Message
-	if body == "" {
-		body = sendLabel(in.NotificationType)
+	notification := Notification{
+		Title:   project + " · " + locus,
+		Body:    body,
+		Urgency: UrgencyDone,
 	}
-	where := locus
-	if in.NotificationType == notifTypeAgentNeedsInput || in.NotificationType == notifTypeAgentCompleted {
-		where = host
-	}
-	n := Notification{Title: project + " · " + where, Body: body, Urgency: d.Urgency}
-
-	sendSuffix := p.deliver(ctx, n)
-	if !p.DryRun {
-		_ = p.dedupeState().MarkNotified(ctx, in.SessionID, now, n.Body)
-	}
-	p.logRecord(in, now, DecisionRecord{
-		Outcome: OutcomeSend.String(), Reason: d.Reason + reasonSuffix + sendSuffix,
-		Urgency: n.Urgency, Title: n.Title, Body: n.Body,
+	reason := decision.Reason + compositionReason(compositionOutcome, compositionError)
+	reason += pipeline.deliver(ctx, notification)
+	pipeline.logRecord(input, now, DecisionRecord{
+		Outcome: decision.Outcome.String(), Reason: reason,
+		Urgency: notification.Urgency, Title: notification.Title, Body: notification.Body,
+		CompositionOutcome: compositionOutcome, CompositionError: compositionError,
 	})
 }
 
-// sendLabel names the fallback body for a deterministic OutcomeSend whose
-// event carried no message, by NotificationType. Titles never use it: the
-// title slot carries where to go, not what happened.
-func sendLabel(notificationType string) string {
+func completionComposeInput(input HookInput, scan ScanResult) ComposeInput {
+	if input.Harness == harnessClaude && input.HookEventName == eventStop {
+		return ComposeInput{User: scan.LastUserMessage, Assistant: scan.LastAssistantText}
+	}
+	return ComposeInput{User: input.Message, Assistant: input.LastAssistantMessage}
+}
+
+func compositionReason(outcome, category string) string {
+	if outcome == compositionComposed {
+		return " (enriched)"
+	}
+	switch category {
+	case compositionErrorDryRun, compositionErrorIdentityUnavailable:
+		return " (enrichment skipped: " + category + ")"
+	case compositionErrorUnavailable, compositionErrorInvalidConfiguration:
+		return " (enrichment disabled: " + category + ")"
+	default:
+		return " (enrichment failed: " + category + ")"
+	}
+}
+
+// safeCompositionError consumes only PiComposer's fixed, secret-safe errors.
+// An injected, wrapped, or future error is deliberately collapsed so raw
+// subprocess/configuration text can never enter the decision log.
+func safeCompositionError(err error) string {
+	if err == nil {
+		return ""
+	}
+	switch err.Error() {
+	case "pi composer: invalid configuration":
+		return compositionErrorInvalidConfiguration
+	case "pi composer: invalid compose request":
+		return compositionErrorInvalidRequest
+	case "pi composer: helper unavailable":
+		return compositionErrorHelperUnavailable
+	case "pi composer: helper execution failed":
+		return compositionErrorHelperExecution
+	case "pi composer: helper timed out":
+		return compositionErrorHelperTimeout
+	case "pi composer: helper canceled":
+		return compositionErrorHelperCanceled
+	case "pi composer: invalid helper protocol":
+		return compositionErrorInvalidProtocol
+	case "pi composer: helper rejected request":
+		return compositionErrorRejectedRequest
+	case "pi composer: helper model unavailable":
+		return compositionErrorModelUnavailable
+	case "pi composer: helper generation failed":
+		return compositionErrorGenerationFailed
+	case "pi composer: helper reported timeout":
+		return compositionErrorReportedTimeout
+	case "pi composer: helper output invalid":
+		return compositionErrorInvalidOutput
+	default:
+		return compositionErrorFailed
+	}
+}
+
+func (pipeline Pipeline) handleInput(
+	ctx context.Context,
+	input HookInput,
+	now time.Time,
+	project string,
+	locus string,
+	host string,
+	decision Decision,
+) {
+	body := decision.Message
+	if body == "" {
+		body = inputFallbackLabel(input.NotificationType)
+	}
+	where := locus
+	if input.NotificationType == notifTypeAgentNeedsInput {
+		where = host
+	}
+	notification := Notification{
+		Title:   project + " · " + where,
+		Body:    body,
+		Urgency: decision.Urgency,
+	}
+	reason := decision.Reason + pipeline.deliver(ctx, notification)
+	pipeline.logRecord(input, now, DecisionRecord{
+		Outcome: decision.Outcome.String(), Reason: reason,
+		Urgency: notification.Urgency, Title: notification.Title, Body: notification.Body,
+	})
+}
+
+func inputFallbackLabel(notificationType string) string {
 	switch notificationType {
-	case "agent-turn-complete":
-		return turnCompleteLabel
 	case "permission_prompt":
 		return "needs permission"
-	case notifTypeAgentNeedsInput:
+	case "elicitation_dialog", notifTypeAgentNeedsInput:
 		return "needs input"
-	case notifTypeAgentCompleted:
-		return "job finished"
 	default:
 		return "notification"
 	}
 }
 
-// handleJudge implements the OutcomeJudge branch: build the digest, call
-// the judge, and route the verdict (or its absence) per JudgeMode.
-func (p Pipeline) handleJudge(
-	ctx context.Context, in HookInput, res ScanResult, env Env, now time.Time,
-	project, locus, host string, d Decision, reasonSuffix string,
-) {
-	tasks := EnrichTasks(res.LiveTasks, now)
-	digest := BuildDigest(DigestMeta{
-		Project: project, Host: host, Event: in.HookEventName, LastAssistantMessage: in.LastAssistantMessage,
-	}, res, tasks, now)
-
-	start := time.Now()
-	verdict, jerr := p.Judge.Evaluate(ctx, digest, d.JudgeMode)
-	judgeMs := time.Since(start).Milliseconds()
-
-	switch d.JudgeMode {
-	case JudgeModeCompose:
-		p.handleComposeVerdict(
-			ctx, in, res, env, now, project, locus, host, d, verdict, jerr, digest, judgeMs, reasonSuffix,
+// deliver either prints a rehearsal or performs the existing Sender call.
+// Delivery failures are logged but never returned to the hook process.
+func (pipeline Pipeline) deliver(ctx context.Context, notification Notification) string {
+	if pipeline.DryRun {
+		writer := pipeline.Stdout
+		if writer == nil {
+			writer = io.Discard
+		}
+		_, _ = fmt.Fprintf(
+			writer,
+			"DRY RUN: [%s] %s — %s\n",
+			notification.Urgency,
+			notification.Title,
+			notification.Body,
 		)
-	case JudgeModeDecide:
-		p.handleDecideVerdict(
-			ctx, in, res, env, now, project, locus, host, d, verdict, jerr, digest, judgeMs, reasonSuffix,
-		)
-	case JudgeModeNone:
-		// Decide never returns OutcomeJudge with JudgeModeNone; nothing to do.
+		return ""
 	}
+	deliveryContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), deliveryTimeout)
+	defer cancel()
+	if err := pipeline.Sender.Send(deliveryContext, notification); err != nil {
+		return " (" + deliveryFailureReason + ")"
+	}
+	return ""
 }
 
-// composeFallbackBody picks the judge-error fallback text by event: a Stop
-// describes the turn that just ended (from LastAssistantMessage, the field
-// Stop populates), a Notification describes the idle session it fired on
-// (from Message, the field Notification populates) — so the fallback never
-// claims a turn ended on an event that never stopped one.
-func composeFallbackBody(in HookInput) string {
-	if in.HookEventName == eventNotification {
-		body := truncateHeadWords(in.Message, maxNotificationTailLen)
-		if body == "" {
-			body = "session idle — waiting for input"
-		}
-		return body
+func (pipeline Pipeline) scanTranscript(path string) (ScanResult, error) {
+	if path == "" {
+		return ScanResult{}, fmt.Errorf("opening transcript: path unavailable")
 	}
-	body := truncateHeadWords(in.LastAssistantMessage, maxNotificationTailLen)
+	file, err := os.Open(path) //nolint:gosec // Hook payload supplies its own transcript path.
+	if err != nil {
+		return ScanResult{}, fmt.Errorf("opening transcript: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+	result, err := ScanTranscript(file)
+	if err != nil {
+		return ScanResult{}, fmt.Errorf("scanning transcript: %w", err)
+	}
+	return result, nil
+}
+
+func (pipeline Pipeline) logRecord(input HookInput, now time.Time, record DecisionRecord) {
+	record.Time = now
+	record.SessionID = input.SessionID
+	record.Event = input.HookEventName
+	record.Harness = defaultHarness(input.Harness, input.HookEventName)
+	record.CompletionID = input.CompletionID
+	_ = pipeline.Log.Append(record)
+}
+
+func completionFallbackBody(raw string) string {
+	body := truncateHeadWords(normalizeCompletionPlainText(raw), maxNotificationFallbackBytes)
 	if body == "" {
-		body = "turn ended"
+		return turnCompleteLabel
 	}
 	return body
 }
 
-// handleComposeVerdict implements the compose route: the send is already
-// decided, the judge only writes better text. A judge error falls back to
-// a deterministic notification titled by locus (where to go — a generic
-// "session idle" label would waste the slot) — never silent, per the
-// reliability invariant that an LLM failure may never lose a genuine ping.
-func (p Pipeline) handleComposeVerdict(
-	ctx context.Context, in HookInput, res ScanResult, env Env, now time.Time,
-	project, locus, host string,
-	d Decision, verdict JudgeVerdict, jerr error, digest string, judgeMs int64, reasonSuffix string,
-) {
-	if jerr != nil && failOpenSuppressed(env) {
-		p.suppressJudgeError(in, res, env, now, project, host, JudgeModeCompose, jerr, digest, judgeMs, reasonSuffix)
-		return
+func normalizeCompletionPlainText(raw string) string {
+	raw = strings.ToValidUTF8(raw, "")
+	if completionRawJSON(raw) {
+		return ""
 	}
-
-	var n Notification
-	if jerr == nil {
-		n = Notification{Title: project + " · " + verdict.Task, Body: verdict.Body, Urgency: verdict.Urgency}
-	} else {
-		n = Notification{Title: project + " · " + locus, Body: composeFallbackBody(in), Urgency: UrgencyDone}
+	lines := strings.Split(raw, "\n")
+	parts := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "```") || strings.HasPrefix(line, "~~~") {
+			continue
+		}
+		line = stripCompletionMarkdownPrefix(line)
+		line = unwrapCompletionMarkdownLinks(line)
+		line = strings.ReplaceAll(line, "`", "")
+		for _, marker := range []string{"**", "__", "~~", "*", "_"} {
+			line = unwrapCompletionMarkdownMarker(line, marker)
+		}
+		line = strings.Map(func(character rune) rune {
+			if unicode.IsControl(character) {
+				return ' '
+			}
+			return character
+		}, line)
+		if line = strings.TrimSpace(line); line != "" {
+			parts = append(parts, line)
+		}
 	}
-	n.Body += locatorSuffix(p.Workspace, host)
-
-	claim := judgedClaim{
-		in: in, res: res, now: now, project: project, host: host,
-		d: d, mode: JudgeModeCompose, jerr: jerr, digest: digest, judgeMs: judgeMs,
-		reasonSuffix: reasonSuffix + retriedWithoutModelSuffix(verdict.RetriedWithoutModel),
+	plain := strings.Join(strings.Fields(strings.Join(parts, " ")), " ")
+	if completionRawJSON(plain) {
+		return ""
 	}
-	if !p.claimJudgedSend(ctx, claim, n.Body) {
-		return
-	}
-
-	sendSuffix := p.deliver(ctx, n)
-	p.logJudged(
-		in, now, OutcomeSend.String(),
-		d.Reason+reasonSuffix+sendSuffix+retriedWithoutModelSuffix(verdict.RetriedWithoutModel),
-		n, JudgeModeCompose, jerr, digest, judgeMs,
-	)
+	return plain
 }
 
-// judgedClaim carries the context claimJudgedSend needs to log a suppressed
-// judged send and keep watchdog coverage on it — everything its handler
-// already had in scope, bundled because Go has no keyword arguments.
-type judgedClaim struct {
-	in            HookInput
-	res           ScanResult
-	now           time.Time
-	project, host string
-	d             Decision
-	mode          JudgeMode
-	jerr          error
-	digest        string
-	judgeMs       int64
-	reasonSuffix  string
+func completionRawJSON(value string) bool {
+	value = strings.TrimSpace(value)
+	return len(value) >= 2 && (value[0] == '{' || value[0] == '[') && json.Valid([]byte(value))
 }
 
-// claimJudgedSend runs the pre-delivery ClaimSend gate shared by every
-// judged send path and reports whether the send may proceed. A lost claim
-// means some other send for this session landed within dedupeWindow — most
-// often while this evaluation's judge call was in flight (a racing hook
-// event or watchdog), which the pre-judge SinceLastNotify snapshot cannot
-// see. The suppression is logged as a silent outcome, and — exactly like the
-// pre-judge silent branches — still arms the watchdog when the decision
-// wanted one, so suppressing the ping never drops coverage of the live work
-// behind it.
-func (p Pipeline) claimJudgedSend(ctx context.Context, c judgedClaim, body string) bool {
-	won, since := p.dedupeState().ClaimSend(ctx, c.in.SessionID, c.now, body, dedupeWindow, p.DryRun)
-	if won {
+func stripCompletionMarkdownPrefix(line string) string {
+	for {
+		before := line
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, ">") {
+			line = strings.TrimSpace(strings.TrimPrefix(line, ">"))
+		}
+		if width := completionHeadingPrefixLen(line); width > 0 {
+			line = strings.TrimSpace(line[width:])
+		}
+		if width := completionListPrefixLen(line); width > 0 {
+			line = strings.TrimSpace(line[width:])
+		}
+		if line == before {
+			return line
+		}
+	}
+}
+
+func completionHeadingPrefixLen(line string) int {
+	count := 0
+	for count < len(line) && count < 6 && line[count] == '#' {
+		count++
+	}
+	if count > 0 && count < len(line) && unicode.IsSpace(rune(line[count])) {
+		return count + 1
+	}
+	return 0
+}
+
+const completionMarkdownPairWidth = 2
+
+func completionListPrefixLen(line string) int {
+	if len(line) >= completionMarkdownPairWidth && strings.ContainsRune("-*+", rune(line[0])) &&
+		unicode.IsSpace(rune(line[1])) {
+		return completionMarkdownPairWidth
+	}
+	digits := 0
+	for digits < len(line) && line[digits] >= '0' && line[digits] <= '9' {
+		digits++
+	}
+	if digits > 0 && digits+1 < len(line) && (line[digits] == '.' || line[digits] == ')') &&
+		unicode.IsSpace(rune(line[digits+1])) {
+		return digits + completionMarkdownPairWidth
+	}
+	return 0
+}
+
+func unwrapCompletionMarkdownLinks(value string) string {
+	var result strings.Builder
+	for {
+		open := strings.IndexByte(value, '[')
+		if open < 0 {
+			result.WriteString(value)
+			return result.String()
+		}
+		labelEnd := strings.Index(value[open+1:], "](")
+		if labelEnd < 0 {
+			result.WriteString(value)
+			return result.String()
+		}
+		labelEnd += open + 1
+		urlEnd := strings.IndexByte(value[labelEnd+completionMarkdownPairWidth:], ')')
+		if urlEnd < 0 {
+			result.WriteString(value)
+			return result.String()
+		}
+		urlEnd += labelEnd + completionMarkdownPairWidth
+		result.WriteString(strings.TrimSuffix(value[:open], "!"))
+		result.WriteString(value[open+1 : labelEnd])
+		value = value[urlEnd+1:]
+	}
+}
+
+func unwrapCompletionMarkdownMarker(value string, marker string) string {
+	for searchFrom := 0; searchFrom < len(value); {
+		openOffset := strings.Index(value[searchFrom:], marker)
+		if openOffset < 0 {
+			return value
+		}
+		open := searchFrom + openOffset
+		if completionMarkerStartsTechnicalToken(value, open, marker) ||
+			!completionMarkerCanOpen(value, open, len(marker)) {
+			searchFrom = open + len(marker)
+			continue
+		}
+		closeFrom := open + len(marker)
+		for closeFrom < len(value) {
+			closeOffset := strings.Index(value[closeFrom:], marker)
+			if closeOffset < 0 {
+				return value
+			}
+			closeAt := closeFrom + closeOffset
+			if completionMarkerCanClose(value, closeAt, len(marker)) {
+				value = value[:open] + value[open+len(marker):closeAt] + value[closeAt+len(marker):]
+				searchFrom = open
+				break
+			}
+			closeFrom = closeAt + len(marker)
+		}
+	}
+	return value
+}
+
+func completionMarkerStartsTechnicalToken(value string, at int, marker string) bool {
+	token := strings.TrimRight(completionTokenAt(value, at), ".,;:!?)]}\"'")
+	paired := strings.HasPrefix(token, marker) && strings.HasSuffix(token, marker) && len(token) > 2*len(marker)
+	if paired {
+		content := token[len(marker) : len(token)-len(marker)]
+		return strings.IndexFunc(content, func(character rune) bool {
+			return unicode.IsLetter(character) || unicode.IsDigit(character)
+		}) < 0
+	}
+	return strings.ContainsAny(token, `/\.`)
+}
+
+func completionTokenAt(value string, at int) string {
+	start := at
+	for start > 0 {
+		previous, size := utf8.DecodeLastRuneInString(value[:start])
+		if unicode.IsSpace(previous) {
+			break
+		}
+		start -= size
+	}
+	end := at
+	for end < len(value) {
+		next, size := utf8.DecodeRuneInString(value[end:])
+		if unicode.IsSpace(next) {
+			break
+		}
+		end += size
+	}
+	return value[start:end]
+}
+
+func completionMarkerCanOpen(value string, at int, markerLength int) bool {
+	if at+markerLength >= len(value) {
+		return false
+	}
+	next, _ := utf8.DecodeRuneInString(value[at+markerLength:])
+	if unicode.IsSpace(next) {
+		return false
+	}
+	if at == 0 {
 		return true
 	}
-
-	reason := fmt.Sprintf("dedupe: notified %s ago (post-judge)", humanDuration(since)) + c.reasonSuffix
-	if c.d.ArmWatchdog {
-		if p.DryRun {
-			reason += dryRunWouldArmWatchdogSuffix
-		} else {
-			p.arm(c.in, c.res, c.now, c.project, c.host)
-		}
-	}
-	p.logJudged(c.in, c.now, OutcomeSilent.String(), reason, Notification{}, c.mode, c.jerr, c.digest, c.judgeMs)
-	return false
+	previous, _ := utf8.DecodeLastRuneInString(value[:at])
+	return unicode.IsSpace(previous) || strings.ContainsRune("([{>\"'", previous)
 }
 
-// locatorSuffix renders the where-did-this-come-from trailer appended to
-// judged and watchdog notification bodies, whose titles carry the judge's
-// task label rather than a location: the tmux locator (session:window-index,
-// see WorkspaceName) plus the host, whichever of the two are known.
-func locatorSuffix(workspace, host string) string {
-	switch {
-	case workspace != "" && host != "":
-		return "\n\n— " + workspace + " @ " + host
-	case workspace != "":
-		return "\n\n— " + workspace
-	case host != "":
-		return "\n\n— " + host
-	default:
-		return ""
+func completionMarkerCanClose(value string, at int, markerLength int) bool {
+	if at == 0 {
+		return false
 	}
+	previous, _ := utf8.DecodeLastRuneInString(value[:at])
+	if unicode.IsSpace(previous) {
+		return false
+	}
+	if at+markerLength == len(value) {
+		return true
+	}
+	next, _ := utf8.DecodeRuneInString(value[at+markerLength:])
+	return unicode.IsSpace(next) || unicode.IsPunct(next)
 }
 
-// failOpenSuppressed reports whether a compose/decide-mode judge error
-// should be suppressed under failOpenWindow rather than falling back to a
-// deterministic send: true only when this session notified within the
-// window. SinceLastNotify negative means never notified, which must always
-// send — the epic's anti-pattern guard is that the FIRST judge error may
-// never fail to notify.
-func failOpenSuppressed(env Env) bool {
-	return env.SinceLastNotify >= 0 && env.SinceLastNotify < failOpenWindow
-}
-
-// suppressJudgeError implements the failOpenWindow rate limit shared by the
-// compose- and decide-mode judge-error fallbacks: silent, watchdog armed,
-// logged as the distinct "judge error" outcome so a suppressed repeat stays
-// distinguishable in the decision log from a genuine silent verdict.
-func (p Pipeline) suppressJudgeError(
-	in HookInput, res ScanResult, env Env, now time.Time, project, host string,
-	mode JudgeMode, jerr error, digest string, judgeMs int64, reasonSuffix string,
-) {
-	reason := fmt.Sprintf("suppressed: notified %s ago", humanDuration(env.SinceLastNotify)) + reasonSuffix
-	if p.DryRun {
-		reason += dryRunWouldArmWatchdogSuffix
-	} else {
-		p.arm(in, res, now, project, host)
-	}
-	p.logJudged(in, now, "judge error", reason, Notification{}, mode, jerr, digest, judgeMs)
-}
-
-// retriedWithoutModelSuffix renders whether the judge's runRetrying path
-// retried without --model, as a decision-log Reason suffix — so an operator
-// reading the log can see when the no-model retry path ran.
-func retriedWithoutModelSuffix(retried bool) string {
-	if retried {
-		return " (judge retried without --model)"
-	}
-	return ""
-}
-
-// handleDecideVerdict implements the decide route: the judge itself chooses
-// notify-or-silence. A judge error falls back to a deterministic send
-// (documented asymmetry vs. the watchdog's silent decide-error path: the
-// watchdog rechecks repeatedly so a silent skip is safe, but this hook path
-// has no retry, so it fails open to a send instead of risking a lost ping).
-func (p Pipeline) handleDecideVerdict(
-	ctx context.Context,
-	in HookInput,
-	res ScanResult,
-	env Env,
-	now time.Time,
-	project, locus, host string,
-	d Decision,
-	verdict JudgeVerdict,
-	jerr error,
-	digest string,
-	judgeMs int64,
-	reasonSuffix string,
-) {
-	if jerr != nil {
-		if failOpenSuppressed(env) {
-			p.suppressJudgeError(in, res, env, now, project, host, JudgeModeDecide, jerr, digest, judgeMs, reasonSuffix)
-			return
-		}
-		body := truncateHeadWords(in.LastAssistantMessage, maxNotificationTailLen)
-		if body == "" {
-			body = "session has running background work"
-		}
-		n := Notification{Title: project + " · " + locus, Body: body, Urgency: UrgencyInfo}
-		n.Body += locatorSuffix(p.Workspace, host)
-		claim := judgedClaim{
-			in: in, res: res, now: now, project: project, host: host,
-			d: d, mode: JudgeModeDecide, jerr: jerr, digest: digest, judgeMs: judgeMs, reasonSuffix: reasonSuffix,
-		}
-		if !p.claimJudgedSend(ctx, claim, n.Body) {
-			return
-		}
-		sendSuffix := p.deliver(ctx, n)
-		p.logJudged(
-			in, now, OutcomeSend.String(), d.Reason+reasonSuffix+sendSuffix, n, JudgeModeDecide, jerr, digest, judgeMs,
-		)
-		return
-	}
-
-	if !verdict.Notify {
-		if d.ArmWatchdog && !p.DryRun {
-			p.arm(in, res, now, project, host)
-		}
-		p.logJudged(
-			in,
-			now,
-			OutcomeSilent.String(),
-			verdict.Reason+reasonSuffix+retriedWithoutModelSuffix(verdict.RetriedWithoutModel),
-			Notification{},
-			JudgeModeDecide,
-			nil,
-			digest,
-			judgeMs,
-		)
-		return
-	}
-
-	n := Notification{Title: project + " · " + verdict.Task, Body: verdict.Body, Urgency: verdict.Urgency}
-	n.Body += locatorSuffix(p.Workspace, host)
-	claim := judgedClaim{
-		in: in, res: res, now: now, project: project, host: host,
-		d: d, mode: JudgeModeDecide, digest: digest, judgeMs: judgeMs,
-		reasonSuffix: reasonSuffix + retriedWithoutModelSuffix(verdict.RetriedWithoutModel),
-	}
-	if !p.claimJudgedSend(ctx, claim, n.Body) {
-		return
-	}
-	sendSuffix := p.deliver(ctx, n)
-	p.logJudged(
-		in, now, OutcomeSend.String(),
-		d.Reason+reasonSuffix+sendSuffix+retriedWithoutModelSuffix(verdict.RetriedWithoutModel),
-		n, JudgeModeDecide, nil, digest, judgeMs,
-	)
-}
-
-// deliver sends n: in DryRun mode it writes a "DRY RUN: ..." line to Stdout
-// (and never fails); otherwise it calls Sender.Send. A send failure never
-// propagates as an error — it returns a " (send failed: ...)" suffix for
-// the caller to fold into the decision log's Reason field, since delivery
-// failure must never fail the hook.
-func (p Pipeline) deliver(ctx context.Context, n Notification) string {
-	if p.DryRun {
-		_, _ = fmt.Fprintf(p.Stdout, "DRY RUN: [%s] %s — %s\n", n.Urgency, n.Title, n.Body)
-		return ""
-	}
-	if err := p.Sender.Send(ctx, n); err != nil {
-		return fmt.Sprintf(" (send failed: %s)", err)
-	}
-	return ""
-}
-
-// arm notifies p.Watchdog to start (or supersede) covering this session's
-// live/pending work. A nil Watchdog — the hook client's inline fallback —
-// makes this a no-op: see Watchdog's doc comment for the documented degraded
-// mode that leaves.
-func (p Pipeline) arm(in HookInput, res ScanResult, now time.Time, project, host string) {
-	if p.Watchdog == nil {
-		return
-	}
-	p.Watchdog.Arm(WatchdogArmRequest{
-		SessionID:  in.SessionID,
-		Transcript: in.TranscriptPath,
-		Offset:     res.BytesScanned,
-		ParentPID:  p.ParentPID,
-		Workspace:  p.Workspace,
-		Meta:       DigestMeta{Project: project, Host: host, Event: "recheck"},
-		ArmedAt:    now,
-		GoalArmed:  res.Goal.Status == GoalActive,
-	})
-}
-
-// logRecord appends rec to the decision log with ingress identity and Time/SessionID/Event
-// filled from now/in. Append errors are swallowed: logging must never be
-// able to fail the hook.
-func (p Pipeline) logRecord(in HookInput, now time.Time, rec DecisionRecord) {
-	rec.Time = now
-	rec.SessionID = in.SessionID
-	rec.Event = in.HookEventName
-	rec.Harness = in.Harness
-	if rec.Harness == "" {
-		if in.HookEventName == eventTurnComplete {
-			rec.Harness = harnessCodex
-		} else {
-			rec.Harness = harnessClaude
-		}
-	}
-	rec.CompletionID = in.CompletionID
-	_ = p.Log.Append(rec)
-}
-
-// logJudged builds and appends a decision record for a judged evaluation:
-// every judged record carries Digest, JudgeMode, JudgeMs, and (if non-nil)
-// JudgeErr, regardless of which route the verdict took.
-func (p Pipeline) logJudged(
-	in HookInput, now time.Time, outcome, reason string, n Notification, mode JudgeMode, jerr error,
-	digest string, judgeMs int64,
-) {
-	rec := DecisionRecord{
-		Outcome: outcome, Reason: reason,
-		Urgency: n.Urgency, Title: n.Title, Body: n.Body,
-		JudgeMode: judgeModeLabel(mode), JudgeMs: judgeMs, Digest: digest,
-	}
-	if jerr != nil {
-		rec.JudgeErr = jerr.Error()
-	}
-	p.logRecord(in, now, rec)
-}
-
-// ShortHostname returns os.Hostname() with any domain suffix stripped
-// (everything from the first '.' onward). Returns "" if os.Hostname()
-// errors.
+// ShortHostname strips the domain suffix from os.Hostname().
 func ShortHostname() string {
-	h, err := os.Hostname()
+	host, err := os.Hostname()
 	if err != nil {
 		return ""
 	}
-	short, _, _ := strings.Cut(h, ".")
+	short, _, _ := strings.Cut(host, ".")
 	return short
 }

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,147 +13,111 @@ import (
 	"time"
 )
 
-func TestDecisionLog_AppendRoundTripsParse(t *testing.T) {
+func TestDecisionLogRoundTripsSafeCompletionRecord(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sub", "decisions.jsonl")
-	l := DecisionLog{Path: path}
-
+	log := DecisionLog{Path: path}
 	want := DecisionRecord{
-		Time:      time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC),
-		SessionID: "sess-1",
-		Event:     "Stop",
-		Outcome:   "send",
-		Reason:    "turn ended",
-		Urgency:   UrgencyDone,
-		Title:     "hi",
-		Body:      "there",
-		JudgeMode: "compose",
-		JudgeErr:  "",
-		JudgeMs:   42,
-		Digest:    "SESSION\n...",
+		Time:      time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC),
+		SessionID: "session-1", Event: eventStop, Harness: harnessClaude,
+		CompletionID: "assistant-uuid", Outcome: OutcomeSend.String(), Reason: "root completion",
+		Urgency: UrgencyDone, Title: "project · earth:3", Body: "summary",
+		CompositionOutcome: compositionFallback, CompositionError: compositionErrorHelperUnavailable,
 	}
-	if err := l.Append(want); err != nil {
-		t.Fatalf("Append() error = %v", err)
+	if err := log.Append(want); err != nil {
+		t.Fatal(err)
 	}
-
 	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("reading log: %v", err)
+		t.Fatal(err)
 	}
-	line := strings.TrimSuffix(string(data), "\n")
 	var got DecisionRecord
-	if unmarshalErr := json.Unmarshal([]byte(line), &got); unmarshalErr != nil {
-		t.Fatalf("unmarshaling record: %v (line: %q)", unmarshalErr, line)
+	if unmarshalErr := json.Unmarshal(bytes.TrimSpace(data), &got); unmarshalErr != nil {
+		t.Fatal(unmarshalErr)
 	}
-	if !got.Time.Equal(want.Time) {
-		t.Errorf("Time = %v, want %v", got.Time, want.Time)
-	}
-	got.Time = want.Time // neutralize for the rest of the comparison
 	if got != want {
 		t.Errorf("record = %+v, want %+v", got, want)
 	}
-}
-
-func TestDecisionLogCompletionIdentityJSON(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "decisions.jsonl")
-	log := DecisionLog{Path: path}
-	if err := log.Append(
-		DecisionRecord{Harness: harnessPi, CompletionID: "completion-1"},
-	); err != nil {
-		t.Fatal(err)
-	}
-	if err := log.Append(DecisionRecord{Harness: harnessClaude}); err != nil {
-		t.Fatal(err)
-	}
-	lines := strings.Split(strings.TrimSpace(string(mustReadLog(t, path))), "\n")
-	if !strings.Contains(lines[0], `"harness":"pi"`) ||
-		!strings.Contains(lines[0], `"completion_id":"completion-1"`) {
-		t.Fatalf("identified record = %s", lines[0])
-	}
-	if strings.Contains(lines[1], "completion_id") {
-		t.Fatalf("unidentified record leaked completion id: %s", lines[1])
-	}
-}
-
-func mustReadLog(t *testing.T, path string) []byte {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return data
-}
-
-func TestDecisionLog_RotatesBeforeAppendPastFiveMB(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "decisions.jsonl")
-	l := DecisionLog{Path: path}
-
-	// 4 records at 1.5MB each (~6.29MB) push the file past the 5MB
-	// threshold; the 5th Append's pre-check then rotates the existing file
-	// before writing its own (much smaller) line.
-	bigBody := strings.Repeat("x", 3*1024*1024/2)
-	for i := range 5 {
-		if err := l.Append(DecisionRecord{SessionID: "sess", Body: bigBody}); err != nil {
-			t.Fatalf("Append() #%d error = %v", i, err)
+	for _, obsolete := range []string{"judge_mode", "judge_err", "judge_ms", "digest", "prompt", "environ"} {
+		if bytes.Contains(data, []byte(obsolete)) {
+			t.Errorf("log contains obsolete/private field %q: %s", obsolete, data)
 		}
 	}
+}
 
-	rotatedPath := path + ".1"
-	rotatedInfo, err := os.Stat(rotatedPath)
+func TestDecisionLogOmitsMissingCompletionIdentityAndCompositionFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "decisions.jsonl")
+	if err := (DecisionLog{Path: path}).Append(DecisionRecord{
+		Harness: harnessClaude, Outcome: OutcomeSilent.String(), Reason: "session end",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("stat rotated file: %v", err)
+		t.Fatal(err)
 	}
-	if rotatedInfo.Size() < 4*1024*1024 {
-		t.Errorf("rotated file size = %d, want it to hold the earlier bulk (>4MB)", rotatedInfo.Size())
-	}
-
-	freshInfo, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat fresh file: %v", err)
-	}
-	if freshInfo.Size() >= rotatedInfo.Size() {
-		t.Errorf("fresh file size = %d, want smaller than rotated file %d", freshInfo.Size(), rotatedInfo.Size())
+	for _, omitted := range []string{"completion_id", "composition_outcome", "composition_error"} {
+		if strings.Contains(string(data), omitted) {
+			t.Errorf("record unexpectedly contains %q: %s", omitted, data)
+		}
 	}
 }
 
-func TestDecisionLog_ConcurrentAppendsAllIntact(t *testing.T) {
+func TestDecisionLogRotatesBeforeAppendPastFiveMB(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "decisions.jsonl")
-	l := DecisionLog{Path: path}
+	log := DecisionLog{Path: path}
+	bigBody := strings.Repeat("x", 3*1024*1024/2)
+	for index := range 5 {
+		if err := log.Append(DecisionRecord{SessionID: "session", Body: bigBody}); err != nil {
+			t.Fatalf("Append() #%d: %v", index, err)
+		}
+	}
+	rotated, err := os.Stat(path + ".1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rotated.Size() <= fresh.Size() {
+		t.Errorf("rotated size %d <= fresh size %d", rotated.Size(), fresh.Size())
+	}
+}
 
+func TestDecisionLogConcurrentAppendsRemainWholeJSONLines(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "decisions.jsonl")
+	log := DecisionLog{Path: path}
 	const goroutines = 10
 	const perGoroutine = 20
-
-	var wg sync.WaitGroup
-	for g := range goroutines {
-		wg.Add(1)
-		go func(g int) {
-			defer wg.Done()
-			for i := range perGoroutine {
-				rec := DecisionRecord{SessionID: "sess", Reason: "concurrent", JudgeMs: int64(g*perGoroutine + i)}
-				if appendErr := l.Append(rec); appendErr != nil {
-					t.Errorf("Append() goroutine %d iter %d error = %v", g, i, appendErr)
+	var wait sync.WaitGroup
+	for goroutine := range goroutines {
+		wait.Add(1)
+		go func(goroutine int) {
+			defer wait.Done()
+			for index := range perGoroutine {
+				record := DecisionRecord{SessionID: "session", Reason: fmt.Sprintf("%d-%d", goroutine, index)}
+				if err := log.Append(record); err != nil {
+					t.Errorf("Append(): %v", err)
 				}
 			}
-		}(g)
+		}(goroutine)
 	}
-	wg.Wait()
-
+	wait.Wait()
 	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("reading log: %v", err)
+		t.Fatal(err)
 	}
-
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	count := 0
 	for scanner.Scan() {
-		line := scanner.Bytes()
-		var rec DecisionRecord
-		if unmarshalErr := json.Unmarshal(line, &rec); unmarshalErr != nil {
-			t.Fatalf("line %d did not parse as JSON: %v (line: %q)", count, unmarshalErr, line)
+		var record DecisionRecord
+		if unmarshalErr := json.Unmarshal(scanner.Bytes(), &record); unmarshalErr != nil {
+			t.Fatalf("line %d: %v", count, unmarshalErr)
 		}
 		count++
 	}
 	if scanErr := scanner.Err(); scanErr != nil {
-		t.Fatalf("scanning log: %v", scanErr)
+		t.Fatal(scanErr)
 	}
 	if count != goroutines*perGoroutine {
 		t.Errorf("line count = %d, want %d", count, goroutines*perGoroutine)

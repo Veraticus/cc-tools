@@ -21,10 +21,12 @@ kept for compatibility.
 
 ### 🔔 Turn Notifications
 
-- **Claude Code hooks** - Rich Stop/Notification/SessionEnd processing with
-  transcript-aware dedupe and optional daemon-side composition
-- **Codex CLI notify** - Accepts Codex's `agent-turn-complete` JSON argument and
-  delivers a concise turn summary without requiring Claude
+- **Deterministic root delivery** - Claude Stop and Codex/Pi TurnComplete events
+  always deliver with done urgency; child and internal events stay silent
+- **Immediate input delivery** - Claude permission, elicitation, and
+  agent-needs-input events deliver with blocked urgency without model latency
+- **Daemon-only Pi composition** - `notifyd` may improve a completion body using
+  the configured Pi helper, but composition cannot veto delivery or change urgency
 - **Provider-neutral configuration** - `CC_TOOLS_NTFY_*` environment variables,
   with the original `CLAUDE_HOOKS_NTFY_*` names retained as aliases
 
@@ -33,9 +35,9 @@ kept for compatibility.
 | Capability | Claude Code | Codex CLI |
 |---|---|---|
 | External notification command | Yes, JSON on stdin | Yes, JSON in one argument |
-| Turn-complete ntfy delivery | Yes | Yes |
+| Root turn-complete ntfy delivery | Yes | Yes |
 | Permission/external approval delivery | Yes | Use Codex's built-in TUI notifications |
-| Transcript-aware decisions and watchdogs | Yes | No; Codex's notify payload has no transcript path |
+| Daemon-side Pi body composition | Yes, using reliable transcript identity | Yes, using native turn identity |
 | Replace the in-app status line with `cc-tools-statusline` | Yes | No; Codex accepts built-in footer item identifiers only |
 
 ## Installation
@@ -117,28 +119,35 @@ The `_FILE` variants are supported for secrets (`CC_TOOLS_NTFY_URL_FILE` and
 `CC_TOOLS_NTFY_TOKEN_FILE`). Set `CC_TOOLS_NTFY_DISABLED=true` to suppress
 delivery. The old `CLAUDE_HOOKS_NTFY_*` variables continue to work.
 
-When `notifyd` is reachable, Codex turn composition is daemon-only. The daemon
-starts a separate `codex exec` process that is ephemeral, read-only, isolated
-from user configuration and rules, and instructed to use no tools. It sends the
-complete newline-joined `input-messages` plus the complete final assistant
-response to Luna without truncating or pre-summarizing either input; only the
-resulting notification output is bounded. The default model is
-`gpt-5.6-luna`. Set `CC_TOOLS_CODEX_JUDGE_MODEL` to a non-empty model name to
-override it.
+Root completion delivery is deterministic. When `notifyd` receives an eligible
+completion with a usable native ID, it calls `steward-pi-helper` exactly once
+with the latest user and assistant text. The helper may supply only a validated
+plain-text body; it cannot suppress the notification or change its done urgency.
+Claude Stop uses the transcript's reliable final assistant UUID, then
+`message.id`; an unavailable or unreliable transcript never reuses a stale
+supplied ID. Active Claude `/goal` state remains a structural silence gate.
 
-Luna's JSON verdict is internal IPC. ntfy receives only parsed plain text: the
-task in the title and the human summary in the body, never serialized verdict
-JSON, the model's reason, stdout/stderr, or evaluator diagnostics. Successful
-bodies include the locator and have a 200-byte UTF-8 limit with a visible
-ellipsis when needed. If Luna is disabled or fails, the notification uses a
-model-free tail of the final response with a 160-byte UTF-8 limit and a leading
-ellipsis when truncated (or `turn complete` when empty), and omits a body locator.
+Pi configuration is centralized in the daemon environment:
 
-If `notifyd` is unavailable, `cc-tools notify` uses that same bounded,
-model-free fallback inline; it never starts `codex`. Dry runs are model-free as
-well. Claude routes are unchanged: their separate judge still defaults to
-Haiku (`claude-haiku-4-5`) and honors the existing
-`ANTHROPIC_SMALL_FAST_MODEL` override.
+```bash
+export STEWARD_HELPER_BIN="steward-pi-helper"
+export STEWARD_MODEL_PROVIDER="openai-codex"
+export STEWARD_MODEL_ID="gpt-5.6-luna"
+export STEWARD_MODEL_THINKING="low"
+```
+
+Each default applies only when its setting is absent. An explicitly invalid
+setting, unavailable helper, authentication failure, malformed response, or
+timeout does not disable completion delivery: the decision log records only a
+safe error category and ntfy receives a deterministic plain-text tail of the
+final response. Fallback bodies are valid UTF-8, at most 160 bytes, and use
+`turn complete` when empty. Generated bodies are bounded to 200 bytes. Titles
+retain the cwd project name and tmux workspace locator (or host fallback).
+
+If `notifyd` is unavailable, `cc-tools notify` uses the same model-free fallback
+inline. Dry runs are model-free as well; neither path starts the helper or
+attempts model authentication. Notification frames retain workspace routing but
+never copy the caller's whole environment into daemon IPC.
 
 You can exercise the Codex adapter without sending anything:
 

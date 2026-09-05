@@ -496,7 +496,7 @@ func TestParseHookInputSourceAndNativeTypeMatrix(t *testing.T) {
 		if in.HookEventName != eventTurnComplete || in.AgentID != "agent-1" || in.AgentType != "worker" {
 			t.Fatalf("normalized subagent input = %+v", in)
 		}
-		if got := Decide(in, ScanResult{}, Env{}); got.Outcome != OutcomeSilent {
+		if got := Decide(in, ScanResult{}); got.Outcome != OutcomeSilent {
 			t.Fatalf("Decide() = %+v, want silent agent context", got)
 		}
 	})
