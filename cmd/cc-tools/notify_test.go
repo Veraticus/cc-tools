@@ -364,6 +364,9 @@ func TestDispatchNotifyInlineAndDryRunNeverInvokePiHelper(t *testing.T) {
 			if stderr.Len() != 0 {
 				t.Fatalf("stderr = %q", stderr.String())
 			}
+			if _, err := os.Stat(filepath.Join(filepath.Dir(cfg.Log.Path), "session-labels")); !os.IsNotExist(err) {
+				t.Fatalf("inline/dry-run created label state: %v", err)
+			}
 		})
 	}
 }
@@ -416,7 +419,7 @@ func TestRunNotifyCommandHarnessFlagPreparesRealCodexFrameAndWaitsForAck(t *test
 	}
 }
 
-func TestNewNotifydPipelineUsesCentralPiConfiguration(t *testing.T) {
+func TestNewNotifydPipelineUsesCentralPiConfigurationAndDaemonOnlyLabels(t *testing.T) {
 	directory := t.TempDir()
 	helperPath := filepath.Join(directory, "helper")
 	helperScript := "#!/bin/sh\nprintf '%s\\n' " +
@@ -424,17 +427,57 @@ func TestNewNotifydPipelineUsesCentralPiConfiguration(t *testing.T) {
 	if err := os.WriteFile(helperPath, []byte(helperScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	pipeline := newNotifydPipeline(false, notify.Sender{}, notify.DecisionLog{}, []string{
+	environ := []string{
 		"STEWARD_HELPER_BIN=" + helperPath,
 		"STEWARD_MODEL_PROVIDER=provider-central",
 		"STEWARD_MODEL_ID=model-central",
 		"STEWARD_MODEL_THINKING=xhigh",
-	})
+	}
+	pipeline := newNotifydPipeline(
+		false, notify.Sender{}, notify.DecisionLog{}, environ, directory,
+	)
 	composer, ok := pipeline.Composer.(notify.PiComposer)
 	if !ok || composer.Bin != helperPath || composer.Model != (notify.ComposeModel{
 		Provider: "provider-central", ID: "model-central", Thinking: "xhigh",
 	}) {
 		t.Fatalf("composer = %+v (%T)", composer, pipeline.Composer)
+	}
+	if pipeline.LabelStore == nil {
+		t.Fatal("real daemon pipeline has no persistent label store")
+	}
+	if dry := newNotifydPipeline(
+		true, notify.Sender{}, notify.DecisionLog{}, environ, directory,
+	); dry.LabelStore != nil {
+		t.Fatal("dry-run daemon pipeline must not have a label store")
+	}
+	if _, err := os.Stat(filepath.Join(directory, "session-labels")); !os.IsNotExist(err) {
+		t.Fatalf("constructing unused pipelines wrote label state: %v", err)
+	}
+}
+
+func TestSessionLabelDocumentationCoversPersistenceCadenceAndFallback(t *testing.T) {
+	document, err := os.ReadFile(filepath.Join("..", "..", "docs", "session-labels.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		"first", "four additional", "1, 5, and 9", "changed", "KEEP",
+		"session-labels", "SHA-256", "0700", "0600", "source generation",
+		"minimal", "not an outbox", "daemon", "inline", "dry-run", "cwd",
+		"harness", "resume", "manual",
+	} {
+		if !strings.Contains(string(document), required) {
+			t.Errorf("session label documentation missing %q", required)
+		}
+	}
+	readme, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"shared session label", "four additional", "cwd", "session-labels"} {
+		if !strings.Contains(string(readme), required) {
+			t.Errorf("README notification section missing %q", required)
+		}
 	}
 }
 

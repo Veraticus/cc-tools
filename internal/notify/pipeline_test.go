@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -802,5 +803,823 @@ func TestPipelineSessionEndAndSilentEventsNeverComposeOrSend(t *testing.T) {
 				t.Errorf("record = %+v, want silent", record)
 			}
 		})
+	}
+}
+
+type sequencedComposer struct {
+	mutex   sync.Mutex
+	calls   []composeCall
+	results []ComposeResult
+	errors  []error
+}
+
+func (composer *sequencedComposer) Compose(
+	_ context.Context,
+	input ComposeInput,
+	label ComposeLabel,
+) (ComposeResult, error) {
+	composer.mutex.Lock()
+	defer composer.mutex.Unlock()
+	index := len(composer.calls)
+	composer.calls = append(composer.calls, composeCall{Input: input, Label: label})
+	var result ComposeResult
+	if index < len(composer.results) {
+		result = composer.results[index]
+	}
+	var err error
+	if index < len(composer.errors) {
+		err = composer.errors[index]
+	}
+	return result, err
+}
+
+func (composer *sequencedComposer) Calls() []composeCall {
+	composer.mutex.Lock()
+	defer composer.mutex.Unlock()
+	return append([]composeCall(nil), composer.calls...)
+}
+
+func preparedCompletion(harness, session, completion, cwd, user, assistant string) PreparedEvent {
+	sourceEvent := eventTurnComplete
+	if harness == harnessClaude {
+		sourceEvent = eventStop
+	}
+	return PreparedEvent{
+		Version: preparedEventVersion, Harness: harness, SessionID: session,
+		Kind: eventKindCompletion, SourceEvent: sourceEvent, CWD: cwd,
+		CompletionID: completion, User: user, Assistant: assistant,
+	}
+}
+
+func TestPipelinePeriodicLabelsUseSameCompositionAtFirstFifthNinth(t *testing.T) {
+	server, requests := captureNotificationServer(t)
+	defer server.Close()
+	results := make([]ComposeResult, 9)
+	for index := range results {
+		results[index].Body = "summary"
+	}
+	results[0].Label = "Initial Shared Label"
+	// The fifth response intentionally omits a label: with a prior label this
+	// is a successful KEEP and must advance the cadence without deleting it.
+	results[8].Label = "Updated Shared Label"
+	composer := &sequencedComposer{results: results}
+	stateBase := t.TempDir()
+	pipeline, _ := testPipeline(t, server, composer)
+	pipeline.LabelStore = NewLabelStore(stateBase)
+
+	for exchange := 1; exchange <= 9; exchange++ {
+		user, assistant := fmt.Sprintf("user-%d", exchange), fmt.Sprintf("assistant-%d", exchange)
+		if exchange == 1 {
+			user, assistant = "", ""
+		}
+		event := preparedCompletion(
+			harnessPi, "cadence-session", fmt.Sprintf("completion-%d", exchange),
+			"/work/project", user, assistant,
+		)
+		if err := pipeline.RunPrepared(context.Background(), event); err != nil {
+			t.Fatal(err)
+		}
+		request := waitNotification(t, requests)
+		wantTitle := "Initial Shared Label · earth:3"
+		if exchange == 9 {
+			wantTitle = "Updated Shared Label · earth:3"
+		}
+		if request.Title != wantTitle || request.Body != "summary" || request.Priority != "4" {
+			t.Errorf("exchange %d notification = %+v, want title %q", exchange, request, wantTitle)
+		}
+	}
+
+	calls := composer.Calls()
+	if len(calls) != 9 {
+		t.Fatalf("Compose calls = %d, want exactly one per exchange", len(calls))
+	}
+	for index, call := range calls {
+		exchange := index + 1
+		wantRefresh := exchange == 1 || exchange == 5 || exchange == 9
+		wantCurrent := ""
+		if exchange > 1 {
+			wantCurrent = "Initial Shared Label"
+		}
+		if call.Label != (ComposeLabel{Current: wantCurrent, Refresh: wantRefresh}) {
+			t.Errorf(
+				"exchange %d label request = %+v, want current=%q refresh=%v",
+				exchange,
+				call.Label,
+				wantCurrent,
+				wantRefresh,
+			)
+		}
+	}
+
+	_, data := onlyLabelSnapshot(t, stateBase)
+	snapshot := decodeLabelSnapshotForTest(t, data)
+	if snapshot["label"] != "Updated Shared Label" || snapshot["source_generation"] != float64(9) ||
+		snapshot["exchange_count"] != float64(9) ||
+		snapshot["last_successful_refresh_exchange"] != float64(9) ||
+		snapshot["latest_completion_id"] != "completion-9" {
+		t.Fatalf("final cadence snapshot = %+v", snapshot)
+	}
+}
+
+func TestPipelineLabelFailuresRetryOnlyChangedDistinctMaterialAndKEEP(t *testing.T) {
+	server, requests := captureNotificationServer(t)
+	defer server.Close()
+	results := make([]ComposeResult, 9)
+	for index := range results {
+		results[index].Body = "summary"
+	}
+	// Exchange 1 omits the required initial label. Exchange 3 retries changed
+	// material successfully. Exchange 7 returns an invalid refresh label;
+	// exchange 9 retries changed material and omits the label as KEEP.
+	results[2].Label = "Recovered Shared Label"
+	results[6].Label = "invalid"
+	composer := &sequencedComposer{results: results}
+	stateBase := t.TempDir()
+	pipeline, _ := testPipeline(t, server, composer)
+	pipeline.LabelStore = NewLabelStore(stateBase)
+
+	materials := []string{
+		"same initial material", "same initial material", "changed initial retry",
+		"four", "five", "six", "failed refresh material", "failed refresh material", "changed refresh retry",
+	}
+	for index, material := range materials {
+		event := preparedCompletion(
+			harnessPi, "retry-session", fmt.Sprintf("id-%d", index+1), "/work/fallback-project",
+			"user", material,
+		)
+		if err := pipeline.RunPrepared(context.Background(), event); err != nil {
+			t.Fatal(err)
+		}
+		request := waitNotification(t, requests)
+		wantTitle := "fallback-project · earth:3"
+		if index >= 2 {
+			wantTitle = "Recovered Shared Label · earth:3"
+		}
+		wantBody := "summary"
+		if index == 0 || index == 6 {
+			wantBody = material
+		}
+		if request.Title != wantTitle || request.Body != wantBody {
+			t.Errorf(
+				"exchange %d notification = %+v, want title=%q body=%q",
+				index+1, request, wantTitle, wantBody,
+			)
+		}
+	}
+
+	wantRefresh := []bool{true, false, true, false, false, false, true, false, true}
+	calls := composer.Calls()
+	if len(calls) != len(wantRefresh) {
+		t.Fatalf("calls = %d, want %d", len(calls), len(wantRefresh))
+	}
+	for index, call := range calls {
+		if call.Label.Refresh != wantRefresh[index] {
+			t.Errorf("exchange %d refresh = %v, want %v", index+1, call.Label.Refresh, wantRefresh[index])
+		}
+		wantCurrent := ""
+		if index >= 3 {
+			wantCurrent = "Recovered Shared Label"
+		}
+		if call.Label.Current != wantCurrent {
+			t.Errorf("exchange %d current = %q, want %q", index+1, call.Label.Current, wantCurrent)
+		}
+	}
+
+	_, data := onlyLabelSnapshot(t, stateBase)
+	snapshot := decodeLabelSnapshotForTest(t, data)
+	if snapshot["label"] != "Recovered Shared Label" ||
+		snapshot["last_successful_refresh_exchange"] != float64(9) ||
+		snapshot["exchange_count"] != float64(9) {
+		t.Fatalf("retry snapshot = %+v", snapshot)
+	}
+}
+
+func TestPipelineSameSourceRetryDoesNotDoubleCountOrRetryNaming(t *testing.T) {
+	server, requests := captureNotificationServer(t)
+	defer server.Close()
+	composer := &sequencedComposer{results: []ComposeResult{{Body: "first"}, {Body: "source retry"}}}
+	stateBase := t.TempDir()
+	pipeline, _ := testPipeline(t, server, composer)
+	pipeline.LabelStore = NewLabelStore(stateBase)
+	event := preparedCompletion(
+		harnessPi, "same-source", "same-id", "/work/project", "user", "assistant",
+	)
+	for range 2 {
+		if err := pipeline.RunPrepared(context.Background(), event); err != nil {
+			t.Fatal(err)
+		}
+		_ = waitNotification(t, requests)
+	}
+	calls := composer.Calls()
+	if len(calls) != 2 || !calls[0].Label.Refresh || calls[1].Label.Refresh {
+		t.Fatalf("same-source calls = %+v, want one initial naming attempt only", calls)
+	}
+	_, data := onlyLabelSnapshot(t, stateBase)
+	snapshot := decodeLabelSnapshotForTest(t, data)
+	if snapshot["exchange_count"] != float64(1) || snapshot["source_generation"] != float64(1) ||
+		snapshot["latest_completion_id"] != "same-id" {
+		t.Fatalf("same-source snapshot = %+v", snapshot)
+	}
+}
+
+func TestPipelineKnownLabelTitlesInputAndIgnoresUnrequestedLabel(t *testing.T) {
+	server, requests := captureNotificationServer(t)
+	defer server.Close()
+	composer := &sequencedComposer{results: []ComposeResult{
+		{Body: "first", Label: "Known Shared Label"},
+		{Body: "second", Label: "Unrequested New Label"},
+	}}
+	stateBase := t.TempDir()
+	pipeline, logPath := testPipeline(t, server, composer)
+	pipeline.LabelStore = NewLabelStore(stateBase)
+	completionEvents := []PreparedEvent{
+		preparedCompletion(harnessPi, "known", "id-1", "/work/project", "u1", "a1"),
+		preparedCompletion(harnessPi, "known", "id-2", "/work/project", "u2", "a2"),
+	}
+	for index, event := range completionEvents {
+		if err := pipeline.RunPrepared(context.Background(), event); err != nil {
+			t.Fatal(err)
+		}
+		request := waitNotification(t, requests)
+		wantBody := "first"
+		if index == 1 {
+			wantBody = "a2"
+		}
+		if request.Title != "Known Shared Label · earth:3" || request.Body != wantBody {
+			t.Fatalf("completion notification = %+v, want body %q", request, wantBody)
+		}
+	}
+	// Inputs are currently Claude-native, so seed the same label under the
+	// Claude scope and prove the local lookup neither composes nor advances it.
+	seed, err := pipeline.LabelStore.planCompletion(preparedCompletion(
+		harnessClaude, "known", "seed-id", "/work/project", "seed", "seed",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = pipeline.LabelStore.finishCompletion(seed, "Known Input Label"); err != nil {
+		t.Fatal(err)
+	}
+	claudeSnapshotPath := filepath.Join(
+		stateBase,
+		labelStateDirectoryName,
+		labelSnapshotName(harnessClaude, "known"),
+	)
+	claudeSnapshotBefore, err := os.ReadFile(claudeSnapshotPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := PreparedEvent{
+		Version: preparedEventVersion, Harness: harnessClaude, SessionID: "known",
+		Kind: eventKindInput, SourceEvent: eventNotification, CWD: "/work/project",
+		NotificationType: "permission_prompt", Message: "allow?",
+	}
+	if err = pipeline.RunPrepared(context.Background(), input); err != nil {
+		t.Fatal(err)
+	}
+	if request := waitNotification(
+		t,
+		requests,
+	); request.Title != "Known Input Label · earth:3" ||
+		request.Body != "allow?" {
+		t.Fatalf("input notification = %+v", request)
+	}
+	claudeSnapshotAfter, err := os.ReadFile(claudeSnapshotPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(claudeSnapshotAfter, claudeSnapshotBefore) {
+		t.Fatalf(
+			"explicit input mutated its Claude label snapshot: before=%s after=%s",
+			claudeSnapshotBefore,
+			claudeSnapshotAfter,
+		)
+	}
+	calls := composer.Calls()
+	if len(calls) != 2 || calls[1].Label.Refresh || calls[1].Label.Current != "Known Shared Label" {
+		t.Fatalf("completion calls = %+v", calls)
+	}
+	label, err := pipeline.LabelStore.lookupLabel(harnessPi, "known")
+	if err != nil || label != "Known Shared Label" {
+		t.Fatalf("unrequested result overwrote label: %q/%v", label, err)
+	}
+	records := readDecisionLog(t, logPath)
+	if len(records) != 3 || records[1].CompositionError != compositionErrorInvalidResult {
+		t.Fatalf("unrequested label was not rejected: %+v", records)
+	}
+}
+
+type selectiveBlockingComposer struct {
+	entered chan ComposeInput
+	release <-chan struct{}
+}
+
+func (composer selectiveBlockingComposer) Compose(
+	ctx context.Context,
+	input ComposeInput,
+	label ComposeLabel,
+) (ComposeResult, error) {
+	if input.User == "slow" {
+		composer.entered <- input
+		select {
+		case <-composer.release:
+			result := ComposeResult{Body: "slow body"}
+			if label.Refresh {
+				result.Label = "Slow Session Label"
+			}
+			return result, nil
+		case <-ctx.Done():
+			return ComposeResult{}, errorsForCanceledComposer()
+		}
+	}
+	return ComposeResult{Body: "fast body", Label: "Fast Session Label"}, nil
+}
+
+func TestPipelineBlockedCompositionDoesNotBlockSameSessionInputOrOtherSession(t *testing.T) {
+	server, requests := captureNotificationServer(t)
+	defer server.Close()
+	entered := make(chan ComposeInput, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseModel := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseModel)
+	stateBase := t.TempDir()
+	store := NewLabelStore(stateBase)
+	seed, err := store.planCompletion(preparedCompletion(
+		harnessClaude, "shared-session", "seed-id", "/work/input", "seed", "seed",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.finishCompletion(seed, "Immediate Input Label"); err != nil {
+		t.Fatal(err)
+	}
+	pipeline, _ := testPipeline(t, server, selectiveBlockingComposer{entered: entered, release: release})
+	pipeline.LabelStore = store
+
+	slowContext, cancelSlow := context.WithTimeout(context.Background(), 3*time.Second)
+	t.Cleanup(cancelSlow)
+	slowDone := make(chan error, 1)
+	go func() {
+		slowDone <- pipeline.RunPrepared(slowContext, preparedCompletion(
+			harnessClaude, "shared-session", "slow-id", "/work/slow", "slow", "assistant",
+		))
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("slow composition did not block")
+	}
+	sharedSnapshotPath := filepath.Join(
+		stateBase,
+		labelStateDirectoryName,
+		labelSnapshotName(harnessClaude, "shared-session"),
+	)
+	sharedSnapshotBeforeInput, err := os.ReadFile(sharedSnapshotPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	inputDone := make(chan error, 1)
+	go func() {
+		inputDone <- pipeline.RunPrepared(context.Background(), PreparedEvent{
+			Version: preparedEventVersion, Harness: harnessClaude, SessionID: "shared-session",
+			Kind: eventKindInput, SourceEvent: eventNotification, CWD: "/work/input",
+			NotificationType: "permission_prompt", Message: "allow immediately?",
+		})
+	}()
+	select {
+	case err = <-inputDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("same-session input waited for blocked composition")
+	}
+	if request := waitNotification(
+		t,
+		requests,
+	); request.Title != "Immediate Input Label · earth:3" ||
+		request.Body != "allow immediately?" {
+		t.Fatalf("input notification = %+v", request)
+	}
+	sharedSnapshotAfterInput, err := os.ReadFile(sharedSnapshotPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(sharedSnapshotAfterInput, sharedSnapshotBeforeInput) {
+		t.Fatalf(
+			"same-session input mutated blocked completion metadata: before=%s after=%s",
+			sharedSnapshotBeforeInput,
+			sharedSnapshotAfterInput,
+		)
+	}
+	select {
+	case err = <-slowDone:
+		t.Fatalf("slow composition completed before release: %v", err)
+	default:
+	}
+
+	fastDone := make(chan error, 1)
+	go func() {
+		fastDone <- pipeline.RunPrepared(context.Background(), preparedCompletion(
+			harnessPi, "fast-session", "fast-id", "/work/fast", "fast", "assistant",
+		))
+	}()
+	select {
+	case err = <-fastDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("other-session completion waited for blocked composition")
+	}
+	if request := waitNotification(
+		t,
+		requests,
+	); request.Title != "Fast Session Label · earth:3" ||
+		request.Body != "fast body" {
+		t.Fatalf("fast notification = %+v", request)
+	}
+
+	releaseModel()
+	select {
+	case err = <-slowDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("slow composition did not finish after release")
+	}
+	if request := waitNotification(
+		t,
+		requests,
+	); request.Title != "Immediate Input Label · earth:3" ||
+		request.Body != "slow body" {
+		t.Fatalf("slow notification = %+v", request)
+	}
+}
+
+type sourceGuardComposer struct {
+	entered  chan ComposeInput
+	releases map[ComposeInput]<-chan struct{}
+	results  map[ComposeInput]ComposeResult
+	errors   map[ComposeInput]error
+}
+
+func (composer sourceGuardComposer) Compose(
+	ctx context.Context,
+	input ComposeInput,
+	_ ComposeLabel,
+) (ComposeResult, error) {
+	composer.entered <- input
+	select {
+	case <-composer.releases[input]:
+		return composer.results[input], composer.errors[input]
+	case <-ctx.Done():
+		return ComposeResult{}, errorsForCanceledComposer()
+	}
+}
+
+func TestPipelineOlderSameSessionResultCannotOverwriteNewerFailedSource(t *testing.T) {
+	server, requests := captureNotificationServer(t)
+	defer server.Close()
+	oldInput := ComposeInput{User: "old user", Assistant: "old assistant"}
+	newInput := ComposeInput{User: "new user", Assistant: "new assistant"}
+	oldRelease := make(chan struct{})
+	newRelease := make(chan struct{})
+	composer := sourceGuardComposer{
+		entered: make(chan ComposeInput, 2),
+		releases: map[ComposeInput]<-chan struct{}{
+			oldInput: oldRelease,
+			newInput: newRelease,
+		},
+		results: map[ComposeInput]ComposeResult{
+			oldInput: {Body: "old composed body", Label: "Older Result Label"},
+		},
+		errors: map[ComposeInput]error{
+			newInput: errors.New("pi composer: helper generation failed"),
+		},
+	}
+	stateBase := t.TempDir()
+	base, _ := testPipeline(t, server, composer)
+	base.LabelStore = NewLabelStore(stateBase)
+	oldPipeline := base
+	oldPipeline.Workspace = "old:1"
+	newPipeline := base
+	newPipeline.Workspace = "new:2"
+	oldEvent := preparedCompletion(
+		harnessPi,
+		"race-session",
+		"old-id",
+		"/work/old-project",
+		oldInput.User,
+		oldInput.Assistant,
+	)
+	newEvent := preparedCompletion(
+		harnessPi,
+		"race-session",
+		"new-id",
+		"/work/new-project",
+		newInput.User,
+		newInput.Assistant,
+	)
+
+	oldDone := make(chan error, 1)
+	newDone := make(chan error, 1)
+	go func() { oldDone <- oldPipeline.RunPrepared(context.Background(), oldEvent) }()
+	if input := <-composer.entered; input != oldInput {
+		t.Fatalf("first entered = %+v", input)
+	}
+	go func() { newDone <- newPipeline.RunPrepared(context.Background(), newEvent) }()
+	if input := <-composer.entered; input != newInput {
+		t.Fatalf("second entered = %+v", input)
+	}
+
+	close(newRelease)
+	if err := <-newDone; err != nil {
+		t.Fatal(err)
+	}
+	if request := waitNotification(t, requests); request != (capturedNotification{
+		Title: "new-project · new:2", Body: "new assistant", Priority: "4", Tags: "white_check_mark",
+	}) {
+		t.Fatalf("new notification = %+v", request)
+	}
+	close(oldRelease)
+	if err := <-oldDone; err != nil {
+		t.Fatal(err)
+	}
+	if request := waitNotification(t, requests); request != (capturedNotification{
+		Title: "Older Result Label · old:1", Body: "old composed body", Priority: "4", Tags: "white_check_mark",
+	}) {
+		t.Fatalf("old notification = %+v", request)
+	}
+
+	_, data := onlyLabelSnapshot(t, stateBase)
+	snapshot := decodeLabelSnapshotForTest(t, data)
+	if snapshot["latest_completion_id"] != "new-id" || snapshot["source_generation"] != float64(2) ||
+		snapshot["exchange_count"] != float64(2) || snapshot["label"] != "" ||
+		snapshot["last_successful_refresh_exchange"] != float64(0) {
+		t.Fatalf("late older result mutated newer source: %+v", snapshot)
+	}
+}
+
+func TestPipelineLabelStateFailureIsSafeObservableAndCompositionContinues(t *testing.T) {
+	server, requests := captureNotificationServer(t)
+	defer server.Close()
+	stateBase := t.TempDir()
+	const corruptSecret = "SECRET_CORRUPT_LABEL"
+	writeRawLabelSnapshot(t, stateBase, "corrupt", corruptSecret, labelFileMode)
+	composer := &recordingComposer{result: ComposeResult{Body: "safe composed body"}}
+	pipeline, logPath := testPipeline(t, server, composer)
+	pipeline.LabelStore = NewLabelStore(stateBase)
+	if err := pipeline.RunPrepared(context.Background(), preparedCompletion(
+		harnessPi, "corrupt", "id", "/work/fallback", "user", "assistant",
+	)); err != nil {
+		t.Fatal(err)
+	}
+	if request := waitNotification(
+		t,
+		requests,
+	); request.Title != "fallback · earth:3" ||
+		request.Body != "safe composed body" {
+		t.Fatalf("notification = %+v", request)
+	}
+	calls := composer.Calls()
+	if len(calls) != 1 || calls[0].Label != (ComposeLabel{}) {
+		t.Fatalf("compose calls = %+v, want body-only continuation", calls)
+	}
+	record := readDecisionLog(t, logPath)[0]
+	if record.CompositionOutcome != compositionComposed ||
+		record.CompositionError != compositionErrorLabelsUnavailable ||
+		!strings.Contains(record.Reason, compositionErrorLabelsUnavailable) {
+		t.Fatalf("decision record = %+v", record)
+	}
+	wire, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(wire), corruptSecret) {
+		t.Fatalf("decision log leaked corrupt label state: %s", wire)
+	}
+}
+
+func TestPipelineIneligiblePathsNeverWriteLabelStateOrInvokeNaming(t *testing.T) {
+	tests := []struct {
+		name   string
+		event  PreparedEvent
+		dryRun bool
+	}{
+		{
+			name:  "no completion ID",
+			event: preparedCompletion(harnessPi, "no-id", "", "/work/project", "user", "assistant"),
+		},
+		{
+			name:   "dry run",
+			event:  preparedCompletion(harnessPi, "dry", "id", "/work/project", "user", "assistant"),
+			dryRun: true,
+		},
+		{
+			name: "child",
+			event: func() PreparedEvent {
+				event := preparedCompletion(harnessPi, "child", "id", "/work/project", "user", "assistant")
+				event.AgentType = "worker"
+				return event
+			}(),
+		},
+		{
+			name: "active goal",
+			event: func() PreparedEvent {
+				event := preparedCompletion(harnessClaude, "goal", "id", "/work/project", "user", "assistant")
+				event.GoalActive = true
+				return event
+			}(),
+		},
+		{
+			name: "session end",
+			event: PreparedEvent{
+				Version: preparedEventVersion, Harness: harnessClaude, SessionID: "cleanup",
+				Kind: eventKindCleanup, SourceEvent: eventSessionEnd,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server, requests := captureNotificationServer(t)
+			defer server.Close()
+			stateBase := t.TempDir()
+			pipeline, _ := testPipeline(t, server, panicComposer{})
+			pipeline.LabelStore = NewLabelStore(stateBase)
+			pipeline.DryRun = tt.dryRun
+			pipeline.Stdout = io.Discard
+			if err := pipeline.RunPrepared(context.Background(), tt.event); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(filepath.Join(stateBase, labelStateDirectoryName)); !os.IsNotExist(err) {
+				t.Fatalf("label state created: %v", err)
+			}
+			if tt.name == "no completion ID" {
+				_ = waitNotification(t, requests)
+			} else {
+				select {
+				case request := <-requests:
+					t.Fatalf("unexpected delivery: %+v", request)
+				default:
+				}
+			}
+		})
+	}
+}
+
+type permissionBreakingComposer struct {
+	directory string
+}
+
+func (composer permissionBreakingComposer) Compose(
+	context.Context,
+	ComposeInput,
+	ComposeLabel,
+) (ComposeResult, error) {
+	if err := os.Chmod(composer.directory, 0o500); err != nil {
+		return ComposeResult{}, err
+	}
+	return ComposeResult{Body: "composed despite persistence failure", Label: "Unpublished Result Label"}, nil
+}
+
+func TestPipelineInitialLabelPublishFailureKeepsCWDNotificationAndReportsSafely(t *testing.T) {
+	server, requests := captureNotificationServer(t)
+	defer server.Close()
+	stateBase := t.TempDir()
+	labelDirectory := filepath.Join(stateBase, labelStateDirectoryName)
+	t.Cleanup(func() { _ = os.Chmod(labelDirectory, labelDirectoryMode) })
+	pipeline, logPath := testPipeline(t, server, permissionBreakingComposer{directory: labelDirectory})
+	pipeline.LabelStore = NewLabelStore(stateBase)
+	if err := pipeline.RunPrepared(context.Background(), preparedCompletion(
+		harnessPi, "publish-failure", "id", "/work/original-project", "user", "assistant",
+	)); err != nil {
+		t.Fatal(err)
+	}
+	if request := waitNotification(t, requests); request != (capturedNotification{
+		Title: "original-project · earth:3", Body: "composed despite persistence failure",
+		Priority: "4", Tags: "white_check_mark",
+	}) {
+		t.Fatalf("notification = %+v", request)
+	}
+	record := readDecisionLog(t, logPath)[0]
+	if record.CompositionOutcome != compositionComposed ||
+		record.CompositionError != compositionErrorLabelsUnavailable ||
+		!strings.Contains(record.Reason, compositionErrorLabelsUnavailable) {
+		t.Fatalf("decision record = %+v", record)
+	}
+	if err := os.Chmod(labelDirectory, labelDirectoryMode); err != nil {
+		t.Fatal(err)
+	}
+	_, data := onlyLabelSnapshot(t, stateBase)
+	snapshot := decodeLabelSnapshotForTest(t, data)
+	if snapshot["label"] != "" || snapshot["last_successful_refresh_exchange"] != float64(0) ||
+		snapshot["exchange_count"] != float64(1) {
+		t.Fatalf("failed initial publish mutated label/cadence metadata: %+v", snapshot)
+	}
+}
+
+func TestPipelineRefreshLabelPublishFailureKeepsPriorLabelAndCadence(t *testing.T) {
+	server, requests := captureNotificationServer(t)
+	defer server.Close()
+	stateBase := t.TempDir()
+	store := NewLabelStore(stateBase)
+	seed, err := store.planCompletion(preparedCompletion(
+		harnessPi, "refresh-publish-failure", "id-1", "/work/project", "user-1", "assistant-1",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.finishCompletion(seed, "Prior Shared Label"); err != nil {
+		t.Fatal(err)
+	}
+	labelDirectory := filepath.Join(stateBase, labelStateDirectoryName)
+	t.Cleanup(func() { _ = os.Chmod(labelDirectory, labelDirectoryMode) })
+	composer := &sequencedComposer{results: []ComposeResult{
+		{Body: "body-2"},
+		{Body: "body-3"},
+		{Body: "body-4"},
+		{Body: "composed refresh body", Label: "Unpublished Refreshed Label"},
+	}}
+	pipeline, logPath := testPipeline(t, server, composer)
+	pipeline.LabelStore = store
+	for exchange := 2; exchange <= 4; exchange++ {
+		if err = pipeline.RunPrepared(context.Background(), preparedCompletion(
+			harnessPi, "refresh-publish-failure", fmt.Sprintf("id-%d", exchange),
+			"/work/project", fmt.Sprintf("user-%d", exchange), fmt.Sprintf("assistant-%d", exchange),
+		)); err != nil {
+			t.Fatal(err)
+		}
+		_ = waitNotification(t, requests)
+	}
+
+	pipeline.Composer = permissionBreakingComposer{directory: labelDirectory}
+	if err = pipeline.RunPrepared(context.Background(), preparedCompletion(
+		harnessPi, "refresh-publish-failure", "id-5", "/work/project", "user-5", "assistant-5",
+	)); err != nil {
+		t.Fatal(err)
+	}
+	if request := waitNotification(t, requests); request != (capturedNotification{
+		Title: "Prior Shared Label · earth:3", Body: "composed despite persistence failure",
+		Priority: "4", Tags: "white_check_mark",
+	}) {
+		t.Fatalf("refresh notification = %+v", request)
+	}
+	record := readDecisionLog(t, logPath)[3]
+	if record.CompositionOutcome != compositionComposed ||
+		record.CompositionError != compositionErrorLabelsUnavailable ||
+		!strings.Contains(record.Reason, compositionErrorLabelsUnavailable) {
+		t.Fatalf("refresh decision record = %+v", record)
+	}
+	if err = os.Chmod(labelDirectory, labelDirectoryMode); err != nil {
+		t.Fatal(err)
+	}
+	_, data := onlyLabelSnapshot(t, stateBase)
+	snapshot := decodeLabelSnapshotForTest(t, data)
+	if snapshot["label"] != "Prior Shared Label" ||
+		snapshot["last_successful_refresh_exchange"] != float64(1) ||
+		snapshot["exchange_count"] != float64(5) {
+		t.Fatalf("failed refresh mutated prior label/cadence metadata: %+v", snapshot)
+	}
+}
+
+func TestPipelineLabelInitializationFailureDoesNotDisableComposition(t *testing.T) {
+	server, requests := captureNotificationServer(t)
+	defer server.Close()
+	stateBase := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(stateBase, []byte("SECRET_STATE_BASE"), labelFileMode); err != nil {
+		t.Fatal(err)
+	}
+	composer := &recordingComposer{result: ComposeResult{Body: "body composition continues"}}
+	pipeline, logPath := testPipeline(t, server, composer)
+	pipeline.LabelStore = NewLabelStore(stateBase)
+	if err := pipeline.RunPrepared(context.Background(), preparedCompletion(
+		harnessPi, "initialization-failure", "id", "/work/fallback", "user", "assistant",
+	)); err != nil {
+		t.Fatal(err)
+	}
+	if request := waitNotification(t, requests); request.Title != "fallback · earth:3" ||
+		request.Body != "body composition continues" {
+		t.Fatalf("notification = %+v", request)
+	}
+	calls := composer.Calls()
+	if len(calls) != 1 || calls[0].Label != (ComposeLabel{}) {
+		t.Fatalf("composition calls = %+v", calls)
+	}
+	record := readDecisionLog(t, logPath)[0]
+	if record.CompositionOutcome != compositionComposed ||
+		record.CompositionError != compositionErrorLabelsUnavailable ||
+		!strings.Contains(record.Reason, compositionErrorLabelsUnavailable) {
+		t.Fatalf("decision record = %+v", record)
+	}
+	wire, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(wire), "SECRET_STATE_BASE") {
+		t.Fatalf("decision log leaked state error contents: %s", wire)
 	}
 }

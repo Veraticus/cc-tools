@@ -431,9 +431,11 @@ func TestDaemonFinalSendFailureReleasesClaimForSourceRetry(t *testing.T) {
 	}))
 	defer server.Close()
 	composer := &recordingComposer{result: ComposeResult{Body: "summary"}}
+	stateBase := t.TempDir()
 	running := startTestDaemon(t, Daemon{Pipeline: Pipeline{
 		Composer: composer, Sender: Sender{URL: server.URL, Client: server.Client()},
 		Log: DecisionLog{Path: filepath.Join(t.TempDir(), "decisions.jsonl")}, Host: "host",
+		LabelStore: NewLabelStore(stateBase),
 	}})
 	frame := completionFrame(harnessPi, "retry", "same-id", "fallback")
 	requireFrameAck(t, running.socket, frame, ackStatusAccepted)
@@ -461,8 +463,52 @@ func TestDaemonFinalSendFailureReleasesClaimForSourceRetry(t *testing.T) {
 	for attempts.Load() < 2 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if attempts.Load() != 2 || len(composer.Calls()) != 2 {
-		t.Fatalf("attempts/compositions = %d/%d, want 2/2", attempts.Load(), len(composer.Calls()))
+	calls := composer.Calls()
+	if attempts.Load() != 2 || len(calls) != 2 {
+		t.Fatalf("attempts/compositions = %d/%d, want 2/2", attempts.Load(), len(calls))
+	}
+	if !calls[0].Label.Refresh || calls[1].Label.Refresh {
+		t.Fatalf("source retry label plans = %+v, want naming only on first attempt", calls)
+	}
+	_, data := onlyLabelSnapshot(t, stateBase)
+	snapshot := decodeLabelSnapshotForTest(t, data)
+	if snapshot["exchange_count"] != float64(1) || snapshot["source_generation"] != float64(1) {
+		t.Fatalf("source retry double-counted: %+v", snapshot)
+	}
+}
+
+func TestDaemonDuplicateNeverMutatesLabelCounters(t *testing.T) {
+	server, requests := captureNotificationServer(t)
+	defer server.Close()
+	composer := &recordingComposer{result: ComposeResult{Body: "summary"}}
+	stateBase := t.TempDir()
+	running := startTestDaemon(t, Daemon{Pipeline: Pipeline{
+		Composer: composer, Sender: Sender{URL: server.URL, Client: server.Client()},
+		Log: DecisionLog{Path: filepath.Join(t.TempDir(), "decisions.jsonl")}, Host: "host",
+		LabelStore: NewLabelStore(stateBase),
+	}})
+	first := completionFrame(harnessPi, "duplicates", "id-1", "identical material")
+	second := completionFrame(harnessPi, "duplicates", "id-2", "identical material")
+	requireFrameAckAndHandlerCompletion(t, running.socket, first, ackStatusAccepted)
+	_ = waitNotification(t, requests)
+	requireFrameAckAndHandlerCompletion(t, running.socket, second, ackStatusAccepted)
+	_ = waitNotification(t, requests)
+	requireFrameAckAndHandlerCompletion(t, running.socket, second, ackStatusDuplicate)
+
+	calls := composer.Calls()
+	if len(calls) != 2 || !calls[0].Label.Refresh || calls[1].Label.Refresh {
+		t.Fatalf("distinct-identical/duplicate calls = %+v", calls)
+	}
+	_, data := onlyLabelSnapshot(t, stateBase)
+	snapshot := decodeLabelSnapshotForTest(t, data)
+	if snapshot["exchange_count"] != float64(2) || snapshot["source_generation"] != float64(2) ||
+		snapshot["latest_completion_id"] != "id-2" {
+		t.Fatalf("duplicate mutated label counters: %+v", snapshot)
+	}
+	select {
+	case request := <-requests:
+		t.Fatalf("duplicate sent notification: %+v", request)
+	default:
 	}
 }
 
@@ -490,12 +536,17 @@ func TestDaemonHelperFailureFallbackSuccessRetainsClaim(t *testing.T) {
 	}
 }
 
-func TestDaemonCleanupRetainsClaimsAndRestartStartsEmpty(t *testing.T) {
+func TestDaemonCleanupRetainsClaimsAndLabelsWhileRestartStartsClaimsEmpty(t *testing.T) {
 	server, requests := captureNotificationServer(t)
 	defer server.Close()
+	stateBase := t.TempDir()
+	firstComposer := &recordingComposer{result: ComposeResult{
+		Body: "summary", Label: "Persistent Shared Label",
+	}}
 	pipeline := Pipeline{
-		Composer: &recordingComposer{result: ComposeResult{Body: "summary"}},
+		Composer: firstComposer,
 		Sender:   Sender{URL: server.URL, Client: server.Client()}, Host: "host",
+		LabelStore: NewLabelStore(stateBase),
 	}
 	first := startTestDaemon(t, Daemon{Pipeline: pipeline})
 	frame := Frame{Event: PreparedEvent{
@@ -504,7 +555,8 @@ func TestDaemonCleanupRetainsClaimsAndRestartStartsEmpty(t *testing.T) {
 		User: "same user", Assistant: "fallback",
 	}, Workspace: "earth:3"}
 	requireFrameAckAndHandlerCompletion(t, first.socket, frame, ackStatusAccepted)
-	if request := waitNotification(t, requests); request.Body != "summary" {
+	if request := waitNotification(t, requests); request.Body != "summary" ||
+		request.Title != "Persistent Shared Label · earth:3" {
 		t.Fatalf("request = %+v", request)
 	}
 	cleanup := Frame{Event: PreparedEvent{
@@ -512,6 +564,12 @@ func TestDaemonCleanupRetainsClaimsAndRestartStartsEmpty(t *testing.T) {
 		SourceEvent: eventSessionEnd,
 	}}
 	requireFrameAckAndHandlerCompletion(t, first.socket, cleanup, ackStatusAccepted)
+	if label, err := NewLabelStore(
+		stateBase,
+	).lookupLabel(harnessClaude, "session"); err != nil ||
+		label != "Persistent Shared Label" {
+		t.Fatalf("SessionEnd label/error = %q/%v", label, err)
+	}
 	requireFrameAckAndHandlerCompletion(t, first.socket, frame, ackStatusDuplicate)
 	first.cancel()
 	select {
@@ -523,10 +581,22 @@ func TestDaemonCleanupRetainsClaimsAndRestartStartsEmpty(t *testing.T) {
 		t.Fatal("first daemon did not stop")
 	}
 
+	secondComposer := &recordingComposer{result: ComposeResult{Body: "summary"}}
+	pipeline.Composer = secondComposer
+	pipeline.LabelStore = NewLabelStore(stateBase)
 	second := startTestDaemon(t, Daemon{Pipeline: pipeline})
 	requireFrameAckAndHandlerCompletion(t, second.socket, frame, ackStatusAccepted)
-	if request := waitNotification(t, requests); request.Body != "summary" {
+	if request := waitNotification(t, requests); request.Body != "summary" ||
+		request.Title != "Persistent Shared Label · earth:3" {
 		t.Fatalf("request after restart = %+v", request)
+	}
+	calls := secondComposer.Calls()
+	if len(calls) != 1 || calls[0].Label != (ComposeLabel{Current: "Persistent Shared Label"}) {
+		t.Fatalf("reconstructed daemon label request = %+v", calls)
+	}
+	_, data := onlyLabelSnapshot(t, stateBase)
+	if snapshot := decodeLabelSnapshotForTest(t, data); snapshot["exchange_count"] != float64(1) {
+		t.Fatalf("restart source retry double-counted: %+v", snapshot)
 	}
 }
 

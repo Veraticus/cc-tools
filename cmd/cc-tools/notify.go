@@ -196,12 +196,16 @@ func newNotifydPipeline(
 	sender notify.Sender,
 	log notify.DecisionLog,
 	environ []string,
+	stateBase string,
 ) notify.Pipeline {
 	pipeline := notify.Pipeline{
 		DryRun: dryRun,
 		Sender: sender,
 		Log:    log,
 		Stdout: os.Stdout,
+	}
+	if !dryRun {
+		pipeline.LabelStore = notify.NewLabelStore(stateBase)
 	}
 	composer, err := notify.NewPiComposer(environ)
 	if err != nil {
@@ -235,7 +239,7 @@ func runNotifydCommand() {
 	}
 
 	d := notify.Daemon{
-		Pipeline: newNotifydPipeline(*dryRun, sender, log, os.Environ()),
+		Pipeline: newNotifydPipeline(*dryRun, sender, log, os.Environ(), *stateBase),
 	}
 
 	sockPath := notify.SocketPath()

@@ -23,6 +23,7 @@ const (
 
 	compositionErrorIdentityUnavailable  = "completion identity unavailable"
 	compositionErrorUnavailable          = "composer unavailable"
+	compositionErrorLabelsUnavailable    = "labels unavailable"
 	compositionErrorDryRun               = "dry run"
 	compositionErrorInvalidConfiguration = "invalid configuration"
 	compositionErrorInvalidRequest       = "invalid compose request"
@@ -51,7 +52,8 @@ type Composer interface {
 }
 
 // Pipeline processes one normalized hook event. Completion eligibility and
-// urgency are deterministic; Composer may improve only the notification body.
+// urgency are deterministic; Composer may enrich the notification body and a
+// requested shared session label.
 type Pipeline struct {
 	DryRun bool
 
@@ -60,9 +62,10 @@ type Pipeline struct {
 	// composer. It is categorized before being logged and never exposed raw.
 	CompositionError error
 
-	Sender Sender
-	Log    DecisionLog
-	Stdout io.Writer
+	Sender     Sender
+	Log        DecisionLog
+	Stdout     io.Writer
+	LabelStore *LabelStore
 
 	// Workspace is the calling hook's tmux locator, snapshotted from Frame.
 	Workspace string
@@ -178,44 +181,26 @@ func (pipeline Pipeline) handleCompletion(
 	locus string,
 	decision Decision,
 ) bool {
-	body := completionFallbackBody(event.Assistant)
-	compositionOutcome := compositionFallback
-	compositionError := ""
-
-	switch {
-	case pipeline.DryRun:
-		compositionError = compositionErrorDryRun
-	case event.SessionID == "" || !validCompletionID(event.CompletionID):
-		compositionError = compositionErrorIdentityUnavailable
-	case pipeline.Composer == nil:
-		if pipeline.CompositionError != nil {
-			compositionError = safeCompositionError(pipeline.CompositionError)
-		} else {
-			compositionError = compositionErrorUnavailable
-		}
-	default:
-		result, err := pipeline.Composer.Compose(
-			ctx,
-			ComposeInput{User: event.User, Assistant: event.Assistant},
-			ComposeLabel{Current: "", Refresh: false},
-		)
-		switch {
-		case err != nil:
-			compositionError = safeCompositionError(err)
-		case !validPiBody(result.Body):
-			compositionError = compositionErrorInvalidResult
-		default:
-			body = truncateWords(result.Body, maxNotificationBodyBytes)
-			compositionOutcome = compositionComposed
-		}
+	eligible := !pipeline.DryRun && event.SessionID != "" && validCompletionID(event.CompletionID)
+	plan, request, title, labelUnavailable := pipeline.planCompletionLabel(event, project, eligible)
+	result, body, compositionOutcome, compositionError := pipeline.composeCompletion(ctx, event, request, eligible)
+	if compositionOutcome == compositionComposed && plan.refresh {
+		title, labelUnavailable = pipeline.publishCompletionLabel(plan, result, title, labelUnavailable)
+	}
+	if labelUnavailable && compositionOutcome == compositionComposed {
+		compositionError = compositionErrorLabelsUnavailable
 	}
 
 	notification := Notification{
-		Title:   project + " · " + locus,
+		Title:   title + " · " + locus,
 		Body:    body,
 		Urgency: UrgencyDone,
 	}
-	reason := decision.Reason + compositionReason(compositionOutcome, compositionError)
+	reason := decision.Reason
+	if labelUnavailable {
+		reason += " (" + compositionErrorLabelsUnavailable + ")"
+	}
+	reason += compositionReason(compositionOutcome, compositionError)
 	deliveryReason, delivered := pipeline.deliver(ctx, notification)
 	reason += deliveryReason
 	pipeline.logRecord(event, now, DecisionRecord{
@@ -224,6 +209,85 @@ func (pipeline Pipeline) handleCompletion(
 		CompositionOutcome: compositionOutcome, CompositionError: compositionError,
 	})
 	return delivered
+}
+
+func (pipeline Pipeline) planCompletionLabel(
+	event PreparedEvent,
+	fallback string,
+	eligible bool,
+) (labelCompositionPlan, ComposeLabel, string, bool) {
+	if !eligible || pipeline.LabelStore == nil {
+		return labelCompositionPlan{}, ComposeLabel{}, fallback, false
+	}
+	plan, err := pipeline.LabelStore.planCompletion(event)
+	if err != nil {
+		return labelCompositionPlan{}, ComposeLabel{}, fallback, true
+	}
+	title := fallback
+	if plan.current != "" {
+		title = plan.current
+	}
+	return plan, ComposeLabel{Current: plan.current, Refresh: plan.refresh}, title, false
+}
+
+func (pipeline Pipeline) composeCompletion(
+	ctx context.Context,
+	event PreparedEvent,
+	label ComposeLabel,
+	eligible bool,
+) (ComposeResult, string, string, string) {
+	fallback := completionFallbackBody(event.Assistant)
+	switch {
+	case pipeline.DryRun:
+		return ComposeResult{}, fallback, compositionFallback, compositionErrorDryRun
+	case !eligible:
+		return ComposeResult{}, fallback, compositionFallback, compositionErrorIdentityUnavailable
+	case pipeline.Composer == nil && pipeline.CompositionError != nil:
+		return ComposeResult{}, fallback, compositionFallback, safeCompositionError(pipeline.CompositionError)
+	case pipeline.Composer == nil:
+		return ComposeResult{}, fallback, compositionFallback, compositionErrorUnavailable
+	}
+	result, err := pipeline.Composer.Compose(
+		ctx,
+		ComposeInput{User: event.User, Assistant: event.Assistant},
+		label,
+	)
+	if err != nil {
+		return ComposeResult{}, fallback, compositionFallback, safeCompositionError(err)
+	}
+	if !validPipelineComposeResult(result, label) {
+		return ComposeResult{}, fallback, compositionFallback, compositionErrorInvalidResult
+	}
+	return result, truncateWords(result.Body, maxNotificationBodyBytes), compositionComposed, ""
+}
+
+func (pipeline Pipeline) publishCompletionLabel(
+	plan labelCompositionPlan,
+	result ComposeResult,
+	title string,
+	unavailable bool,
+) (string, bool) {
+	label := result.Label
+	if label == "" {
+		label = plan.current
+	}
+	if err := pipeline.LabelStore.finishCompletion(plan, label); err != nil {
+		return title, true
+	}
+	return label, unavailable
+}
+
+func validPipelineComposeResult(result ComposeResult, label ComposeLabel) bool {
+	if !validPiBody(result.Body) {
+		return false
+	}
+	if !label.Refresh {
+		return result.Label == ""
+	}
+	if result.Label == "" {
+		return label.Current != ""
+	}
+	return validPiGeneratedLabel(result.Label)
 }
 
 func compositionReason(outcome, category string) string {
@@ -290,16 +354,29 @@ func (pipeline Pipeline) handleInput(
 	if body == "" {
 		body = inputFallbackLabel(event.NotificationType)
 	}
+	title := project
+	labelUnavailable := false
+	if !pipeline.DryRun && pipeline.LabelStore != nil && event.SessionID != "" {
+		label, err := pipeline.LabelStore.lookupLabel(event.Harness, event.SessionID)
+		if err != nil {
+			labelUnavailable = true
+		} else if label != "" {
+			title = label
+		}
+	}
 	where := locus
 	if event.NotificationType == notifTypeAgentNeedsInput {
 		where = host
 	}
 	notification := Notification{
-		Title:   project + " · " + where,
+		Title:   title + " · " + where,
 		Body:    body,
 		Urgency: decision.Urgency,
 	}
 	reason := decision.Reason
+	if labelUnavailable {
+		reason += " (" + compositionErrorLabelsUnavailable + ")"
+	}
 	deliveryReason, delivered := pipeline.deliver(ctx, notification)
 	reason += deliveryReason
 	pipeline.logRecord(event, now, DecisionRecord{

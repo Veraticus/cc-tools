@@ -37,7 +37,7 @@ kept for compatibility.
 | External notification command | Yes, JSON on stdin | Yes, JSON in one argument |
 | Root turn-complete ntfy delivery | Yes | Yes |
 | Permission/external approval delivery | Yes | Use Codex's built-in TUI notifications |
-| Daemon-side Pi body composition | Yes, using reliable transcript identity | Yes, using native turn identity |
+| Daemon-side Pi body composition and shared session labels | Yes, using reliable transcript identity | Yes, using native turn identity |
 | Replace the in-app status line with `cc-tools-statusline` | Yes | No; Codex accepts built-in footer item identifiers only |
 
 ## Installation
@@ -122,9 +122,9 @@ delivery. The old `CLAUDE_HOOKS_NTFY_*` variables continue to work.
 Root completion delivery is deterministic. When `notifyd` receives an eligible
 completion with a usable native identity pair (session ID and completion ID),
 it calls `steward-pi-helper` exactly once with the latest user and assistant
-text. The helper may supply only a validated
-plain-text body; it cannot suppress the notification or change its done urgency.
-Claude Stop uses the transcript's reliable final assistant UUID, then
+text. The helper may supply a validated plain-text body and, when requested, a
+validated 3–4 word shared session label; it cannot suppress the notification or
+change its done urgency. Claude Stop uses the transcript's reliable final assistant UUID, then
 `message.id`; an unavailable or unreliable transcript never reuses a stale
 supplied ID. Active Claude `/goal` state remains a structural silence gate.
 
@@ -142,8 +142,16 @@ setting, unavailable helper, authentication failure, malformed response, or
 timeout does not disable completion delivery: the decision log records only a
 safe error category and ntfy receives a deterministic plain-text tail of the
 final response. Fallback bodies are valid UTF-8, at most 160 bytes, and use
-`turn complete` when empty. Generated bodies are bounded to 200 bytes. Titles
-retain the cwd project name and tmux workspace locator (or host fallback).
+`turn complete` when empty. Generated bodies are bounded to 200 bytes.
+
+The daemon requests a shared session label on the first completed exchange and
+again after each four additional completed exchanges with changed source
+material (normally exchanges 1, 5, and 9). A known label replaces the cwd
+project name in daemon notification titles; otherwise the cwd fallback and tmux
+workspace locator (or host fallback) remain. Minimal cadence/source metadata is
+stored atomically in the owner-only `<state-base>/session-labels` directory and
+survives daemon restarts. See [shared session labels](docs/session-labels.md) for
+failure, retry, isolation, and future Pi resume/manual-name ownership behavior.
 
 If `notifyd` is unavailable, `cc-tools notify` uses the same model-free fallback
 inline. Dry runs are model-free as well; neither path starts the helper or
