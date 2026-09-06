@@ -70,13 +70,39 @@ type Pipeline struct {
 	Host string
 }
 
-// Run processes one event and always returns nil. Transcript, composition,
-// logging, and delivery failures degrade without changing the hook's exit-0
-// contract.
+// Run prepares one native event exactly once, delegates to RunPrepared, and
+// preserves the hook's exit-zero contract even when preparation is invalid.
 func (pipeline Pipeline) Run(ctx context.Context, input HookInput) error {
-	input.Harness = defaultHarness(input.Harness, input.HookEventName)
+	prepared, ok := preparePipelineEvent(input)
+	if !ok {
+		return nil
+	}
+	_ = pipeline.RunPrepared(ctx, prepared)
+	return nil
+}
+
+func preparePipelineEvent(input HookInput) (PreparedEvent, bool) {
+	prepared, err := PrepareEvent(input)
+	return prepared, err == nil
+}
+
+// RunPrepared processes one immutable event snapshot. Callers that need claim
+// ownership use processPrepared's delivery result; the exported API reports
+// only invalid prepared events and never a raw sender or composer error.
+func (pipeline Pipeline) RunPrepared(ctx context.Context, event PreparedEvent) error {
+	_, err := pipeline.processPrepared(ctx, event)
+	return err
+}
+
+// processPrepared returns whether the final deterministic notification was
+// delivered. That private result lets notifyd retain or release a claim while
+// preserving RunPrepared's error contract.
+func (pipeline Pipeline) processPrepared(ctx context.Context, event PreparedEvent) (bool, error) {
+	if err := validatePreparedEvent(event); err != nil {
+		return false, err
+	}
 	now := time.Now()
-	project := filepath.Base(input.CWD)
+	project := filepath.Base(event.CWD)
 	host := pipeline.Host
 	if host == "" {
 		host = ShortHostname()
@@ -86,27 +112,17 @@ func (pipeline Pipeline) Run(ctx context.Context, input HookInput) error {
 		locus = host
 	}
 
-	var scan ScanResult
-	var scanErr error
-	if input.Harness == harnessClaude && input.HookEventName == eventStop {
-		scan, scanErr = pipeline.scanTranscript(input.TranscriptPath)
-		input.CompletionID = claudeCompletionID(input, scan, scanErr)
-	}
-
-	decision := Decide(input, scan)
+	decision := decidePreparedEvent(event)
 	if decision.Outcome == OutcomeSilent {
-		pipeline.logRecord(input, now, DecisionRecord{
+		pipeline.logRecord(event, now, DecisionRecord{
 			Outcome: decision.Outcome.String(), Reason: decision.Reason,
 		})
-		return nil
+		return true, nil
 	}
-
-	if input.HookEventName == eventStop || input.HookEventName == eventTurnComplete {
-		pipeline.handleCompletion(ctx, input, scan, now, project, locus, decision)
-		return nil
+	if event.Kind == eventKindCompletion {
+		return pipeline.handleCompletion(ctx, event, now, project, locus, decision), nil
 	}
-	pipeline.handleInput(ctx, input, now, project, locus, host, decision)
-	return nil
+	return pipeline.handleInput(ctx, event, now, project, locus, host, decision), nil
 }
 
 func defaultHarness(harness, event string) string {
@@ -138,23 +154,38 @@ func claudeCompletionID(input HookInput, scan ScanResult, scanErr error) string 
 	return ""
 }
 
+func decidePreparedEvent(event PreparedEvent) Decision {
+	input := HookInput{
+		Harness:          event.Harness,
+		HookEventName:    event.SourceEvent,
+		NotificationType: event.NotificationType,
+		Message:          event.Message,
+		AgentID:          event.AgentID,
+		AgentType:        event.AgentType,
+	}
+	scan := ScanResult{}
+	if event.GoalActive {
+		scan.Goal.Status = GoalActive
+	}
+	return Decide(input, scan)
+}
+
 func (pipeline Pipeline) handleCompletion(
 	ctx context.Context,
-	input HookInput,
-	scan ScanResult,
+	event PreparedEvent,
 	now time.Time,
 	project string,
 	locus string,
 	decision Decision,
-) {
-	body := completionFallbackBody(input.LastAssistantMessage)
+) bool {
+	body := completionFallbackBody(event.Assistant)
 	compositionOutcome := compositionFallback
 	compositionError := ""
 
 	switch {
 	case pipeline.DryRun:
 		compositionError = compositionErrorDryRun
-	case !validCompletionID(input.CompletionID):
+	case event.SessionID == "" || !validCompletionID(event.CompletionID):
 		compositionError = compositionErrorIdentityUnavailable
 	case pipeline.Composer == nil:
 		if pipeline.CompositionError != nil {
@@ -165,7 +196,7 @@ func (pipeline Pipeline) handleCompletion(
 	default:
 		result, err := pipeline.Composer.Compose(
 			ctx,
-			completionComposeInput(input, scan),
+			ComposeInput{User: event.User, Assistant: event.Assistant},
 			ComposeLabel{Current: "", Refresh: false},
 		)
 		switch {
@@ -185,19 +216,14 @@ func (pipeline Pipeline) handleCompletion(
 		Urgency: UrgencyDone,
 	}
 	reason := decision.Reason + compositionReason(compositionOutcome, compositionError)
-	reason += pipeline.deliver(ctx, notification)
-	pipeline.logRecord(input, now, DecisionRecord{
+	deliveryReason, delivered := pipeline.deliver(ctx, notification)
+	reason += deliveryReason
+	pipeline.logRecord(event, now, DecisionRecord{
 		Outcome: decision.Outcome.String(), Reason: reason,
 		Urgency: notification.Urgency, Title: notification.Title, Body: notification.Body,
 		CompositionOutcome: compositionOutcome, CompositionError: compositionError,
 	})
-}
-
-func completionComposeInput(input HookInput, scan ScanResult) ComposeInput {
-	if input.Harness == harnessClaude && input.HookEventName == eventStop {
-		return ComposeInput{User: scan.LastUserMessage, Assistant: scan.LastAssistantText}
-	}
-	return ComposeInput{User: input.Message, Assistant: input.LastAssistantMessage}
+	return delivered
 }
 
 func compositionReason(outcome, category string) string {
@@ -253,19 +279,19 @@ func safeCompositionError(err error) string {
 
 func (pipeline Pipeline) handleInput(
 	ctx context.Context,
-	input HookInput,
+	event PreparedEvent,
 	now time.Time,
 	project string,
 	locus string,
 	host string,
 	decision Decision,
-) {
+) bool {
 	body := decision.Message
 	if body == "" {
-		body = inputFallbackLabel(input.NotificationType)
+		body = inputFallbackLabel(event.NotificationType)
 	}
 	where := locus
-	if input.NotificationType == notifTypeAgentNeedsInput {
+	if event.NotificationType == notifTypeAgentNeedsInput {
 		where = host
 	}
 	notification := Notification{
@@ -273,11 +299,14 @@ func (pipeline Pipeline) handleInput(
 		Body:    body,
 		Urgency: decision.Urgency,
 	}
-	reason := decision.Reason + pipeline.deliver(ctx, notification)
-	pipeline.logRecord(input, now, DecisionRecord{
+	reason := decision.Reason
+	deliveryReason, delivered := pipeline.deliver(ctx, notification)
+	reason += deliveryReason
+	pipeline.logRecord(event, now, DecisionRecord{
 		Outcome: decision.Outcome.String(), Reason: reason,
 		Urgency: notification.Urgency, Title: notification.Title, Body: notification.Body,
 	})
+	return delivered
 }
 
 func inputFallbackLabel(notificationType string) string {
@@ -292,8 +321,9 @@ func inputFallbackLabel(notificationType string) string {
 }
 
 // deliver either prints a rehearsal or performs the existing Sender call.
-// Delivery failures are logged but never returned to the hook process.
-func (pipeline Pipeline) deliver(ctx context.Context, notification Notification) string {
+// It returns only a success bit and a fixed safe reason, never a raw Sender
+// error.
+func (pipeline Pipeline) deliver(ctx context.Context, notification Notification) (string, bool) {
 	if pipeline.DryRun {
 		writer := pipeline.Stdout
 		if writer == nil {
@@ -306,38 +336,22 @@ func (pipeline Pipeline) deliver(ctx context.Context, notification Notification)
 			notification.Title,
 			notification.Body,
 		)
-		return ""
+		return "", true
 	}
 	deliveryContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), deliveryTimeout)
 	defer cancel()
 	if err := pipeline.Sender.Send(deliveryContext, notification); err != nil {
-		return " (" + deliveryFailureReason + ")"
+		return " (" + deliveryFailureReason + ")", false
 	}
-	return ""
+	return "", true
 }
 
-func (pipeline Pipeline) scanTranscript(path string) (ScanResult, error) {
-	if path == "" {
-		return ScanResult{}, fmt.Errorf("opening transcript: path unavailable")
-	}
-	file, err := os.Open(path) //nolint:gosec // Hook payload supplies its own transcript path.
-	if err != nil {
-		return ScanResult{}, fmt.Errorf("opening transcript: %w", err)
-	}
-	defer func() { _ = file.Close() }()
-	result, err := ScanTranscript(file)
-	if err != nil {
-		return ScanResult{}, fmt.Errorf("scanning transcript: %w", err)
-	}
-	return result, nil
-}
-
-func (pipeline Pipeline) logRecord(input HookInput, now time.Time, record DecisionRecord) {
+func (pipeline Pipeline) logRecord(event PreparedEvent, now time.Time, record DecisionRecord) {
 	record.Time = now
-	record.SessionID = input.SessionID
-	record.Event = input.HookEventName
-	record.Harness = defaultHarness(input.Harness, input.HookEventName)
-	record.CompletionID = input.CompletionID
+	record.SessionID = event.SessionID
+	record.Event = event.SourceEvent
+	record.Harness = event.Harness
+	record.CompletionID = event.CompletionID
 	_ = pipeline.Log.Append(record)
 }
 

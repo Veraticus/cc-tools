@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,33 +21,29 @@ import (
 func testNotifyClientConfig(t *testing.T, socketPath string) notifyClientConfig {
 	t.Helper()
 	return notifyClientConfig{
-		DryRun:   true,
-		Log:      notify.DecisionLog{Path: filepath.Join(t.TempDir(), "decisions.jsonl")},
-		SockPath: socketPath, DialTimeout: 100 * time.Millisecond,
+		Log:         notify.DecisionLog{Path: filepath.Join(t.TempDir(), "decisions.jsonl")},
+		SockPath:    socketPath,
+		DialTimeout: 50 * time.Millisecond,
 	}
 }
 
-func writeMarkerHelper(t *testing.T, name string) (string, string) {
+func canonicalPiPayload(assistant string) string {
+	wire, _ := json.Marshal(map[string]any{
+		"schema_version": 1, "harness": "pi", "session_id": "session-1",
+		"completion_id": "completion-1", "cwd": "/work/project",
+		"hook_event_name": "TurnComplete", "message": "user", "last_assistant_message": assistant,
+	})
+	return string(wire)
+}
+
+func startAckSocket(t *testing.T, handler func(net.Conn, notify.Frame)) string {
 	t.Helper()
-	directory := t.TempDir()
-	marker := filepath.Join(directory, "invoked")
-	script := "#!/bin/sh\ntouch \"$MARKER\"\nexit 1\n"
-	path := filepath.Join(directory, name)
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("MARKER", marker)
-	return path, marker
-}
-
-func TestDispatchNotifyReachableSocketWritesMinimalFrameAndSkipsFallback(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "notifyd.sock")
-	listener, err := net.Listen("unix", socketPath)
+	path := filepath.Join(t.TempDir(), "notifyd.sock")
+	listener, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = listener.Close() }()
-	frames := make(chan notify.Frame, 1)
+	t.Cleanup(func() { _ = listener.Close() })
 	go func() {
 		connection, acceptErr := listener.Accept()
 		if acceptErr != nil {
@@ -55,67 +52,323 @@ func TestDispatchNotifyReachableSocketWritesMinimalFrameAndSkipsFallback(t *test
 		defer func() { _ = connection.Close() }()
 		frame, decodeErr := notify.DecodeFrame(connection)
 		if decodeErr == nil {
-			frames <- frame
+			handler(connection, frame)
 		}
 	}()
-	inlineRequests := make(chan string, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		body, readErr := io.ReadAll(req.Body)
-		if readErr != nil {
-			t.Errorf("reading inline request: %v", readErr)
-		}
-		inlineRequests <- string(body)
+	return path
+}
+
+func fallbackServer(t *testing.T) (notify.Sender, *atomic.Int32, <-chan string) {
+	t.Helper()
+	calls := &atomic.Int32{}
+	bodies := make(chan string, 10)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		body, _ := io.ReadAll(request.Body)
+		calls.Add(1)
+		bodies <- string(body)
 		w.WriteHeader(http.StatusOK)
 	}))
-	defer server.Close()
+	t.Cleanup(server.Close)
+	return notify.Sender{URL: server.URL, Client: server.Client()}, calls, bodies
+}
 
-	cfg := testNotifyClientConfig(t, socketPath)
-	cfg.DryRun = false
-	cfg.Sender = notify.Sender{URL: server.URL, Client: server.Client()}
-	cfg.Environ = []string{"TMUX_PANE=", "SECRET_DO_NOT_SEND=value"}
-	var stdout, stderr bytes.Buffer
-	dispatchNotify(
-		context.Background(), cfg,
-		strings.NewReader(
-			`{"schema_version":1,"harness":"pi","session_id":"session-1",`+
-				`"completion_id":"completion-1","cwd":"/work/project",`+
-				`"hook_event_name":"TurnComplete","last_assistant_message":"Inline must not run."}`,
-		),
-		&stdout, &stderr,
-	)
-	select {
-	case frame := <-frames:
-		input := frame.HookInput
-		if input.Harness != "pi" || input.SessionID != "session-1" ||
-			input.CompletionID != "completion-1" || input.HookEventName != "TurnComplete" ||
-			frame.Workspace != "" || frame.DryRun {
-			t.Errorf("frame = %+v", frame)
-		}
-		wire, marshalErr := json.Marshal(frame)
-		if marshalErr != nil {
-			t.Fatal(marshalErr)
-		}
-		if strings.Contains(string(wire), "SECRET") || strings.Contains(string(wire), "environ") ||
-			strings.Contains(string(wire), "parent_pid") {
-			t.Fatalf("frame leaked caller context: %s", wire)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("daemon did not receive frame")
-	}
-	select {
-	case body := <-inlineRequests:
-		t.Fatalf("reachable daemon also ran inline delivery with body %q", body)
-	default:
-	}
-	if _, statErr := os.Stat(cfg.Log.Path); !os.IsNotExist(statErr) {
-		t.Fatalf("reachable daemon wrote inline decision log: %v", statErr)
-	}
-	if stdout.Len() != 0 || stderr.Len() != 0 {
-		t.Errorf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+func TestDispatchNotifyAcceptedAndDuplicateAcksSkipInline(t *testing.T) {
+	for _, status := range []string{"accepted", "duplicate"} {
+		t.Run(status, func(t *testing.T) {
+			frames := make(chan notify.Frame, 1)
+			socket := startAckSocket(t, func(connection net.Conn, frame notify.Frame) {
+				frames <- frame
+				_ = notify.EncodeAck(connection, notify.Ack{Version: 1, Status: status})
+			})
+			sender, calls, _ := fallbackServer(t)
+			cfg := testNotifyClientConfig(t, socket)
+			cfg.Sender = sender
+			cfg.Environ = []string{"TMUX_PANE=", "SECRET_DO_NOT_SEND=value"}
+			var stdout, stderr bytes.Buffer
+			dispatchNotify(
+				context.Background(), cfg,
+				strings.NewReader(canonicalPiPayload("must not inline")), &stdout, &stderr,
+			)
+			frame := <-frames
+			if frame.Event.Harness != "pi" || frame.Event.Kind != "completion" ||
+				frame.Event.CompletionID != "completion-1" || frame.Event.Assistant != "must not inline" {
+				t.Fatalf("frame = %+v", frame)
+			}
+			wire, err := json.Marshal(frame)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, secret := range []string{"SECRET", "environ", "transcript_path", "hook_input"} {
+				if strings.Contains(string(wire), secret) {
+					t.Fatalf("frame leaked %q: %s", secret, wire)
+				}
+			}
+			if calls.Load() != 0 || stdout.Len() != 0 || stderr.Len() != 0 {
+				t.Fatalf("inline/stdout/stderr = %d/%q/%q", calls.Load(), stdout.String(), stderr.String())
+			}
+		})
 	}
 }
 
-func TestRunNotifyCommandHarnessFlagReachesNormalizedCodexFrame(t *testing.T) {
+func TestDispatchNotifyLegacyCodexWithOptionalTurnIDUsesDeterministicFallback(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		turnIDField string
+		wantID      string
+	}{
+		{name: "native turn ID", turnIDField: `,"turn-id":"legacy-turn"`, wantID: "legacy-turn"},
+		{name: "missing optional turn ID"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			sender, calls, bodies := fallbackServer(t)
+			cfg := testNotifyClientConfig(t, filepath.Join(t.TempDir(), "missing.sock"))
+			cfg.Sender = sender
+			payload := `{"type":"agent-turn-complete","thread-id":"legacy-session",` +
+				`"cwd":"/work/legacy","input-messages":["fix it"],` +
+				`"last-assistant-message":"legacy deterministic fallback"` + tt.turnIDField + `}`
+			var stderr bytes.Buffer
+			dispatchNotify(context.Background(), cfg, strings.NewReader(payload), io.Discard, &stderr)
+			if calls.Load() != 1 {
+				t.Fatalf("inline calls = %d stderr=%q", calls.Load(), stderr.String())
+			}
+			if body := <-bodies; body != "legacy deterministic fallback" {
+				t.Fatalf("fallback body = %q", body)
+			}
+			data, err := os.ReadFile(cfg.Log.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var record notify.DecisionRecord
+			if err = json.Unmarshal(bytes.TrimSpace(data), &record); err != nil {
+				t.Fatal(err)
+			}
+			if record.Harness != "codex" || record.Event != "TurnComplete" ||
+				record.SessionID != "legacy-session" || record.CompletionID != tt.wantID {
+				t.Fatalf("decision record = %+v", record)
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("stderr = %q", stderr.String())
+			}
+		})
+	}
+}
+
+func TestDispatchNotifyAllAmbiguousAcksRunExactlyOneInlineFallback(t *testing.T) {
+	cases := []struct {
+		name    string
+		handler func(net.Conn, notify.Frame)
+	}{
+		{name: "rejected", handler: func(connection net.Conn, _ notify.Frame) {
+			_ = notify.EncodeAck(connection, notify.Ack{Version: 1, Status: "rejected"})
+		}},
+		{name: "bad JSON", handler: func(connection net.Conn, _ notify.Frame) {
+			_, _ = connection.Write([]byte("bad\n"))
+		}},
+		{name: "truncated", handler: func(connection net.Conn, _ notify.Frame) {
+			_, _ = connection.Write([]byte(`{"version":1`))
+		}},
+		{name: "oversize", handler: func(connection net.Conn, _ notify.Frame) {
+			base := []byte(`{"version":1,"status":"accepted"}`)
+			line := append(append([]byte{}, base...), bytes.Repeat([]byte(" "), 256-len(base))...)
+			_, _ = connection.Write(append(line, '\n'))
+		}},
+		{name: "unknown status", handler: func(connection net.Conn, _ notify.Frame) {
+			_, _ = connection.Write([]byte(`{"version":1,"status":"future"}` + "\n"))
+		}},
+		{name: "disconnect", handler: func(net.Conn, notify.Frame) {}},
+		{name: "timeout", handler: func(net.Conn, notify.Frame) { time.Sleep(100 * time.Millisecond) }},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			socket := startAckSocket(t, tt.handler)
+			sender, calls, bodies := fallbackServer(t)
+			cfg := testNotifyClientConfig(t, socket)
+			cfg.Sender = sender
+			cfg.DialTimeout = 25 * time.Millisecond
+			var stdout, stderr bytes.Buffer
+			dispatchNotify(
+				context.Background(), cfg,
+				strings.NewReader(canonicalPiPayload("one inline fallback")), &stdout, &stderr,
+			)
+			if calls.Load() != 1 {
+				t.Fatalf("inline calls = %d, want exactly 1", calls.Load())
+			}
+			select {
+			case body := <-bodies:
+				if body != "one inline fallback" {
+					t.Fatalf("body = %q", body)
+				}
+			default:
+				t.Fatal("missing inline body")
+			}
+			if stdout.Len() != 0 || stderr.Len() != 0 {
+				t.Fatalf("stdout/stderr = %q/%q", stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+func TestDispatchNotifyAckSizeBoundaryControlsInlineFallback(t *testing.T) {
+	const maximumAckLineBytes = 256
+	base := []byte(`{"version":1,"status":"accepted"}`)
+	for _, tt := range []struct {
+		name         string
+		wireBytes    int
+		wantFallback bool
+	}{
+		{name: "exact limit accepted", wireBytes: maximumAckLineBytes},
+		{name: "one byte over rejected", wireBytes: maximumAckLineBytes + 1, wantFallback: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			socket := startAckSocket(t, func(connection net.Conn, _ notify.Frame) {
+				line := append(append([]byte{}, base...), bytes.Repeat(
+					[]byte(" "), tt.wireBytes-len(base)-1,
+				)...)
+				_, _ = connection.Write(append(line, '\n'))
+			})
+			sender, calls, bodies := fallbackServer(t)
+			cfg := testNotifyClientConfig(t, socket)
+			cfg.Sender = sender
+			dispatchNotify(
+				context.Background(), cfg,
+				strings.NewReader(canonicalPiPayload("boundary fallback")), io.Discard, io.Discard,
+			)
+			wantCalls := int32(0)
+			if tt.wantFallback {
+				wantCalls = 1
+			}
+			if calls.Load() != wantCalls {
+				t.Fatalf("inline calls = %d, want %d", calls.Load(), wantCalls)
+			}
+			if tt.wantFallback {
+				if body := <-bodies; body != "boundary fallback" {
+					t.Fatalf("fallback body = %q", body)
+				}
+			}
+		})
+	}
+}
+
+func TestDispatchNotifySocketOutageUsesOnePreparedClaudeSnapshot(t *testing.T) {
+	transcript := filepath.Join(t.TempDir(), "transcript.jsonl")
+	content := `{"type":"user","message":{"role":"user","content":"captured user"}}` + "\n" +
+		`{"type":"assistant","uuid":"captured-uuid","message":{"role":"assistant","content":[{"type":"text","text":"captured assistant"}]}}` + "\n"
+	if err := os.WriteFile(transcript, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	socket := startAckSocket(t, func(connection net.Conn, frame notify.Frame) {
+		if frame.Event.CompletionID != "captured-uuid" || frame.Event.Assistant != "captured assistant" {
+			t.Errorf("prepared frame = %+v", frame)
+		}
+		if err := os.Remove(transcript); err != nil {
+			t.Errorf("removing transcript: %v", err)
+		}
+		_ = notify.EncodeAck(connection, notify.Ack{Version: 1, Status: "rejected"})
+	})
+	sender, calls, bodies := fallbackServer(t)
+	cfg := testNotifyClientConfig(t, socket)
+	cfg.Sender = sender
+	payload := `{"session_id":"claude-session","cwd":"/work/project","hook_event_name":"Stop",` +
+		`"transcript_path":` + string(mustJSON(t, transcript)) + `,"last_assistant_message":"stale hook text"}`
+	dispatchNotify(context.Background(), cfg, strings.NewReader(payload), io.Discard, io.Discard)
+	if calls.Load() != 1 {
+		t.Fatalf("inline calls = %d", calls.Load())
+	}
+	if body := <-bodies; body != "captured assistant" {
+		t.Fatalf("inline body = %q, want original prepared snapshot", body)
+	}
+}
+
+func mustJSON(t *testing.T, value string) []byte {
+	t.Helper()
+	wire, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wire
+}
+
+func TestSendFrameUsesOneCombinedBudgetAndEarlierContextDeadline(t *testing.T) {
+	socket := startAckSocket(t, func(net.Conn, notify.Frame) { time.Sleep(200 * time.Millisecond) })
+	frame := notify.Frame{Event: notify.PreparedEvent{
+		Version: 1, Harness: "pi", SessionID: "s", Kind: "completion",
+		SourceEvent: "TurnComplete", CompletionID: "id", Assistant: "fallback",
+	}}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if sendFrame(ctx, socket, frame, 200*time.Millisecond) {
+		t.Fatal("timeout response accepted")
+	}
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("sendFrame ignored earlier context deadline: %s", elapsed)
+	}
+}
+
+func TestSendFrameReturnsAtAckNewlineWithoutWaitingForEOF(t *testing.T) {
+	release := make(chan struct{})
+	socket := startAckSocket(t, func(connection net.Conn, _ notify.Frame) {
+		_ = notify.EncodeAck(connection, notify.Ack{Version: 1, Status: "accepted"})
+		<-release
+	})
+	defer close(release)
+	frame := notify.Frame{Event: notify.PreparedEvent{
+		Version: 1, Harness: "pi", SessionID: "s", Kind: "completion",
+		SourceEvent: "TurnComplete", CompletionID: "id", Assistant: "fallback",
+	}}
+	started := time.Now()
+	if !sendFrame(context.Background(), socket, frame, 100*time.Millisecond) {
+		t.Fatal("accepted ack was not accepted")
+	}
+	if elapsed := time.Since(started); elapsed > 50*time.Millisecond {
+		t.Fatalf("sendFrame waited for EOF: %s", elapsed)
+	}
+}
+
+func writeMarkerHelper(t *testing.T) (string, string) {
+	t.Helper()
+	directory := t.TempDir()
+	marker := filepath.Join(directory, "invoked")
+	path := filepath.Join(directory, "helper")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\ntouch \"$MARKER\"\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MARKER", marker)
+	return path, marker
+}
+
+func TestDispatchNotifyInlineAndDryRunNeverInvokePiHelper(t *testing.T) {
+	helper, marker := writeMarkerHelper(t)
+	for _, dryRun := range []bool{false, true} {
+		t.Run(map[bool]string{false: "outage", true: "dry-run"}[dryRun], func(t *testing.T) {
+			sender, calls, _ := fallbackServer(t)
+			cfg := testNotifyClientConfig(t, filepath.Join(t.TempDir(), "missing.sock"))
+			cfg.DryRun = dryRun
+			cfg.Sender = sender
+			cfg.Environ = []string{"STEWARD_HELPER_BIN=" + helper}
+			var stdout, stderr bytes.Buffer
+			dispatchNotify(
+				context.Background(), cfg,
+				strings.NewReader(canonicalPiPayload("model-free fallback")), &stdout, &stderr,
+			)
+			if _, err := os.Stat(marker); !os.IsNotExist(err) {
+				t.Fatalf("helper invoked: %v", err)
+			}
+			if dryRun {
+				if calls.Load() != 0 || !strings.Contains(stdout.String(), "model-free fallback") {
+					t.Fatalf("dry-run calls/stdout = %d/%q", calls.Load(), stdout.String())
+				}
+			} else if calls.Load() != 1 || stdout.Len() != 0 {
+				t.Fatalf("outage calls/stdout = %d/%q", calls.Load(), stdout.String())
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("stderr = %q", stderr.String())
+			}
+		})
+	}
+}
+
+func TestRunNotifyCommandHarnessFlagPreparesRealCodexFrameAndWaitsForAck(t *testing.T) {
 	runtimeDirectory := t.TempDir()
 	socketPath := filepath.Join(runtimeDirectory, "cc-tools", "notifyd.sock")
 	if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil {
@@ -136,6 +389,7 @@ func TestRunNotifyCommandHarnessFlagReachesNormalizedCodexFrame(t *testing.T) {
 		frame, decodeErr := notify.DecodeFrame(connection)
 		if decodeErr == nil {
 			frames <- frame
+			_ = notify.EncodeAck(connection, notify.Ack{Version: 1, Status: "accepted"})
 		}
 	}()
 	t.Setenv("XDG_RUNTIME_DIR", runtimeDirectory)
@@ -150,203 +404,79 @@ func TestRunNotifyCommandHarnessFlagReachesNormalizedCodexFrame(t *testing.T) {
 	}
 	select {
 	case frame := <-frames:
-		input := frame.HookInput
-		if input.Harness != "codex" || input.HookEventName != "TurnComplete" ||
-			input.SessionID != "thread" || input.CompletionID != "turn" {
+		if frame.Event.Harness != "codex" || frame.Event.Kind != "completion" ||
+			frame.Event.SessionID != "thread" || frame.Event.CompletionID != "turn" {
 			t.Fatalf("frame = %+v", frame)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(time.Second):
 		t.Fatal("no normalized frame")
 	}
-}
-
-func TestDispatchNotifyInlineOutageAndDryRunNeverInvokePiHelper(t *testing.T) {
-	helper, marker := writeMarkerHelper(t, "steward-pi-helper")
-	for _, dryRun := range []bool{false, true} {
-		t.Run(map[bool]string{false: "outage", true: "dry run"}[dryRun], func(t *testing.T) {
-			requests := make(chan string, 2)
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-				body, err := io.ReadAll(req.Body)
-				if err != nil {
-					t.Errorf("reading fallback request: %v", err)
-				}
-				requests <- string(body)
-				w.WriteHeader(http.StatusOK)
-			}))
-			defer server.Close()
-			cfg := testNotifyClientConfig(t, filepath.Join(t.TempDir(), "missing.sock"))
-			cfg.DryRun = dryRun
-			cfg.Sender = notify.Sender{URL: server.URL, Client: server.Client()}
-			cfg.Environ = []string{"STEWARD_HELPER_BIN=" + helper}
-			payload := `{"schema_version":1,"harness":"pi","session_id":"pi-session",` +
-				`"completion_id":"completion","cwd":"/work/project","hook_event_name":"TurnComplete",` +
-				`"message":"user","last_assistant_message":"Inline fallback."}`
-			var stdout, stderr bytes.Buffer
-			dispatchNotify(context.Background(), cfg, strings.NewReader(payload), &stdout, &stderr)
-			if _, err := os.Stat(marker); !os.IsNotExist(err) {
-				t.Fatalf("helper marker exists (err=%v): inline path invoked inference", err)
-			}
-			if dryRun {
-				if !strings.Contains(stdout.String(), "Inline fallback.") {
-					t.Errorf("stdout = %q", stdout.String())
-				}
-				select {
-				case body := <-requests:
-					t.Fatalf("dry run made HTTP request with body %q", body)
-				default:
-				}
-			} else {
-				select {
-				case body := <-requests:
-					if body != "Inline fallback." {
-						t.Fatalf("fallback body = %q", body)
-					}
-				default:
-					t.Fatal("socket outage did not send inline fallback")
-				}
-				select {
-				case body := <-requests:
-					t.Fatalf("socket outage sent duplicate fallback body %q", body)
-				default:
-				}
-			}
-			if stderr.Len() != 0 {
-				t.Errorf("stderr = %q", stderr.String())
-			}
-		})
+	if stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("stdout/stderr = %q/%q", stdout.String(), stderr.String())
 	}
 }
 
-func TestNewNotifydPipelineUsesCentralPiConfigurationInRealCommand(t *testing.T) {
+func TestNewNotifydPipelineUsesCentralPiConfiguration(t *testing.T) {
 	directory := t.TempDir()
-	dumpPath := filepath.Join(directory, "request.json")
 	helperPath := filepath.Join(directory, "helper")
-	script := `#!/bin/sh
-cat >"$DUMP_PATH"
-printf '%s\n' '{"version":1,"ok":true,"body":"Central helper summary."}'
-`
-	if err := os.WriteFile(helperPath, []byte(script), 0o755); err != nil {
+	helperScript := "#!/bin/sh\nprintf '%s\\n' " +
+		"'{\"version\":1,\"ok\":true,\"body\":\"summary\"}'\n"
+	if err := os.WriteFile(helperPath, []byte(helperScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("DUMP_PATH", dumpPath)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-	logPath := filepath.Join(t.TempDir(), "decisions.jsonl")
-	pipeline := newNotifydPipeline(
-		false,
-		notify.Sender{URL: server.URL, Client: server.Client()},
-		notify.DecisionLog{Path: logPath},
-		[]string{
-			"STEWARD_HELPER_BIN=" + helperPath,
-			"STEWARD_MODEL_PROVIDER=provider-central",
-			"STEWARD_MODEL_ID=model-central",
-			"STEWARD_MODEL_THINKING=xhigh",
-		},
-	)
+	pipeline := newNotifydPipeline(false, notify.Sender{}, notify.DecisionLog{}, []string{
+		"STEWARD_HELPER_BIN=" + helperPath,
+		"STEWARD_MODEL_PROVIDER=provider-central",
+		"STEWARD_MODEL_ID=model-central",
+		"STEWARD_MODEL_THINKING=xhigh",
+	})
 	composer, ok := pipeline.Composer.(notify.PiComposer)
-	if !ok {
-		t.Fatalf("Composer = %T, want notify.PiComposer", pipeline.Composer)
-	}
-	if composer.Bin != helperPath || composer.Model != (notify.ComposeModel{
+	if !ok || composer.Bin != helperPath || composer.Model != (notify.ComposeModel{
 		Provider: "provider-central", ID: "model-central", Thinking: "xhigh",
 	}) {
-		t.Fatalf("composer = %+v", composer)
-	}
-	if err := pipeline.Run(context.Background(), notify.HookInput{
-		Harness: "pi", SessionID: "session", CompletionID: "completion",
-		CWD: "/work/project", HookEventName: "TurnComplete",
-		Message: "central user", LastAssistantMessage: "central assistant",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	wire, err := os.ReadFile(dumpPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var request struct {
-		Operation string              `json:"operation"`
-		Model     notify.ComposeModel `json:"model"`
-		Input     notify.ComposeInput `json:"input"`
-		Label     notify.ComposeLabel `json:"label"`
-	}
-	if unmarshalErr := json.Unmarshal(wire, &request); unmarshalErr != nil {
-		t.Fatalf("request = %q: %v", wire, unmarshalErr)
-	}
-	if request.Operation != "compose" || request.Model != composer.Model ||
-		request.Input != (notify.ComposeInput{User: "central user", Assistant: "central assistant"}) ||
-		request.Label != (notify.ComposeLabel{}) {
-		t.Errorf("request = %+v", request)
+		t.Fatalf("composer = %+v (%T)", composer, pipeline.Composer)
 	}
 }
 
-func TestNewNotifydPipelineBadExplicitConfigKeepsFallbackService(t *testing.T) {
-	serverRequests := make(chan string, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		body, _ := io.ReadAll(req.Body)
-		serverRequests <- string(body)
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-	logPath := filepath.Join(t.TempDir(), "decisions.jsonl")
-	pipeline := newNotifydPipeline(
-		false,
-		notify.Sender{URL: server.URL, Client: server.Client()},
-		notify.DecisionLog{Path: logPath},
-		[]string{"STEWARD_MODEL_ID=", "SECRET_CONFIG=must-not-leak"},
-	)
-	if pipeline.Composer != nil || pipeline.CompositionError == nil {
-		t.Fatalf(
-			"pipeline composer/error = %T/%v, want safely disabled composer",
-			pipeline.Composer,
-			pipeline.CompositionError,
-		)
-	}
-	if err := pipeline.Run(context.Background(), notify.HookInput{
-		Harness: "pi", SessionID: "session", CompletionID: "completion",
-		CWD: "/work/project", HookEventName: "TurnComplete",
-		LastAssistantMessage: "Configuration fallback.",
-	}); err != nil {
+func TestNotifyProtocolDocumentationCoversStrictAndNonDurableSemantics(t *testing.T) {
+	protocol, err := os.ReadFile(filepath.Join("..", "..", "docs", "notify-protocol.md"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case body := <-serverRequests:
-		if body != "Configuration fallback." {
-			t.Errorf("body = %q", body)
+	for _, required := range []string{
+		"64 KiB", "256 bytes", `{"version":1,"status":"accepted"}`,
+		`{"version":1,"status":"duplicate"}`, `{"version":1,"status":"rejected"}`,
+		"24 hours", "10,000", "non-durable", "restart", "crash", "inline fallback",
+		"same prepared snapshot", "no delivery guarantee", "non-null",
+		"unpaired UTF-16 surrogate", "identity pair",
+	} {
+		if !strings.Contains(string(protocol), required) {
+			t.Errorf("protocol documentation missing %q", required)
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("bad config disabled fallback delivery")
 	}
-	logData, err := os.ReadFile(logPath)
+	readme, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(logData), "invalid configuration") || strings.Contains(string(logData), "SECRET") {
-		t.Errorf("decision log = %s, want safe observable config category", logData)
+	for _, required := range []string{
+		"acknowledgement", "duplicate", "non-durable", "same prepared snapshot", "identity pair",
+	} {
+		if !strings.Contains(string(readme), required) {
+			t.Errorf("README notification section missing %q", required)
+		}
 	}
 }
 
-func TestNotifydRequiresSender(t *testing.T) {
-	for _, test := range []struct {
-		senderOK bool
-		dryRun   bool
-		want     bool
-	}{
-		{senderOK: false, dryRun: false, want: true},
-		{senderOK: false, dryRun: true, want: false},
-		{senderOK: true, dryRun: false, want: false},
-		{senderOK: true, dryRun: true, want: false},
+func TestNotifydRequiresSenderAndDefaultStateBase(t *testing.T) {
+	for _, test := range []struct{ senderOK, dryRun, want bool }{
+		{false, false, true}, {false, true, false}, {true, false, false}, {true, true, false},
 	} {
 		if got := notifydRequiresSender(test.senderOK, test.dryRun); got != test.want {
-			t.Errorf("notifydRequiresSender(%v, %v) = %v", test.senderOK, test.dryRun, got)
+			t.Errorf("notifydRequiresSender(%v,%v) = %v", test.senderOK, test.dryRun, got)
 		}
 	}
-}
-
-func TestDefaultNotifyStateBase(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", "/state")
 	if got := defaultNotifyStateBase(); got != filepath.Join("/state", "cc-tools", "notify") {
-		t.Errorf("defaultNotifyStateBase() = %q", got)
+		t.Fatalf("defaultNotifyStateBase = %q", got)
 	}
 }

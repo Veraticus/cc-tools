@@ -120,8 +120,9 @@ The `_FILE` variants are supported for secrets (`CC_TOOLS_NTFY_URL_FILE` and
 delivery. The old `CLAUDE_HOOKS_NTFY_*` variables continue to work.
 
 Root completion delivery is deterministic. When `notifyd` receives an eligible
-completion with a usable native ID, it calls `steward-pi-helper` exactly once
-with the latest user and assistant text. The helper may supply only a validated
+completion with a usable native identity pair (session ID and completion ID),
+it calls `steward-pi-helper` exactly once with the latest user and assistant
+text. The helper may supply only a validated
 plain-text body; it cannot suppress the notification or change its done urgency.
 Claude Stop uses the transcript's reliable final assistant UUID, then
 `message.id`; an unavailable or unreliable transcript never reuses a stale
@@ -148,6 +149,17 @@ If `notifyd` is unavailable, `cc-tools notify` uses the same model-free fallback
 inline. Dry runs are model-free as well; neither path starts the helper or
 attempts model authentication. Notification frames retain workspace routing but
 never copy the caller's whole environment into daemon IPC.
+
+The hook prepares each event once and waits up to 250 ms for a strict daemon
+acknowledgement. `accepted` and `duplicate` acknowledgements suppress inline
+work; a rejection, timeout, disconnect, or malformed acknowledgement runs one
+inline fallback from the same prepared snapshot, without rescanning a Claude
+transcript. Completion duplicate suppression is daemon-local and non-durable:
+it covers in-flight and successful IDs for 24 hours (up to 10,000 claims), but a
+daemon restart starts empty. Consequently an acknowledgement lost in transit
+can produce a duplicate, while a daemon crash after an observed acceptance can
+lose that notification. See [the notify protocol](docs/notify-protocol.md) for
+the exact framing, bounds, and outage semantics.
 
 You can exercise the Codex adapter without sending anything:
 

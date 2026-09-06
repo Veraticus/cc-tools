@@ -243,6 +243,44 @@ func TestPipelineClaudeCompletionUsesReliableNativeIdentityAndLatestConversation
 	}
 }
 
+func TestPipelineRunImplicitClaudeUsesTranscriptIdentity(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		completionID string
+	}{
+		{name: "absent supplied ID"},
+		{name: "stale supplied ID", completionID: "stale-hook-id"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server, requests := captureNotificationServer(t)
+			defer server.Close()
+			composer := &recordingComposer{result: ComposeResult{Body: "Implicit Claude summary."}}
+			pipeline, logPath := testPipeline(t, server, composer)
+			if err := pipeline.Run(context.Background(), HookInput{
+				SessionID: "implicit-session", CompletionID: tt.completionID,
+				CWD: "/work/implicit", HookEventName: eventStop,
+				TranscriptPath:       conversationTranscript(t, "implicit-uuid", "message-id", false),
+				LastAssistantMessage: "stale fallback",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if request := waitNotification(t, requests); request.Body != "Implicit Claude summary." {
+				t.Fatalf("request = %+v", request)
+			}
+			calls := composer.Calls()
+			if len(calls) != 1 || calls[0].Input != (ComposeInput{
+				User: "latest user text", Assistant: "latest assistant text",
+			}) {
+				t.Fatalf("Compose calls = %+v", calls)
+			}
+			record := readDecisionLog(t, logPath)[0]
+			if record.Harness != harnessClaude || record.CompletionID != "implicit-uuid" {
+				t.Fatalf("record = %+v", record)
+			}
+		})
+	}
+}
+
 func TestPipelineProviderTurnCompleteComposesOnceWithNativeInput(t *testing.T) {
 	for _, harness := range []string{harnessCodex, harnessPi} {
 		t.Run(harness, func(t *testing.T) {
@@ -627,6 +665,110 @@ func TestPipelineComposedBodyRemainsBoundedAndUrgencyCannotChange(t *testing.T) 
 	}
 	if request.Priority != "4" || request.Tags != "white_check_mark" {
 		t.Errorf("headers = %+v, model must not alter done urgency", request)
+	}
+}
+
+func TestPipelineRunPreparedUsesFrozenClaudeSnapshot(t *testing.T) {
+	server, requests := captureNotificationServer(t)
+	defer server.Close()
+	composer := &recordingComposer{result: ComposeResult{Body: "Frozen summary."}}
+	pipeline, _ := testPipeline(t, server, composer)
+	path := conversationTranscript(t, "frozen-uuid", "frozen-message", false)
+	prepared, err := PrepareEvent(HookInput{
+		Harness: harnessClaude, SessionID: "frozen", HookEventName: eventStop,
+		TranscriptPath: path, LastAssistantMessage: "stale hook fallback",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err = pipeline.RunPrepared(context.Background(), prepared); err != nil {
+		t.Fatal(err)
+	}
+	calls := composer.Calls()
+	wantInput := ComposeInput{User: "latest user text", Assistant: "latest assistant text"}
+	if len(calls) != 1 || calls[0].Input != wantInput {
+		t.Fatalf("Compose calls after transcript removal = %+v", calls)
+	}
+	if request := waitNotification(t, requests); request.Body != "Frozen summary." {
+		t.Fatalf("request = %+v", request)
+	}
+}
+
+func TestPipelineRunPreparedClaudeFallbackUsesCapturedAssistant(t *testing.T) {
+	server, requests := captureNotificationServer(t)
+	defer server.Close()
+	pipeline, _ := testPipeline(t, server, nil)
+	path := conversationTranscript(t, "frozen-uuid", "frozen-message", false)
+	prepared, err := PrepareEvent(HookInput{
+		Harness: harnessClaude, SessionID: "frozen", HookEventName: eventStop,
+		TranscriptPath: path, LastAssistantMessage: "stale hook fallback",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(path, []byte("mutated"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err = pipeline.RunPrepared(context.Background(), prepared); err != nil {
+		t.Fatal(err)
+	}
+	if request := waitNotification(t, requests); request.Body != "latest assistant text" {
+		t.Fatalf("fallback = %q, want captured assistant", request.Body)
+	}
+}
+
+func TestPipelineRunPreparedIncompleteIdentityPairSkipsCompositionOnEveryRepeat(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		sessionID    string
+		completionID string
+	}{
+		{name: "session only", sessionID: "session"},
+		{name: "completion only", completionID: "completion"},
+		{name: "both empty"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server, requests := captureNotificationServer(t)
+			defer server.Close()
+			pipeline, logPath := testPipeline(t, server, panicComposer{})
+			prepared := PreparedEvent{
+				Version: 1, Harness: harnessPi, SessionID: tt.sessionID,
+				Kind: eventKindCompletion, SourceEvent: eventTurnComplete,
+				CompletionID: tt.completionID,
+				Assistant:    strings.Repeat("bounded fallback words ", 20),
+			}
+			for range 2 {
+				if err := pipeline.RunPrepared(context.Background(), prepared); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for range 2 {
+				request := waitNotification(t, requests)
+				if len(request.Body) > maxNotificationFallbackBytes || request.Body == "" {
+					t.Fatalf("fallback body = %q (%d bytes)", request.Body, len(request.Body))
+				}
+			}
+			records := readDecisionLog(t, logPath)
+			if len(records) != 2 {
+				t.Fatalf("records = %+v", records)
+			}
+			for _, record := range records {
+				if record.CompositionOutcome != compositionFallback ||
+					record.CompositionError != compositionErrorIdentityUnavailable {
+					t.Fatalf("record = %+v", record)
+				}
+			}
+		})
+	}
+}
+
+func TestPipelineRunPreparedRejectsInvalidEvent(t *testing.T) {
+	err := (Pipeline{}).RunPrepared(context.Background(), PreparedEvent{})
+	if err == nil || err.Error() != "notify: invalid prepared event" {
+		t.Fatalf("RunPrepared() error = %v", err)
 	}
 }
 

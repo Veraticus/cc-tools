@@ -96,52 +96,73 @@ type notifyClientConfig struct {
 	DialTimeout time.Duration
 }
 
-// dispatchNotify parses one hook payload, sends a minimal frame to notifyd,
-// and uses a deterministic model-free inline fallback when the daemon is
-// unreachable. Dry runs also stay inline so their output reaches this client.
+// dispatchNotify parses and prepares one hook payload exactly once, then sends
+// that immutable snapshot to notifyd. Every ambiguous daemon outcome uses the
+// same snapshot for one deterministic model-free inline fallback; dry runs
+// bypass the socket so their rehearsal reaches this invocation's stdout.
 func dispatchNotify(ctx context.Context, cfg notifyClientConfig, stdin io.Reader, stdout, stderr io.Writer) {
-	in, err := notify.ParseHookInputForHarness(stdin, cfg.Harness)
+	input, err := notify.ParseHookInputForHarness(stdin, cfg.Harness)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "cc-tools notify: %v\n", err)
 		return
 	}
+	prepared, err := notify.PrepareEvent(input)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, "cc-tools notify: invalid event")
+		return
+	}
 
 	workspace := notify.WorkspaceName(cfg.Environ, notify.RunCommand)
-	frame := notify.Frame{HookInput: in, Workspace: workspace, DryRun: cfg.DryRun}
-	// A dry run must print its rehearsal to this invocation's stdout. Sending
-	// it to a live daemon would put the output in the daemon's logs instead
-	// (and older daemons did not know the per-frame DryRun field at all).
+	frame := notify.Frame{Event: prepared, Workspace: workspace, DryRun: cfg.DryRun}
 	if !cfg.DryRun && sendFrame(ctx, cfg.SockPath, frame, cfg.DialTimeout) {
 		return
 	}
 
-	p := notify.Pipeline{
+	pipeline := notify.Pipeline{
 		DryRun:    cfg.DryRun,
 		Sender:    cfg.Sender,
 		Log:       cfg.Log,
 		Stdout:    stdout,
 		Workspace: workspace,
 	}
-	if runErr := p.Run(ctx, in); runErr != nil {
-		_, _ = fmt.Fprintf(stderr, "cc-tools notify: %v\n", runErr)
+	if runErr := pipeline.RunPrepared(ctx, prepared); runErr != nil {
+		_, _ = fmt.Fprintln(stderr, "cc-tools notify: invalid event")
 	}
 }
 
-// sendFrame dials notifyd's control socket at sockPath and writes frame,
-// fire-and-forget: it returns true the moment the frame is fully written —
-// the daemon owns everything from there — and false on any dial or write
-// failure, so the caller runs its own inline fallback instead. timeout
-// bounds only the dial; once connected, the write of one small JSON frame
-// is not separately bounded.
+// sendFrame uses one dial/write/read budget, bounded by timeout (250ms by
+// default) and any earlier caller deadline. Only a strict accepted or duplicate
+// acknowledgement transfers delivery ownership to the daemon; every other
+// result is ambiguous and returns false for exactly one inline fallback.
 func sendFrame(ctx context.Context, sockPath string, frame notify.Frame, timeout time.Duration) bool {
-	dialer := net.Dialer{Timeout: timeout}
-	conn, err := dialer.DialContext(ctx, "unix", sockPath)
+	if timeout <= 0 {
+		timeout = clientDialTimeout
+	}
+	budgetContext, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(budgetContext, "unix", sockPath)
 	if err != nil {
 		return false
 	}
 	defer func() { _ = conn.Close() }()
-
-	return notify.EncodeFrame(conn, frame) == nil
+	stopOnCancellation := context.AfterFunc(budgetContext, func() {
+		_ = conn.SetDeadline(time.Now())
+	})
+	defer stopOnCancellation()
+	deadline, ok := budgetContext.Deadline()
+	if !ok || conn.SetDeadline(deadline) != nil {
+		return false
+	}
+	if notify.EncodeFrame(conn, frame) != nil {
+		return false
+	}
+	ack, err := notify.DecodeAck(conn)
+	if err != nil {
+		return false
+	}
+	return ack.Status == "accepted" || ack.Status == "duplicate"
 }
 
 // defaultNotifyStateBase resolves the default notify state directory:
