@@ -31,7 +31,7 @@ func main() {
 	// subagent-statusline) don't unconditionally touch disk + grow an
 	// unbounded log on every tick. Set CC_TOOLS_DEBUG=1 to capture
 	// invocations for diagnosis.
-	if os.Getenv("CC_TOOLS_DEBUG") == "1" {
+	if fileDebugLoggingEnabled() {
 		debugLog()
 	}
 
@@ -57,8 +57,8 @@ func main() {
 		runSubagentStatuslineCommand()
 	case "preview":
 		runPreviewCommand()
-	case "notify":
-		runNotifyCommand()
+	case "notify", "session-metadata":
+		runNotifyOrSessionMetadataCommand(os.Args[1])
 	case "notifyd":
 		runNotifydCommand()
 	case "version":
@@ -71,6 +71,19 @@ func main() {
 		printUsage(out)
 		os.Exit(1)
 	}
+}
+
+func fileDebugLoggingEnabled() bool {
+	return os.Getenv("CC_TOOLS_DEBUG") == "1" &&
+		(len(os.Args) < minArgs || os.Args[1] != "session-metadata")
+}
+
+func runNotifyOrSessionMetadataCommand(command string) {
+	if command == "notify" {
+		runNotifyCommand()
+		return
+	}
+	runSessionMetadataCommand()
 }
 
 func printUsage(out *output.Terminal) {
@@ -90,6 +103,7 @@ Commands:
   preview       Render every statusline/subagent-statusline scenario, labeled
   notify        Agent notifier (Claude hook stdin or Codex JSON argument)
   notifyd       Long-running daemon that runs the notify pipeline over a control socket
+  session-metadata  Read shared session naming metadata
   version       Print version information
   help          Show this help message
 

@@ -150,8 +150,18 @@ material (normally exchanges 1, 5, and 9). A known label replaces the cwd
 project name in daemon notification titles; otherwise the cwd fallback and tmux
 workspace locator (or host fallback) remain. Minimal cadence/source metadata is
 stored atomically in the owner-only `<state-base>/session-labels` directory and
-survives daemon restarts. See [shared session labels](docs/session-labels.md) for
-failure, retry, isolation, and future Pi resume/manual-name ownership behavior.
+survives daemon restarts. Local integrations can inspect one exact scope without
+writing state or invoking a model or sender:
+
+```bash
+cc-tools session-metadata --harness pi --session-id native-id
+```
+
+The command reports validated naming metadata only; it does not prove model or
+notification completion and does not rename a session. See
+[shared session labels](docs/session-labels.md) for its strict response contract,
+generation meanings, failure and retry behavior, isolation, and future Pi
+resume/manual-name ownership guards.
 
 If `notifyd` is unavailable, `cc-tools notify` uses the same model-free fallback
 inline. Dry runs are model-free as well; neither path starts the helper or

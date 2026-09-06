@@ -20,6 +20,48 @@ It contains no source text, notification body, transcript path, cwd, environment
 
 The source generation prevents a late composition result from overwriting metadata for a newer accepted source. The older accepted notification is still delivered with its original harness, session, cwd, workspace, body, and valid captured/generated label. Metadata survives daemon reconstruction so a later Pi resume consumer can compare the native source identity and generation.
 
+## Read-only metadata query
+
+A local consumer can inspect one exact harness/session scope without contacting
+`notifyd` or starting the Pi helper:
+
+```bash
+cc-tools session-metadata --harness pi --session-id native-id
+# For a non-default notify state root, add: --state-base /path/to/notify
+```
+
+A valid query exits zero, writes one newline-terminated JSON object of at most
+2048 bytes to stdout, and leaves stderr and stdin untouched. Its fields are
+exactly `version`, `status`, `harness`, `session_id`, `label`, `completion_id`,
+`source_generation`, and `label_generation`; generation values are canonical
+unsigned decimal strings so the full `uint64` range remains exact. `status` is
+`known` for a validated snapshot, `missing` when the state base or exact
+snapshot does not exist, and
+`unavailable` when state is corrupt, oversized, unsafe, or unreadable. A known
+record can have an empty `label` and a zero `label_generation`. Missing and
+unavailable responses retain the requested `harness` and `session_id`, while
+the label and completion ID are empty and both generations are `"0"`. Invalid
+or duplicate flags, an unsupported harness, or an invalid session ID instead
+return only `{"version":1,"status":"invalid_request"}` and exit 2.
+
+`source_generation` is the validated record's monotonically increasing source
+generation (internally equal to the completed exchange count), and
+`completion_id` identifies that latest accepted source. `label_generation` is
+the last successful refresh exchange, including a successful `KEEP` that left
+the label text unchanged. Therefore source and label generations can differ.
+Neither `known` nor matching generations prove that model generation or
+notification delivery has completed; this naming record is not a delivery
+ledger.
+
+The command is strictly read-only. It does not create missing directories or
+files, update counters or modification timestamps, invoke a model or sender,
+expose source text or fingerprints, or rename a Pi session. A later Pi UI
+consumer must still capture and recheck the same current session ID,
+conversation branch, and manual/automatic naming ownership before applying a
+label. That consumer may
+use a small bounded number of rereads to observe an asynchronously published
+snapshot, but this interface deliberately has no `pending` status.
+
 ## Consumers and fallbacks
 
 A known shared session label replaces the cwd project component in normal daemon completion and explicit-input notification titles. Other harnesses can reuse that label for notifications, but `notifyd` does not force their terminal titles. Explicit input performs only a short local metadata read; it never advances counters, invokes the model, or waits for in-flight composition.
