@@ -7,7 +7,7 @@ Steward's Pi 0.85 adapter is `runtime/pi-extension.mjs`. The package extension o
 
 The adapter calls the pinned native child-context accessor once, synchronously, when its factory is constructed. A child returns before registering events, installing a footer, or submitting a notification. Coupling errors remain visible and are never interpreted as a root session. See [Pi child-context coupling](pi-child-context.md) for the physical-package invariant and construction proof.
 
-This release owns settled notifications and the existing custom statusline footer. It does not add session-label UI, quota fetching, account lifecycle, authentication inspection, or provider calls.
+This release owns settled notifications, shared root-TUI session labels, and the existing custom statusline footer. It does not add quota fetching, account lifecycle, authentication inspection, or provider calls.
 
 ## Settled notifications
 
@@ -44,6 +44,66 @@ The resulting stdin object is exactly:
 
 A submitted snapshot is independent of footer/session generations. `/new`, `/resume`, `/fork`, `/reload`, and `/tree` cannot redirect it to a replacement session. Child, pipe, and deadline handles are unreferenced so best-effort client work cannot keep a quitting TUI alive; accepted daemon work is owned by the existing notifier daemon.
 
+## Shared session labels
+
+After freezing the settled notification snapshot and starting its independent
+submission, the root TUI schedules read-only
+`steward session-metadata --harness pi --session-id <native-id>` queries for the
+same native assistant entry. Session start also schedules a terminal assistant
+source already present on resume or fork. Agent activity first cancels stale
+work but does not erase the active session, so `agent_settled` can rearm it even
+though Pi creates a fresh extension context for every event. Tree navigation
+cancels the old branch and restores naming ownership before a later settled
+event can schedule the selected branch.
+
+One controller runs at most one metadata read at a time. Its six reread offsets
+are approximately 0, 250 ms, 1 s, 3 s, 8 s, and 16 s; overlapping timers
+coalesce. Each subprocess is limited to two seconds and 2048 stdout bytes,
+receives the native ID only on argv, does not use stdin, and requires bounded
+valid JSON plus a zero close outcome. Child, stdout pipe, and timer handles are
+unreferenced. Cancellation destroys the owned pipe and aborts the helper with
+`SIGKILL`, so shutdown does not retain a stale output listener or keep the TUI
+alive. Missing, unavailable, and known snapshots without a label end after the
+same bounded schedule rather than creating a pending protocol or busy loop.
+
+Metadata must identify the current terminal native assistant row and carry
+canonical uint64 decimal generations. Known source generation is positive;
+label generation is zero exactly for an empty label and otherwise identifies a
+validated three- or four-word, at-most-60-byte label. The adapter compares the
+full decimal range exactly, permits source and label generations to differ,
+can apply a prior nonempty label before a later refresh arrives, and observes
+remaining scheduled reads even after a matching result. It neither generates
+labels nor recreates the daemon's exchange cadence.
+
+Automatic ownership is a minimal versioned Pi `custom` entry, not a
+`custom_message`, and therefore never enters model context. It records the
+originating native session ID, native `session_info` row ID, normalized label,
+and source/label generations. The latest naming row must match that record to
+remain automatic across resume, fork, or tree navigation. An inherited fork can
+therefore retain automatic provenance, but its generation baseline applies only
+to the originating native session; the fork records its new native session ID
+on its first accepted metadata result, including when the label text is
+unchanged. Otherwise an existing name or clear is manual, including same-text
+names and malformed state. Manual ownership persists until a different session
+lifecycle provides sound automatic provenance.
+
+`pi.setSessionName()` appends the native row and emits its title event before
+its extension callback finishes. The adapter records rows before and after its
+synchronous call and claims ownership only when exactly one expected row is
+still latest. A reentrant `/name`, even with the same text, appends an extra row
+and remains manual. A delayed event for a successfully persisted owned row is
+recognized rather than canceling the controller. Persistence failure leaves the
+new native row unowned and reports only the fixed `Steward labels unavailable`
+diagnostic.
+
+The native setter first emits Pi's supported `Pi - name - cwd` terminal title.
+After rechecking lifecycle, session, branch source, generations, and native row
+ownership, the adapter calls public `ctx.ui.setTitle(label)` for the exact shared
+label. A later manual rename emits a newer native title and wins. Normal OSC 0
+handling lets tmux expose that value as pane `#T`; Steward does not rename tmux
+windows or make atomicity claims about unrelated out-of-band title commands.
+Non-TUI modes, child sessions, and other harness terminals do no label work.
+
 ## Custom footer
 
 The footer invokes the existing command boundary:
@@ -66,6 +126,6 @@ Run the owned source integration slice with:
 node --test runtime/pi-integration.test.mjs
 ```
 
-The test builds the current Go `steward` command into an isolated temporary directory, starts its real `notifyd`, invokes the real lifecycle handler and default notification client, and exercises the real daemon pipeline/composer against an executable fake Pi helper and loopback HTTP ntfy capture. Its only lifecycle seam is a transparent `sendNotification` observer: it calls the real sender with the unchanged payload/dependencies, records native session and completion IDs, and requires every actual client submission promise to report success. It verifies same-ID admission dedupe, distinct assistant IDs with identical text, generated helper body markers, and silence from non-settled lifecycle events using helper and HTTP completion barriers rather than quiet sleeps. After those barriers, it requires `notifyd` to drain accepted work and exit successfully before asserting exact final helper/HTTP counts and session metadata generations.
+The test builds the current Go `steward` command into an isolated temporary directory, starts its real `notifyd`, invokes the real lifecycle handler and default notification client, and exercises the real daemon pipeline/composer against an executable fake Pi helper and loopback HTTP ntfy capture. Its three lifecycle seams are a transparent `sendNotification` observer that calls the real sender with unchanged payload/dependencies, a metadata-read wrapper that calls the production reader and actual CLI with the isolated integration state base plus deterministic delivery barriers, and an injected schedule that selects bounded label-read moments without replacing the reader. The observer records native session and completion IDs and requires every actual client submission promise to report success. The test verifies same-ID admission dedupe, distinct assistant IDs with identical text, generated helper body markers, and silence from non-settled lifecycle events using helper and HTTP completion barriers rather than quiet sleeps. The same lifecycle uses real native `SessionManager` entries. It asserts the generated native name and exact title, persisted ownership of the original native naming row and session, a manual override during a late real metadata result, and rejection of that result after replacement by a new UI. After those barriers, it requires `notifyd` to drain accepted work and exit successfully before asserting exact final helper/HTTP counts and session metadata generations.
 
 Build, daemon startup/shutdown, HTTP listen/closure, and temporary-directory removal are bounded; child exit/error observation is installed immediately, and every spawned daemon is registered for cleanup before another await. Deterministic cleanup regressions cover already-exited and spawn-error children and prove later owned resources are still attempted after an earlier cleanup failure. Failure-safe cleanup attempts every child and server socket before restoring the environment and removing owned temporary state. The test replaces the runtime environment with an explicit local allowlist for the CLI, daemon, and helper, and uses synthetic credential sentinels to prove they reach neither helper nor HTTP transport. This is a credentials-free source integration test, not a package or live-acceptance test: it does not call a model/provider, authenticated ntfy service, or external network, and the helper and final HTTP endpoint remain controlled fakes.

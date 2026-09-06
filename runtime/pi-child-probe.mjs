@@ -387,6 +387,14 @@ export async function runProbe() {
     const childFactories = factories.filter((factory) => factory.childAtFactory === true);
     const rootAdapter = rootLoad.extensions.find((extension) => extension.path.endsWith("/pi-extension.mjs"));
     const childAdapter = childLoad?.extensions.find((extension) => extension.path.endsWith("/pi-extension.mjs"));
+    const requiredRootHandlers = [
+      "session_start",
+      "session_shutdown",
+      "session_info_changed",
+      "agent_start",
+      "session_tree",
+      "agent_settled",
+    ];
     const accessorPaths = new Set(factories.map((factory) => realpathSync(factory.resolvedChildContext)));
     const accessors = new Set(factories.map((factory) => factory.accessor));
     const assertions = {
@@ -398,7 +406,7 @@ export async function runProbe() {
       rootClassifierFalse: factories[0]?.childAtFactory === false,
       childClassifierTrueBeforeAdmission: childFactories.length === 1,
       ownedAdapterRootRegistered:
-        rootAdapter?.handlers.get("agent_settled")?.length === 1,
+        requiredRootHandlers.every((name) => rootAdapter?.handlers.get(name)?.length === 1),
       ownedAdapterChildSuppressedBeforeRegistration:
         childAdapter !== undefined && childAdapter.handlers.size === 0,
       oneRootAndOneChildFactory: rootFactories.length === 1 && childFactories.length === 1,

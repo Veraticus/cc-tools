@@ -37,9 +37,12 @@ exactly `version`, `status`, `harness`, `session_id`, `label`, `completion_id`,
 unsigned decimal strings so the full `uint64` range remains exact. `status` is
 `known` for a validated snapshot, `missing` when the state base or exact
 snapshot does not exist, and
-`unavailable` when state is corrupt, oversized, unsafe, or unreadable. A known
-record can have an empty `label` and a zero `label_generation`. Missing and
-unavailable responses retain the requested `harness` and `session_id`, while
+`unavailable` when state is corrupt, oversized, unsafe, or unreadable. A known record always has a positive `source_generation` and a valid latest
+native `completion_id`. Its `label` is empty exactly when
+`label_generation` is `"0"`; otherwise the label is a validated three- or
+four-word generated label of at most 60 UTF-8 bytes and the positive label
+generation cannot exceed the source generation. Missing and unavailable
+responses retain the requested `harness` and `session_id`, while
 the label and completion ID are empty and both generations are `"0"`. Invalid
 or duplicate flags, an unsupported harness, or an invalid session ID instead
 return only `{"version":1,"status":"invalid_request"}` and exit 2.
@@ -68,4 +71,48 @@ A known shared session label replaces the cwd project component in normal daemon
 
 The inline outage fallback and dry-run processing do not open the label store or invoke naming. Missing completion identity, child/internal events, active goals, silent events, and `SessionEnd` do not mutate label metadata. `SessionEnd` deliberately retains resumable state.
 
-Pi-side automatic/manual naming ownership, resume application, and rename-race guards are separate consumers. Persisting a shared label does not override a manual Pi session or pane name.
+## Pi root-TUI consumer
+
+The owned Pi extension reads this command only in a root TUI. It gives each
+eligible native assistant source one bounded schedule of at most six reads at
+approximately 0, 250 ms, 1 s, 3 s, 8 s, and 16 s. Reads are serialized and
+coalesced, each helper is limited to two seconds and 2048 stdout bytes, and
+session replacement, tree navigation, agent activity, manual naming, shutdown,
+or disposal cancels timers and aborts the active helper. Missing, unavailable,
+or known-but-not-yet-labelled snapshots consume only that bounded schedule;
+there is no adapter-side pending state, naming cadence, or perpetual retry.
+
+The extension compares decimal generation strings without converting them to
+JavaScript numbers. It accepts metadata only for the current native session and
+terminal assistant entry, allows a prior nonempty label while a later central
+refresh is still publishing, and continues the remaining bounded reads even
+when generations currently match. Source generation is the latest accepted
+completion generation; label generation remains the last successful refresh,
+including `KEEP`, so they are intentionally allowed to differ.
+
+Automatic naming provenance is stored as a versioned Pi `custom` entry, which
+is omitted from LLM context. It contains only the originating native session
+ID, owned native `session_info` entry ID, normalized label, and source/label
+generations. An unnamed session with no naming row is eligible. Any latest
+`session_info` row not matched by a valid automatic record is manual, even when
+its text equals the generated label or it clears the name. Corrupt state cannot
+claim an existing name. Resume and tree handling restore generation baselines
+only for the recorded native session. A fork can recognize copied automatic
+provenance without inheriting the old session's generations, and records its new
+native session ID on the first accepted result even when the label is unchanged.
+A failed persistence leaves a newly written native name conservatively unowned.
+
+Pi appends its native naming row and updates its normal `Pi - name - cwd` title
+before extension event delivery. The consumer accepts its own setter only when
+exactly one expected native row was appended; a synchronous reentrant `/name`,
+including one with identical text, remains manual and its native title wins.
+After all session, source, generation, and ownership checks, the extension uses
+public `ctx.ui.setTitle(label)` to emit the exact shared label. Terminals and
+tmux then process the ordinary OSC 0 title update (and tmux can expose it as
+pane `#T`); the extension does not rename windows or arbitrate unrelated
+out-of-band terminal commands. Other harness terminal titles are untouched.
+
+The settled notification snapshot is captured before notification callbacks or
+label state writes and remains independent of naming success. Persisting a
+shared label therefore never gates notification submission and never overrides
+a manually owned Pi session or pane name.

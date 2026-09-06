@@ -4,6 +4,8 @@ import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+
 import {
   PI_IDENTITY_DIAGNOSTIC,
   capturePiSettledNotification,
@@ -44,6 +46,27 @@ function user(text = "question", id = `user-${text}`) {
   };
 }
 
+/** @param {string} text @returns {import("@earendil-works/pi-ai").AssistantMessage} */
+function nativeAssistantMessage(text) {
+  return {
+    role: "assistant",
+    content: [{ type: "text", text }],
+    api: "anthropic-messages",
+    provider: "anthropic",
+    model: "synthetic",
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "stop",
+    timestamp: Date.now(),
+  };
+}
+
 /** @param {string} id */
 function metadata(id) {
   return { type: "custom", id };
@@ -60,6 +83,7 @@ function makeUIHarness() {
 
   /** @type {AdapterContext["ui"]} */
   const ui = {
+    setTitle(_title) {},
     setFooter(factory) {
       component?.dispose?.();
       if (factory === undefined) {
@@ -115,6 +139,7 @@ function makeContext(overrides = {}) {
   const sessionManager = {
     getSessionId: () => overrides.sessionId ?? "session-1",
     getLeafId: () => overrides.leafId ?? "leaf-1",
+    getEntries: () => branch,
     getBranch: () => branch,
   };
   return {
@@ -602,6 +627,120 @@ test("root lifecycle installs and notifies only in TUI and only on agent_settled
   assert.equal(payloads.length, 1);
   lifecycle.handlers.session_shutdown({ type: "session_shutdown", reason: "quit" }, ctx);
   assert.equal(harness.component(), undefined);
+});
+
+test("real SessionManager lifecycle accepts fresh event contexts after agent activity and tree invalidation", async () => {
+  const sessionManager = SessionManager.inMemory("/work/project", { id: "native-lifecycle-session" });
+  const uiHarness = makeUIHarness();
+  /** @type {string[]} */
+  const titles = [];
+  const ui = {
+    ...uiHarness.ui,
+    setTitle(/** @type {string} */ title) { titles.push(title); },
+  };
+  /** @type {Array<{callback: () => void, cancelled: boolean}>} */
+  const scheduled = [];
+  /** @type {ReturnType<typeof createPiLifecycle>} */
+  let lifecycle;
+  const pi = {
+    async exec() { return execResult(""); },
+    setSessionName(/** @type {string} */ name) {
+      sessionManager.appendSessionInfo(name);
+      lifecycle.handlers.session_info_changed(
+        { type: "session_info_changed", name: sessionManager.getSessionName() },
+        freshContext(),
+      );
+    },
+    appendEntry(/** @type {string} */ type, /** @type {unknown} */ data) { sessionManager.appendCustomEntry(type, data); },
+  };
+  function freshContext() {
+    return {
+      ...makeContext({ ui }),
+      sessionManager,
+    };
+  }
+  /** @type {object[]} */
+  const notifications = [];
+  let expectedSource = "";
+  lifecycle = createPiLifecycle(pi, {
+    async sendNotification(payload) { notifications.push(payload); return true; },
+    async readMetadata() {
+      return {
+        status: /** @type {const} */ ("known"),
+        label: "Lifecycle shared label",
+        completionID: expectedSource,
+        sourceGeneration: "1",
+        labelGeneration: "1",
+      };
+    },
+    labelSchedule(callback) {
+      const task = { callback, cancelled: false };
+      scheduled.push(task);
+      return () => { task.cancelled = true; };
+    },
+    report() {},
+  });
+
+  lifecycle.handlers.session_start({ type: "session_start", reason: "startup" }, freshContext());
+  sessionManager.appendMessage({ role: "user", content: [{ type: "text", text: "question" }], timestamp: Date.now() });
+  lifecycle.handlers.agent_start({ type: "agent_start" }, freshContext());
+  sessionManager.appendMessage(nativeAssistantMessage("answer"));
+  const assistantEntry = sessionManager.getEntries().at(-1);
+  assert.equal(assistantEntry?.type, "message");
+  if (assistantEntry?.type !== "message") return;
+  expectedSource = assistantEntry.id;
+  lifecycle.handlers.turn_end({ type: "turn_end" }, freshContext());
+  lifecycle.handlers.agent_settled({ type: "agent_settled" }, freshContext());
+  assert.equal(scheduled.length, 6);
+  scheduled[0]?.callback();
+  await flush();
+  assert.equal(sessionManager.getSessionName(), "Lifecycle shared label");
+  assert.deepEqual(titles, ["Lifecycle shared label"]);
+  assert.equal(notifications.length, 1);
+
+  lifecycle.handlers.session_tree({ type: "session_tree" }, freshContext());
+  assert.ok(scheduled.every(({ cancelled }) => cancelled));
+  lifecycle.handlers.agent_settled({ type: "agent_settled" }, freshContext());
+  assert.equal(scheduled.length, 12);
+  scheduled[6]?.callback();
+  await flush();
+  assert.equal(notifications.length, 2);
+});
+
+test("settled captures immutable notification identity before synchronous naming-side mutation", async () => {
+  const sessionManager = SessionManager.inMemory("/work/project", { id: "capture-before-label-session" });
+  sessionManager.appendMessage({ role: "user", content: [{ type: "text", text: "original question" }], timestamp: Date.now() });
+  sessionManager.appendMessage(nativeAssistantMessage("original answer"));
+  const source = sessionManager.getEntries().at(-1);
+  assert.equal(source?.type, "message");
+  if (source?.type !== "message") return;
+  /** @type {object | undefined} */
+  let submitted;
+  const lifecycle = createPiLifecycle(
+    { async exec() { return execResult(""); } },
+    {
+      async sendNotification(payload) {
+        submitted = payload;
+        sessionManager.appendMessage(nativeAssistantMessage("later answer"));
+        return true;
+      },
+      report() {},
+    },
+  );
+  const ctx = { ...makeContext(), sessionManager };
+  lifecycle.handlers.session_start({ type: "session_start", reason: "startup" }, { ...ctx });
+  lifecycle.handlers.agent_settled({ type: "agent_settled" }, { ...ctx });
+  await flush();
+  assert.deepEqual(submitted, {
+    schema_version: 1,
+    harness: "pi",
+    session_id: "capture-before-label-session",
+    hook_event_name: "TurnComplete",
+    completion_id: source.id,
+    cwd: "/work/project",
+    message: "original question",
+    last_assistant_message: "original answer",
+  });
 });
 
 test("missing assistant identity is an observable fixed diagnostic and never enqueues", async () => {

@@ -234,6 +234,8 @@ async function createCopiedRootAdapter(root) {
   await mkdir(runtime, { recursive: true });
   await Promise.all([
     copyFile(OWNED_ADAPTER_PATH, join(runtime, "pi-extension.mjs")),
+    copyFile(join(REPOSITORY_ROOT, "runtime", "pi-labels.mjs"), join(runtime, "pi-labels.mjs")),
+    copyFile(join(REPOSITORY_ROOT, "runtime", "pi-metadata.mjs"), join(runtime, "pi-metadata.mjs")),
     copyFile(join(REPOSITORY_ROOT, "runtime", "pi-notify.mjs"), join(runtime, "pi-notify.mjs")),
     writeFile(
       join(runtime, "pi-child-context.mjs"),

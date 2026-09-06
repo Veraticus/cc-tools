@@ -3,11 +3,14 @@ import { spawn, spawnSync } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import process from "node:process";
 import test from "node:test";
 
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+
 import { createPiLifecycle } from "./pi-extension.mjs";
+import { readPiMetadata } from "./pi-metadata.mjs";
 import { sendPiNotification } from "./pi-notify.mjs";
 
 /** @param {() => boolean | Promise<boolean>} predicate @param {string} description */
@@ -48,6 +51,27 @@ async function attemptAll(actions) {
   if (errors.length > 0) throw new AggregateError(errors, "resource cleanup failed");
 }
 
+/** @param {string} text @returns {import("@earendil-works/pi-ai").AssistantMessage} */
+function nativeAssistantMessage(text) {
+  return {
+    role: "assistant",
+    content: [{ type: "text", text }],
+    api: "anthropic-messages",
+    provider: "anthropic",
+    model: "synthetic",
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "stop",
+    timestamp: Date.now(),
+  };
+}
+
 /** @param {import("node:child_process").ChildProcess} child */
 function observeChild(child) {
   /** @type {(value: {code: number | null, signal: NodeJS.Signals | null}) => void} */
@@ -68,24 +92,6 @@ async function stopChild(watched) {
     if (watched.child.exitCode === null) watched.child.kill("SIGKILL");
     return await within(watched.completion, "child SIGKILL exit");
   }
-}
-
-/** @param {string} sessionID @param {string} assistantID @param {string} text */
-function context(sessionID, assistantID, text) {
-  return {
-    mode: /** @type {const} */ ("tui"),
-    cwd: process.cwd(),
-    model: undefined,
-    sessionManager: {
-      getSessionId: () => sessionID,
-      getBranch: () => [
-        { type: "message", id: `user-${assistantID}`, message: { role: "user", content: [{ type: "text", text: "integration question" }] } },
-        { type: "message", id: assistantID, message: { role: "assistant", content: [{ type: "text", text }] } },
-      ],
-    },
-    getContextUsage: () => undefined,
-    ui: { setFooter() {} },
-  };
 }
 
 test("bounded cleanup handles already-exited and spawn-failure children", async () => {
@@ -248,32 +254,113 @@ test("real Pi lifecycle traverses CLI, notifyd, composer, and loopback sender", 
 
   /** @type {Array<{payload: import("./pi-notify.mjs").PiNotificationPayload, promise: Promise<boolean>}>} */
   const submissions = [];
-  const lifecycle = createPiLifecycle(
-    { async exec() { return { stdout: "", stderr: "", code: 0, killed: false }; } },
-    {
-      sendNotification(payload, dependencies) {
-        const promise = sendPiNotification(payload, dependencies);
-        submissions.push({ payload, promise });
-        return promise;
+  /** @type {Array<{callback: () => void, cancelled: boolean}>} */
+  const labelTasks = [];
+  /** @type {Array<{kind: "native" | "shared", title: string}>} */
+  const titles = [];
+  const nativeSession = SessionManager.inMemory(process.cwd(), { id: "pi-session-real" });
+  const projectName = basename(process.cwd());
+  let activeSession = nativeSession;
+  /** @type {ReturnType<typeof createPiLifecycle>} */
+  let lifecycle;
+  /** @type {Promise<void> | undefined} */
+  let metadataHold;
+  let metadataFetches = 0;
+  let metadataDeliveries = 0;
+  function freshContext() {
+    const captured = activeSession;
+    return {
+      mode: /** @type {const} */ ("tui"),
+      cwd: process.cwd(),
+      model: undefined,
+      sessionManager: captured,
+      getContextUsage: () => undefined,
+      ui: {
+        setFooter() {},
+        setTitle(/** @type {string} */ title) { titles.push({ kind: "shared", title }); },
       },
-      report() {},
+    };
+  }
+  const pi = {
+    async exec() { return { stdout: "", stderr: "", code: 0, killed: false }; },
+    setSessionName(/** @type {string} */ name) {
+      activeSession.appendSessionInfo(name);
+      titles.push({ kind: "native", title: name === "" ? `Pi - ${projectName}` : `Pi - ${activeSession.getSessionName()} - ${projectName}` });
+      lifecycle.handlers.session_info_changed(
+        { type: "session_info_changed", name: activeSession.getSessionName() },
+        freshContext(),
+      );
     },
-  );
-  const first = context("pi-session-real", "assistant-id-1", "same source text");
-  lifecycle.handlers.agent_settled({ type: "agent_settled" }, first);
-  lifecycle.handlers.agent_settled({ type: "agent_settled" }, first);
-  lifecycle.handlers.turn_end({ type: "turn_end" }, first);
-  lifecycle.handlers.tool_execution_end({ type: "tool_execution_end" }, first);
+    appendEntry(/** @type {string} */ type, /** @type {unknown} */ data) { activeSession.appendCustomEntry(type, data); },
+  };
+  lifecycle = createPiLifecycle(pi, {
+    sendNotification(payload, dependencies) {
+      const promise = sendPiNotification(payload, dependencies);
+      submissions.push({ payload, promise });
+      return promise;
+    },
+    async readMetadata(sessionID, options) {
+      const value = await readPiMetadata(sessionID, { command: cli, stateBase: state, signal: options?.signal });
+      metadataFetches += 1;
+      if (metadataHold !== undefined) await metadataHold;
+      metadataDeliveries += 1;
+      return value;
+    },
+    labelSchedule(callback) {
+      const task = { callback, cancelled: false };
+      labelTasks.push(task);
+      return () => { task.cancelled = true; };
+    },
+    report() {},
+  });
+
+  lifecycle.handlers.session_start({ type: "session_start", reason: "startup" }, freshContext());
+  nativeSession.appendMessage({ role: "user", content: [{ type: "text", text: "integration question" }], timestamp: Date.now() });
+  lifecycle.handlers.agent_start({ type: "agent_start" }, freshContext());
+  nativeSession.appendMessage(nativeAssistantMessage("same source text"));
+  const firstID = nativeSession.getEntries().at(-1)?.id;
+  assert.equal(typeof firstID, "string");
+  lifecycle.handlers.turn_end({ type: "turn_end" }, freshContext());
+  lifecycle.handlers.agent_settled({ type: "agent_settled" }, freshContext());
+  lifecycle.handlers.agent_settled({ type: "agent_settled" }, freshContext());
+  lifecycle.handlers.tool_execution_end({ type: "tool_execution_end" }, freshContext());
   await waitFor(() => submissions.length === 2, "both same-ID real client submissions");
   const sameIDOutcomes = await within(Promise.all(submissions.map(({ promise }) => promise)), "same-ID real client completions");
   assert.deepEqual(sameIDOutcomes, [true, true]);
   await waitFor(() => notifications.length === 1, "one deduplicated daemon delivery");
   await waitFor(async () => (await readFile(helperLog, "utf8")).trim().split("\n").length === 1, "one helper request");
+  await waitFor(() => {
+    const result = spawnSync(cli, ["session-metadata", "--harness", "pi", "--session-id", "pi-session-real", "--state-base", state], { encoding: "utf8", env: isolatedEnv, timeout: 5_000 });
+    return result.status === 0 && JSON.parse(result.stdout).source_generation === "1";
+  }, "first real metadata publication");
+  assert.equal(labelTasks.length, 6, "duplicate settled source coalesces one label schedule");
+  labelTasks[0]?.callback();
+  await waitFor(() => nativeSession.getSessionName() === "Fresh Pi Session", "shared label native name application");
+  assert.deepEqual(titles.slice(-2), [
+    { kind: "native", title: `Pi - Fresh Pi Session - ${projectName}` },
+    { kind: "shared", title: "Fresh Pi Session" },
+  ]);
 
-  lifecycle.handlers.agent_settled(
-    { type: "agent_settled" },
-    context("pi-session-real", "assistant-id-2", "same source text"),
-  );
+  const generatedInfo = nativeSession.getEntries().filter((entry) => entry.type === "session_info").at(-1);
+  const automaticState = nativeSession.getEntries().filter((entry) => entry.type === "custom" && entry.customType === "steward-pi-label").at(-1);
+  assert.equal(generatedInfo?.type, "session_info");
+  assert.equal(automaticState?.type, "custom");
+  assert.deepEqual(automaticState?.data, {
+    version: 1,
+    ownership: "automatic",
+    sessionID: nativeSession.getSessionId(),
+    sessionInfoID: generatedInfo?.id,
+    sourceGeneration: "1",
+    labelGeneration: "1",
+    label: "Fresh Pi Session",
+  });
+
+  nativeSession.appendMessage({ role: "user", content: [{ type: "text", text: "integration question" }], timestamp: Date.now() });
+  lifecycle.handlers.agent_start({ type: "agent_start" }, freshContext());
+  nativeSession.appendMessage(nativeAssistantMessage("same source text"));
+  const secondID = nativeSession.getEntries().at(-1)?.id;
+  assert.equal(typeof secondID, "string");
+  lifecycle.handlers.agent_settled({ type: "agent_settled" }, freshContext());
   await waitFor(() => submissions.length === 3, "distinct-ID real client submission");
   const distinctOutcome = await within(
     submissions[2]?.promise ?? Promise.reject(new Error("missing distinct submission")),
@@ -282,12 +369,39 @@ test("real Pi lifecycle traverses CLI, notifyd, composer, and loopback sender", 
   assert.equal(distinctOutcome, true);
   await waitFor(() => notifications.length === 2, "distinct-ID daemon delivery");
   await waitFor(async () => (await readFile(helperLog, "utf8")).trim().split("\n").length === 2, "distinct helper request");
+  await waitFor(() => {
+    const result = spawnSync(cli, ["session-metadata", "--harness", "pi", "--session-id", "pi-session-real", "--state-base", state], { encoding: "utf8", env: isolatedEnv, timeout: 5_000 });
+    return result.status === 0 && JSON.parse(result.stdout).source_generation === "2";
+  }, "second real metadata publication");
+
+  let releaseMetadata = () => {};
+  metadataHold = new Promise((resolve) => { releaseMetadata = resolve; });
+  const fetchBaseline = metadataFetches;
+  const deliveryBaseline = metadataDeliveries;
+  labelTasks[6]?.callback();
+  await waitFor(() => metadataFetches === fetchBaseline + 1, "actual late metadata CLI read");
+  nativeSession.appendSessionInfo("Manual integration name");
+  titles.push({ kind: "native", title: `Pi - Manual integration name - ${projectName}` });
+  lifecycle.handlers.session_info_changed(
+    { type: "session_info_changed", name: nativeSession.getSessionName() },
+    freshContext(),
+  );
+  const replacement = SessionManager.inMemory(process.cwd(), { id: "replacement-session" });
+  activeSession = replacement;
+  lifecycle.handlers.session_start({ type: "session_start", reason: "resume" }, freshContext());
+  releaseMetadata();
+  metadataHold = undefined;
+  await waitFor(() => metadataDeliveries === deliveryBaseline + 1, "late metadata delivery to the disposed UI controller");
+  await waitFor(() => labelTasks.slice(6, 12).every(({ cancelled }) => cancelled), "old UI label schedule cancellation");
+  assert.equal(nativeSession.getSessionName(), "Manual integration name");
+  assert.equal(replacement.getSessionName(), undefined);
+  assert.equal(titles.at(-1)?.title, `Pi - Manual integration name - ${projectName}`);
 
   const daemonExit = await stopChild(daemon);
   assert.deepEqual(daemonExit, { code: 0, signal: null }, "notifyd drains accepted work and exits successfully");
 
   assert.deepEqual(submissions.map(({ payload }) => payload.session_id), ["pi-session-real", "pi-session-real", "pi-session-real"]);
-  assert.deepEqual(submissions.map(({ payload }) => payload.completion_id), ["assistant-id-1", "assistant-id-1", "assistant-id-2"]);
+  assert.deepEqual(submissions.map(({ payload }) => payload.completion_id), [firstID, firstID, secondID]);
   assert.deepEqual(submissions.map(({ payload }) => payload.last_assistant_message), ["same source text", "same source text", "same source text"]);
   assert.equal(notifications.length, 2);
   assert.equal(notifications[0]?.body, "GENERATED-BODY-same source text");
@@ -320,7 +434,7 @@ test("real Pi lifecycle traverses CLI, notifyd, composer, and loopback sender", 
     harness: "pi",
     session_id: "pi-session-real",
     label: "Fresh Pi Session",
-    completion_id: "assistant-id-2",
+    completion_id: secondID,
     source_generation: "2",
     label_generation: "1",
   });

@@ -52,8 +52,15 @@ service, environment, and secret-file wiring. The release must also update:
 
 Packaging now physically pins the helper and extension to the same Pi 0.85.0 /
 subagents 0.19.0 peer dependency graph with a minimal `PATH`; see
-[packaging](packaging.md). Consumer cutover still needs to replace its existing
-Pi package with this paired runtime, native root Stop hook trust, and its exact user
-`trusted_hash`, labels and quota production wiring, live verification, review,
-and release. Retire the old daemon only during that coordinated cutover; do not
-migrate or delete user state independently.
+[packaging](packaging.md). The source adapter includes the root-TUI consumer for
+the daemon's existing `session-metadata` labels: it uses supported native Pi
+session naming entries, persisted automatic/manual provenance, and public
+terminal title updates without changing the daemon protocol or cadence. Its
+source integration test uses a real local CLI/daemon and native `SessionManager`
+entries; this is not evidence that a consumer package has deployed it.
+
+Consumer cutover still needs to replace its existing Pi package with this paired
+runtime, native root Stop hook trust, and its exact user `trusted_hash`, labels
+and quota production wiring, live verification, review, and release. Retire the
+old daemon only during that coordinated cutover; do not migrate or delete user
+state independently.

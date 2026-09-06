@@ -1,4 +1,5 @@
 import { isPiChildSession } from "./pi-child-context.mjs";
+import { createPiLabels } from "./pi-labels.mjs";
 import {
   PI_NOTIFY_FAILURE,
   sendPiNotification,
@@ -46,13 +47,16 @@ const FOOTER_TIMEOUT_MS = 5_000;
  *   sessionManager: {
  *     getSessionId(): string,
  *     getBranch(): AdapterEntry[],
+ *     getEntries(): unknown[],
  *   },
  *   getContextUsage(): AdapterContextUsage | undefined,
- *   ui: FooterUI,
+ *   ui: FooterUI & {setTitle(title: string): void},
  * }} AdapterContext
  */
 /**
  * @typedef {{
+ *   setSessionName?(name: string): void,
+ *   appendEntry?(type: string, data: unknown): void,
  *   exec(
  *     command: string,
  *     args: string[],
@@ -65,6 +69,8 @@ const FOOTER_TIMEOUT_MS = 5_000;
  * @typedef {{
  *   sendNotification?: typeof sendPiNotification,
  *   report?: (diagnostic: string) => void,
+ *   readMetadata?: (sessionID: string, options?: {signal?: AbortSignal}) => ReturnType<import("./pi-metadata.mjs").readPiMetadata>,
+ *   labelSchedule?: (callback: () => void, delay: number) => (() => void),
  * }} LifecycleDependencies
  */
 
@@ -367,6 +373,11 @@ export function createPiLifecycle(pi, dependencies = {}) {
   const report = dependencies.report ?? defaultReport;
   /** @type {FooterController | undefined} */
   let footer;
+  const labels = createPiLabels(pi, {
+    read: dependencies.readMetadata,
+    schedule: dependencies.labelSchedule,
+    report,
+  });
 
   /** @param {AdapterContext} ctx */
   function updateFooter(ctx) {
@@ -379,14 +390,18 @@ export function createPiLifecycle(pi, dependencies = {}) {
       footer?.dispose();
       footer = undefined;
       if (ctx.mode === "tui") footer = installFooter(pi, ctx);
+      labels.start(ctx);
     },
     /** @param {{type?: string, reason: string}} _event @param {AdapterContext} _ctx */
     session_shutdown(_event, _ctx) {
       footer?.dispose();
       footer = undefined;
+      labels.dispose();
     },
+    /** @param {{type?: string, name?: string}} event @param {AdapterContext} ctx */
+    session_info_changed(event, ctx) { labels.infoChanged(event, ctx); updateFooter(ctx); },
     /** @param {unknown} _event @param {AdapterContext} ctx */
-    agent_start(_event, ctx) { updateFooter(ctx); },
+    agent_start(_event, ctx) { labels.activity(ctx); updateFooter(ctx); },
     /** @param {unknown} _event @param {AdapterContext} ctx */
     turn_end(_event, ctx) { updateFooter(ctx); },
     /** @param {unknown} _event @param {AdapterContext} ctx */
@@ -398,7 +413,7 @@ export function createPiLifecycle(pi, dependencies = {}) {
     /** @param {unknown} _event @param {AdapterContext} ctx */
     session_compact(_event, ctx) { updateFooter(ctx); },
     /** @param {unknown} _event @param {AdapterContext} ctx */
-    session_tree(_event, ctx) { updateFooter(ctx); },
+    session_tree(_event, ctx) { labels.tree(ctx); updateFooter(ctx); },
     /** @param {unknown} _event @param {AdapterContext} ctx */
     agent_settled(_event, ctx) {
       if (ctx.mode !== "tui") return;
@@ -415,6 +430,7 @@ export function createPiLifecycle(pi, dependencies = {}) {
       } catch {
         safeReport(report, PI_NOTIFY_FAILURE);
       }
+      labels.settled(ctx, snapshot.payload.completion_id);
     },
   };
 
@@ -441,6 +457,7 @@ export default function stewardPiExtension(pi) {
     lifecycle = createPiLifecycle(pi);
     pi.on("session_start", lifecycle.handlers.session_start);
     pi.on("session_shutdown", lifecycle.handlers.session_shutdown);
+    pi.on("session_info_changed", lifecycle.handlers.session_info_changed);
     pi.on("agent_start", lifecycle.handlers.agent_start);
     pi.on("turn_end", lifecycle.handlers.turn_end);
     pi.on("tool_execution_end", lifecycle.handlers.tool_execution_end);
