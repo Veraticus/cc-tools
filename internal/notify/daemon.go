@@ -274,9 +274,9 @@ func (daemon Daemon) logger() *slog.Logger {
 // SocketPath resolves the notifyd control socket path.
 func SocketPath() string {
 	if directory := os.Getenv("XDG_RUNTIME_DIR"); directory != "" {
-		return filepath.Join(directory, "cc-tools", "notifyd.sock")
+		return filepath.Join(directory, "steward", "notifyd.sock")
 	}
-	return filepath.Join("/tmp", fmt.Sprintf("cc-tools-%d", os.Getuid()), "notifyd.sock")
+	return filepath.Join("/tmp", fmt.Sprintf("steward-%d", os.Getuid()), "notifyd.sock")
 }
 
 // Listen uses a systemd-activated socket when present and otherwise binds a

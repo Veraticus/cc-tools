@@ -7,8 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Veraticus/cc-tools/internal/aliases"
 	"github.com/mattn/go-runewidth"
+
+	"github.com/joshsymonds/steward/internal/aliases"
 )
 
 // Render renders the statusline with lipgloss styling and guaranteed fixed width.

@@ -224,8 +224,8 @@ func TestRenderDirectoryChip_HomeItself(t *testing.T) {
 
 func TestRenderDirectoryChip_UnderHome(t *testing.T) {
 	t.Setenv("HOME", "/tmp/fakehome")
-	got := renderDirectoryChip("/tmp/fakehome/projects/cc-tools")
-	if !strings.Contains(got.Body, "~/projects/cc-tools") {
+	got := renderDirectoryChip("/tmp/fakehome/projects/steward")
+	if !strings.Contains(got.Body, "~/projects/steward") {
 		t.Errorf("under-home cwd should render as ~/relative, got Body=%q", got.Body)
 	}
 }

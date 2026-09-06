@@ -71,11 +71,19 @@ func TestStatusline_GetHostname(t *testing.T) {
 		expected string
 	}{
 		{
-			name: "from CLAUDE_STATUSLINE_HOSTNAME override",
+			name: "from STEWARD_STATUSLINE_HOSTNAME override",
 			setup: func(er *MockEnvReader, _ *MockCommandRunner) {
-				er.vars["CLAUDE_STATUSLINE_HOSTNAME"] = "test-host"
+				er.vars["STEWARD_STATUSLINE_HOSTNAME"] = "test-host"
 			},
 			expected: "test-host",
+		},
+		{
+			name: "old hostname override ignored",
+			setup: func(er *MockEnvReader, _ *MockCommandRunner) {
+				er.vars["CLAUDE_STATUSLINE_HOSTNAME"] = "old-host"
+				er.vars["HOSTNAME"] = "prod-server"
+			},
+			expected: "prod-server",
 		},
 		{
 			name: "from HOSTNAME env var",
@@ -145,9 +153,18 @@ func TestStatusline_GetK8sContext(t *testing.T) {
 		{
 			name: "disabled via override",
 			setup: func(_ *MockFileReader, er *MockEnvReader) {
-				er.vars["CLAUDE_STATUSLINE_KUBECONFIG"] = "/dev/null"
+				er.vars["STEWARD_STATUSLINE_KUBECONFIG"] = "/dev/null"
 			},
 			expected: "",
+		},
+		{
+			name: "old KUBECONFIG override ignored",
+			setup: func(fr *MockFileReader, er *MockEnvReader) {
+				er.vars["CLAUDE_STATUSLINE_KUBECONFIG"] = "/dev/null"
+				er.vars["KUBECONFIG"] = "/custom/kube/config"
+				fr.files["/custom/kube/config"] = []byte("current-context: custom-cluster\n")
+			},
+			expected: "custom-cluster",
 		},
 		{
 			name: "from KUBECONFIG env var",
@@ -216,9 +233,17 @@ func TestStatusline_GetDevspace(t *testing.T) {
 		{
 			name: "with override",
 			setup: func(er *MockEnvReader) {
-				er.vars["CLAUDE_STATUSLINE_DEVSPACE"] = "saturn"
+				er.vars["STEWARD_STATUSLINE_DEVSPACE"] = "saturn"
 			},
 			expectedText: "● saturn",
+		},
+		{
+			name: "old devspace override ignored",
+			setup: func(er *MockEnvReader) {
+				er.vars["CLAUDE_STATUSLINE_DEVSPACE"] = "saturn"
+				er.vars["TMUX_DEVSPACE"] = "mars"
+			},
+			expectedText: "♂ mar",
 		},
 		// Names are truncated to 3 chars in the chip so the symbol does
 		// the heavy lifting and the word just confirms the planet.

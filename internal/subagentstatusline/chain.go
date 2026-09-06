@@ -4,7 +4,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/Veraticus/cc-tools/internal/statusline"
+	"github.com/joshsymonds/steward/internal/statusline"
 )
 
 // widthMargin reserves room for Claude's row chrome that lives outside

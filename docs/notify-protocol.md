@@ -1,6 +1,6 @@
 # notify control protocol
 
-`cc-tools notify` and `cc-tools notifyd` communicate over a private Unix socket.
+`steward notify` and `steward notifyd` communicate over a private Unix socket.
 The protocol transfers an immutable event snapshot, not native hook JSON. It is
 local coordination for low-latency notification delivery, not a durable queue
 or a delivery receipt.

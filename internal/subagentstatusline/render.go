@@ -5,7 +5,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/Veraticus/cc-tools/internal/statusline"
+	"github.com/joshsymonds/steward/internal/statusline"
 )
 
 // Render is the package's top-level orchestrator. Reads the

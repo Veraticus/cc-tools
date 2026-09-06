@@ -1,4 +1,4 @@
-// Package main implements the cc-tools CLI application.
+// Package main implements the steward CLI application.
 package main
 
 import (
@@ -8,10 +8,10 @@ import (
 	"os"
 	"time"
 
-	"github.com/Veraticus/cc-tools/internal/aliases"
-	"github.com/Veraticus/cc-tools/internal/output"
-	"github.com/Veraticus/cc-tools/internal/shared"
-	"github.com/Veraticus/cc-tools/internal/statusline"
+	"github.com/joshsymonds/steward/internal/aliases"
+	"github.com/joshsymonds/steward/internal/output"
+	"github.com/joshsymonds/steward/internal/shared"
+	"github.com/joshsymonds/steward/internal/statusline"
 )
 
 const (
@@ -27,9 +27,9 @@ func main() {
 	out := output.NewTerminal(os.Stdout, os.Stderr)
 
 	// Debug logging — log all invocations to a file. Gated behind the
-	// CC_TOOLS_DEBUG env var so hot-path subcommands (statusline,
+	// STEWARD_DEBUG env var so hot-path subcommands (statusline,
 	// subagent-statusline) don't unconditionally touch disk + grow an
-	// unbounded log on every tick. Set CC_TOOLS_DEBUG=1 to capture
+	// unbounded log on every tick. Set STEWARD_DEBUG=1 to capture
 	// invocations for diagnosis.
 	if fileDebugLoggingEnabled() {
 		debugLog()
@@ -63,7 +63,7 @@ func main() {
 		runNotifydCommand()
 	case "version":
 		// Print version to stdout as intended output
-		out.Raw(fmt.Sprintf("cc-tools %s\n", version))
+		out.Raw(fmt.Sprintf("steward %s\n", version))
 	case helpCommand, "-h", helpFlag:
 		printUsage(out)
 	default:
@@ -74,7 +74,7 @@ func main() {
 }
 
 func fileDebugLoggingEnabled() bool {
-	return os.Getenv("CC_TOOLS_DEBUG") == "1" &&
+	return os.Getenv("STEWARD_DEBUG") == "1" &&
 		(len(os.Args) < minArgs || os.Args[1] != "session-metadata")
 }
 
@@ -87,10 +87,10 @@ func runNotifyOrSessionMetadataCommand(command string) {
 }
 
 func printUsage(out *output.Terminal) {
-	out.RawError(`cc-tools - terminal coding-agent tools
+	out.RawError(`steward - terminal coding-agent tools
 
 Usage:
-  cc-tools <command> [arguments]
+  steward <command> [arguments]
 
 Commands:
   statusline    Generate a Claude-compatible command status line
@@ -108,12 +108,12 @@ Commands:
   help          Show this help message
 
 Examples:
-  echo '{"cwd": "/path"}' | cc-tools statusline
-  cc-tools statusline '{"cwd":"/path","columns":100}'
-  cc-tools mcp list
-  cc-tools mcp enable jira
-  cc-tools resolve --type=k8s --raw="arn:aws:eks:us-east-1:123:cluster/prod"
-  echo '{"columns":80,"tasks":[...]}' | cc-tools subagent-statusline
+  echo '{"cwd": "/path"}' | steward statusline
+  steward statusline '{"cwd":"/path","columns":100}'
+  steward mcp list
+  steward mcp enable jira
+  steward resolve --type=k8s --raw="arn:aws:eks:us-east-1:123:cluster/prod"
+  echo '{"columns":80,"tasks":[...]}' | steward subagent-statusline
 `)
 }
 
@@ -164,7 +164,7 @@ func runStatuslineWithInput(reader io.Reader) (string, error) {
 		CommandRunner: &statusline.DefaultCommandRunner{},
 		EnvReader:     &statusline.DefaultEnvReader{},
 		TerminalWidth: &statusline.DefaultTerminalWidth{},
-		Resolver:      aliases.NewResolverFromDefaultPath(os.Stderr, "cc-tools statusline"),
+		Resolver:      aliases.NewResolverFromDefaultPath(os.Stderr, "steward statusline"),
 		CacheDir:      statusline.ResolveCacheDir(),
 		CacheDuration: getCacheDuration(),
 	}
@@ -183,10 +183,7 @@ func getCacheDuration() time.Duration {
 	if os.Getenv("DEBUG_CONTEXT") == "1" {
 		return 0
 	}
-	seconds := os.Getenv("CC_TOOLS_STATUSLINE_CACHE_SECONDS")
-	if seconds == "" {
-		seconds = os.Getenv("CLAUDE_STATUSLINE_CACHE_SECONDS")
-	}
+	seconds := os.Getenv("STEWARD_STATUSLINE_CACHE_SECONDS")
 	if seconds != "" {
 		if duration, err := time.ParseDuration(seconds + "s"); err == nil {
 			return duration
@@ -219,7 +216,7 @@ func debugLog() {
 			// This will be used by the actual commands
 			// Actually, we need to pipe it back - create a temp file
 			//nolint:forbidigo // Debug temp file
-			if tmpFile, tmpErr := os.CreateTemp("", "cc-tools-stdin-"); tmpErr == nil {
+			if tmpFile, tmpErr := os.CreateTemp("", "steward-stdin-"); tmpErr == nil {
 				_, _ = tmpFile.Write(stdinDebugData)
 				_, _ = tmpFile.Seek(0, 0)
 				os.Stdin = tmpFile //nolint:reassign // Resetting stdin for subsequent reads
@@ -230,10 +227,10 @@ func debugLog() {
 	// Log the invocation details
 	timestamp := time.Now().Format("2006-01-02 15:04:05.000")
 	_, _ = fmt.Fprintf(f, "\n========================================\n")
-	_, _ = fmt.Fprintf(f, "[%s] cc-tools invoked\n", timestamp)
+	_, _ = fmt.Fprintf(f, "[%s] steward invoked\n", timestamp)
 	_, _ = fmt.Fprintf(f, "Args: %v\n", os.Args)
 	_, _ = fmt.Fprintf(f, "Environment:\n")
-	_, _ = fmt.Fprintf(f, "  CLAUDE_HOOKS_DEBUG: %s\n", os.Getenv("CLAUDE_HOOKS_DEBUG"))
+	_, _ = fmt.Fprintf(f, "  STEWARD_DEBUG: %s\n", os.Getenv("STEWARD_DEBUG"))
 	_, _ = fmt.Fprintf(f, "  Working Dir: %s\n", func() string {
 		if wd, wdErr := os.Getwd(); wdErr == nil {
 			return wd
@@ -260,7 +257,7 @@ func getDebugLogPath() string {
 	wd, err := os.Getwd()
 	if err != nil {
 		// Fallback to generic log if we can't get working directory
-		return "/tmp/cc-tools.debug"
+		return "/tmp/steward.debug"
 	}
 	return shared.GetDebugLogPathForDir(wd)
 }

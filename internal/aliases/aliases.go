@@ -2,7 +2,7 @@
 // for hostnames, AWS profiles, k8s contexts, and gcloud projects.
 //
 // The data lives in a single TOML file at a neutral, tool-agnostic
-// location (see DefaultPath). Both the cc-tools statusline and the
+// location (see DefaultPath). Both the steward statusline and the
 // starship prompt resolve display labels through this package so the
 // two lines stay in sync.
 package aliases
@@ -92,11 +92,11 @@ func DefaultPath() string {
 //   - success: returns the parsed Resolver
 //
 // stderr is the destination for diagnostic output (typically os.Stderr);
-// prefix is the binary name used in messages so callers like cc-tools,
-// cc-tools-statusline, and render-clouds are distinguishable in logs.
+// prefix is the binary name used in messages so callers like steward,
+// steward-statusline, and render-clouds are distinguishable in logs.
 //
 // Use this from rendering paths only. Callers that need to fail loudly
-// on parse errors (e.g. the `cc-tools resolve` subcommand) should call
+// on parse errors (e.g. the `steward resolve` subcommand) should call
 // NewResolver directly.
 func NewResolverFromDefaultPath(stderr io.Writer, prefix string) *Resolver {
 	path := DefaultPath()

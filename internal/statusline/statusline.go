@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Veraticus/cc-tools/internal/aliases"
+	"github.com/joshsymonds/steward/internal/aliases"
 )
 
 // Input represents the JSON input from stdin.
@@ -488,7 +488,7 @@ func (s *Statusline) readGitInfo(gitDir string) GitInfo {
 
 func (s *Statusline) getK8sContext() string {
 	// Check for test override
-	if override := s.deps.EnvReader.Get("CLAUDE_STATUSLINE_KUBECONFIG"); override != "" {
+	if override := s.deps.EnvReader.Get("STEWARD_STATUSLINE_KUBECONFIG"); override != "" {
 		if override == devNullOverride {
 			return ""
 		}
@@ -529,7 +529,7 @@ const unknownLabel = "unknown"
 
 func (s *Statusline) getHostname() string {
 	// Check for test override
-	if override := s.deps.EnvReader.Get("CLAUDE_STATUSLINE_HOSTNAME"); override != "" {
+	if override := s.deps.EnvReader.Get("STEWARD_STATUSLINE_HOSTNAME"); override != "" {
 		return override
 	}
 
@@ -557,15 +557,15 @@ func (s *Statusline) getHostname() string {
 
 const devspacePlanetMercury = "mercury"
 
-// devNullOverride is the sentinel override value (CLAUDE_STATUSLINE_KUBECONFIG,
-// CLAUDE_STATUSLINE_GCLOUD) that suppresses a chip entirely — useful for
+// devNullOverride is the sentinel override value (STEWARD_STATUSLINE_KUBECONFIG,
+// STEWARD_STATUSLINE_GCLOUD) that suppresses a chip entirely — useful for
 // tests and for users who don't want that chip shown.
 const devNullOverride = "/dev/null"
 
 func (s *Statusline) getDevspace() string {
 	// Check for test override
 	var tmuxDevspace string
-	if override := s.deps.EnvReader.Get("CLAUDE_STATUSLINE_DEVSPACE"); override != "" {
+	if override := s.deps.EnvReader.Get("STEWARD_STATUSLINE_DEVSPACE"); override != "" {
 		tmuxDevspace = override
 	} else {
 		tmuxDevspace = s.deps.EnvReader.Get("TMUX_DEVSPACE")

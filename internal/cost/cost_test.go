@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Veraticus/cc-tools/internal/cost"
+	"github.com/joshsymonds/steward/internal/cost"
 )
 
 // rowOpts describes one synthetic transcript JSONL line for a test fixture.

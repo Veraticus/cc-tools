@@ -6,9 +6,9 @@ import (
 	"os"
 	"sort"
 
-	"github.com/Veraticus/cc-tools/internal/debug"
-	"github.com/Veraticus/cc-tools/internal/output"
-	"github.com/Veraticus/cc-tools/internal/shared"
+	"github.com/joshsymonds/steward/internal/debug"
+	"github.com/joshsymonds/steward/internal/output"
+	"github.com/joshsymonds/steward/internal/shared"
 )
 
 const (
@@ -58,7 +58,7 @@ func runDebugCommand() {
 }
 
 func printDebugUsage(out *output.Terminal) {
-	out.RawError(`Usage: cc-tools debug <subcommand>
+	out.RawError(`Usage: steward debug <subcommand>
 
 Subcommands:
   enable    Enable debug logging for the current directory
@@ -68,11 +68,11 @@ Subcommands:
   filename  Print the debug log filename for the current directory
 
 Examples:
-  cc-tools debug enable     # Enable debug logging in current directory
-  cc-tools debug disable    # Disable debug logging in current directory
-  cc-tools debug status     # Check if debug logging is enabled
-  cc-tools debug list       # List all directories with debug enabled
-  cc-tools debug filename   # Get the debug log file path for current directory
+  steward debug enable     # Enable debug logging in current directory
+  steward debug disable    # Disable debug logging in current directory
+  steward debug status     # Check if debug logging is enabled
+  steward debug list       # List all directories with debug enabled
+  steward debug filename   # Get the debug log file path for current directory
 `)
 }
 

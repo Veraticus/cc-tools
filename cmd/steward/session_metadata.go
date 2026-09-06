@@ -12,7 +12,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/Veraticus/cc-tools/internal/notify"
+	"github.com/joshsymonds/steward/internal/notify"
 )
 
 const (
@@ -184,7 +184,7 @@ func writeSessionMetadataJSON(stdout io.Writer, response any) error {
 
 func printSessionMetadataUsage(stdout io.Writer) error {
 	const usage = `Usage:
-  cc-tools session-metadata --harness <claude-code|codex|pi> --session-id <native-id> [--state-base <path>]
+  steward session-metadata --harness <claude-code|codex|pi> --session-id <native-id> [--state-base <path>]
 
 Read validated shared session naming metadata for one exact harness/session pair.
 The command never reads stdin or modifies notification state.

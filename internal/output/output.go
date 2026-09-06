@@ -1,4 +1,4 @@
-// Package output provides a unified interface for terminal output in cc-tools.
+// Package output provides a unified interface for terminal output in steward.
 package output
 
 import (

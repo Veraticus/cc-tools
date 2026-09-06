@@ -6,9 +6,10 @@ import (
 	"os"
 	"sort"
 
-	"github.com/Veraticus/cc-tools/internal/config"
-	"github.com/Veraticus/cc-tools/internal/output"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/joshsymonds/steward/internal/config"
+	"github.com/joshsymonds/steward/internal/output"
 )
 
 const (
@@ -75,7 +76,7 @@ func runConfigCommand() {
 }
 
 func printConfigUsage(out *output.Terminal) {
-	out.RawError(`Usage: cc-tools config <subcommand> [arguments]
+	out.RawError(`Usage: steward config <subcommand> [arguments]
 
 Subcommands:
   get <key>         Get a configuration value
@@ -92,11 +93,11 @@ Configuration Keys:
   statusline.cache_seconds    Cache duration
 
 Examples:
-  cc-tools config set validate.timeout 90
-  cc-tools config get validate.timeout
-  cc-tools config list
-  cc-tools config reset validate.timeout
-  cc-tools config reset              # Reset all to defaults
+  steward config set validate.timeout 90
+  steward config get validate.timeout
+  steward config list
+  steward config reset validate.timeout
+  steward config reset              # Reset all to defaults
 `)
 }
 

@@ -132,38 +132,69 @@ func TestSend_403NeverRetries(t *testing.T) {
 	}
 }
 
+func TestResolveSenderEnv_OldNamespacesIgnored(t *testing.T) {
+	oldNames := [][]string{
+		{"CC_TOOLS_NTFY_URL=https://ntfy.sh/old"},
+		{"CLAUDE_HOOKS_NTFY_URL=https://ntfy.sh/old"},
+		{"CC_TOOLS_NTFY_URL=https://ntfy.sh/old", "CC_TOOLS_NTFY_TOKEN=old-token"},
+		{"CLAUDE_HOOKS_NTFY_URL=https://ntfy.sh/old", "CLAUDE_HOOKS_NTFY_DISABLED=false"},
+	}
+	for _, environ := range oldNames {
+		if _, ok := ResolveSenderEnv(environ); ok {
+			t.Errorf("ResolveSenderEnv(%q) ok = true, want old namespace ignored", environ)
+		}
+	}
+}
+
+func TestResolveSenderEnv_OldNamesDoNotOverrideCanonical(t *testing.T) {
+	oldURLFile := filepath.Join(t.TempDir(), "old-url")
+	oldTokenFile := filepath.Join(t.TempDir(), "old-token")
+	if err := os.WriteFile(oldURLFile, []byte("https://ntfy.sh/old-file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(oldTokenFile, []byte("old-file-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, oldPrefix := range []string{"CC_TOOLS", "CLAUDE_HOOKS"} {
+		t.Run(oldPrefix, func(t *testing.T) {
+			s, ok := ResolveSenderEnv([]string{
+				"STEWARD_NTFY_URL=https://ntfy.sh/canonical",
+				oldPrefix + "_NTFY_URL=https://ntfy.sh/old",
+				oldPrefix + "_NTFY_URL_FILE=" + oldURLFile,
+				oldPrefix + "_NTFY_TOKEN=old-token",
+				oldPrefix + "_NTFY_TOKEN_FILE=" + oldTokenFile,
+				oldPrefix + "_NTFY_DISABLED=true",
+			})
+			if !ok || s.URL != "https://ntfy.sh/canonical" {
+				t.Fatalf("ResolveSenderEnv() = (%+v, %v), want canonical URL", s, ok)
+			}
+			if s.Token != "" {
+				t.Errorf("old TOKEN and TOKEN_FILE must be ignored, got %q", s.Token)
+			}
+		})
+	}
+}
+
+func TestResolveSenderEnv_OldURLFileIgnored(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old-url")
+	if err := os.WriteFile(path, []byte("https://ntfy.sh/old-file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, oldPrefix := range []string{"CC_TOOLS", "CLAUDE_HOOKS"} {
+		if _, ok := ResolveSenderEnv([]string{oldPrefix + "_NTFY_URL_FILE=" + path}); ok {
+			t.Errorf("%s_NTFY_URL_FILE must be ignored", oldPrefix)
+		}
+	}
+}
+
 func TestResolveSenderEnv_DirectURL(t *testing.T) {
-	s, ok := ResolveSenderEnv([]string{"CLAUDE_HOOKS_NTFY_URL=https://ntfy.sh/mytopic"})
+	s, ok := ResolveSenderEnv([]string{"STEWARD_NTFY_URL=https://ntfy.sh/mytopic"})
 	if !ok {
 		t.Fatal("ResolveSenderEnv() ok = false, want true")
 	}
 	if s.URL != "https://ntfy.sh/mytopic" {
 		t.Errorf("URL = %q, want %q", s.URL, "https://ntfy.sh/mytopic")
-	}
-}
-
-func TestResolveSenderEnv_GenericNamesTakePrecedence(t *testing.T) {
-	s, ok := ResolveSenderEnv([]string{
-		"CC_TOOLS_NTFY_URL=https://ntfy.sh/generic",
-		"CC_TOOLS_NTFY_TOKEN=generic-token",
-		"CLAUDE_HOOKS_NTFY_URL=https://ntfy.sh/legacy",
-		"CLAUDE_HOOKS_NTFY_TOKEN=legacy-token",
-	})
-	if !ok {
-		t.Fatal("ResolveSenderEnv() ok = false, want true")
-	}
-	if s.URL != "https://ntfy.sh/generic" || s.Token != "generic-token" {
-		t.Errorf("Sender = %+v, want generic URL and token", s)
-	}
-}
-
-func TestResolveSenderEnv_GenericDisabled(t *testing.T) {
-	_, ok := ResolveSenderEnv([]string{
-		"CLAUDE_HOOKS_NTFY_URL=https://ntfy.sh/mytopic",
-		"CC_TOOLS_NTFY_DISABLED=true",
-	})
-	if ok {
-		t.Fatal("ResolveSenderEnv() ok = true, want false when generic DISABLED=true")
 	}
 }
 
@@ -173,7 +204,7 @@ func TestResolveSenderEnv_URLFile(t *testing.T) {
 		t.Fatalf("writing url file: %v", err)
 	}
 
-	s, ok := ResolveSenderEnv([]string{"CLAUDE_HOOKS_NTFY_URL_FILE=" + path})
+	s, ok := ResolveSenderEnv([]string{"STEWARD_NTFY_URL_FILE=" + path})
 	if !ok {
 		t.Fatal("ResolveSenderEnv() ok = false, want true")
 	}
@@ -184,7 +215,7 @@ func TestResolveSenderEnv_URLFile(t *testing.T) {
 
 func TestResolveSenderEnv_MissingFileFallsThroughToNotOK(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "does-not-exist")
-	_, ok := ResolveSenderEnv([]string{"CLAUDE_HOOKS_NTFY_URL_FILE=" + missing})
+	_, ok := ResolveSenderEnv([]string{"STEWARD_NTFY_URL_FILE=" + missing})
 	if ok {
 		t.Fatal("ResolveSenderEnv() ok = true, want false when URL_FILE is missing and no direct URL")
 	}
@@ -192,8 +223,8 @@ func TestResolveSenderEnv_MissingFileFallsThroughToNotOK(t *testing.T) {
 
 func TestResolveSenderEnv_Disabled(t *testing.T) {
 	_, ok := ResolveSenderEnv([]string{
-		"CLAUDE_HOOKS_NTFY_URL=https://ntfy.sh/mytopic",
-		"CLAUDE_HOOKS_NTFY_DISABLED=true",
+		"STEWARD_NTFY_URL=https://ntfy.sh/mytopic",
+		"STEWARD_NTFY_DISABLED=true",
 	})
 	if ok {
 		t.Fatal("ResolveSenderEnv() ok = true, want false when DISABLED=true")
@@ -207,8 +238,8 @@ func TestResolveSenderEnv_TokenFileTrimmed(t *testing.T) {
 	}
 
 	s, ok := ResolveSenderEnv([]string{
-		"CLAUDE_HOOKS_NTFY_URL=https://ntfy.sh/mytopic",
-		"CLAUDE_HOOKS_NTFY_TOKEN_FILE=" + path,
+		"STEWARD_NTFY_URL=https://ntfy.sh/mytopic",
+		"STEWARD_NTFY_TOKEN_FILE=" + path,
 	})
 	if !ok {
 		t.Fatal("ResolveSenderEnv() ok = false, want true")

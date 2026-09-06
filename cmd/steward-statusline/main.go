@@ -1,4 +1,4 @@
-// Package main implements the cc-tools-statusline CLI application.
+// Package main implements the steward-statusline CLI application.
 package main
 
 import (
@@ -8,9 +8,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/Veraticus/cc-tools/internal/aliases"
-	"github.com/Veraticus/cc-tools/internal/output"
-	"github.com/Veraticus/cc-tools/internal/statusline"
+	"github.com/joshsymonds/steward/internal/aliases"
+	"github.com/joshsymonds/steward/internal/output"
+	"github.com/joshsymonds/steward/internal/statusline"
 )
 
 func main() {
@@ -43,7 +43,7 @@ func runStatuslineWithInput(reader io.Reader) (string, error) {
 		CommandRunner: &statusline.DefaultCommandRunner{},
 		EnvReader:     &statusline.DefaultEnvReader{},
 		TerminalWidth: &statusline.DefaultTerminalWidth{},
-		Resolver:      aliases.NewResolverFromDefaultPath(os.Stderr, "cc-tools-statusline"),
+		Resolver:      aliases.NewResolverFromDefaultPath(os.Stderr, "steward-statusline"),
 		CacheDir:      statusline.ResolveCacheDir(),
 		CacheDuration: getCacheDuration(),
 	}
@@ -62,10 +62,7 @@ func getCacheDuration() time.Duration {
 	if os.Getenv("DEBUG_CONTEXT") == "1" {
 		return 0
 	}
-	seconds := os.Getenv("CC_TOOLS_STATUSLINE_CACHE_SECONDS")
-	if seconds == "" {
-		seconds = os.Getenv("CLAUDE_STATUSLINE_CACHE_SECONDS")
-	}
+	seconds := os.Getenv("STEWARD_STATUSLINE_CACHE_SECONDS")
 	if seconds != "" {
 		if duration, err := time.ParseDuration(seconds + "s"); err == nil {
 			return duration

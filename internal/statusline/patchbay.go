@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	patchbayURLEnv            = "CC_TOOLS_PATCHBAY_URL"
+	patchbayURLEnv            = "STEWARD_PATCHBAY_URL"
 	patchbayCallerKeyFileEnv  = "PATCHBAY_CALLER_KEY_FILE"
 	defaultPatchbayURL        = "http://127.0.0.1:4100"
 	patchbayUsageSummaryPath  = "/_patchbay/usage/summary"

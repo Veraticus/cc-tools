@@ -124,36 +124,24 @@ func (s Sender) post(
 }
 
 // ResolveSenderEnv resolves a Sender from environ (os.Environ() form,
-// "KEY=VALUE" entries). Provider-neutral CC_TOOLS_NTFY_* names take
-// precedence; the original CLAUDE_HOOKS_NTFY_* names remain supported for
-// compatibility. Either *_DISABLED=true forces not-ok. Direct values take
-// precedence over their _FILE variants. This is a pure function of the
-// slice plus filesystem reads — never os.Getenv — so callers control exactly
-// which environment it sees. No URL resolved means not-ok.
+// "KEY=VALUE" entries). STEWARD_NTFY_* is the only supported namespace.
+// *_DISABLED=true forces not-ok. Direct values take precedence over their
+// _FILE variants. This is a pure function of the slice plus filesystem reads
+// — never os.Getenv — so callers control exactly which environment it sees.
+// No URL resolved means not-ok.
 func ResolveSenderEnv(environ []string) (Sender, bool) {
 	env := parseEnviron(environ)
-	if env["CC_TOOLS_NTFY_DISABLED"] == "true" || env["CLAUDE_HOOKS_NTFY_DISABLED"] == "true" {
+	if env["STEWARD_NTFY_DISABLED"] == "true" {
 		return Sender{}, false
 	}
 
-	url := resolveFirstEnvValue(env, "CC_TOOLS_NTFY_URL", "CLAUDE_HOOKS_NTFY_URL")
+	url := resolveEnvValue(env, "STEWARD_NTFY_URL")
 	if url == "" {
 		return Sender{}, false
 	}
-	token := resolveFirstEnvValue(env, "CC_TOOLS_NTFY_TOKEN", "CLAUDE_HOOKS_NTFY_TOKEN")
+	token := resolveEnvValue(env, "STEWARD_NTFY_TOKEN")
 
 	return Sender{URL: url, Token: token}, true
-}
-
-// resolveFirstEnvValue returns the first direct-or-file value resolved from
-// bases in priority order.
-func resolveFirstEnvValue(env map[string]string, bases ...string) string {
-	for _, base := range bases {
-		if value := resolveEnvValue(env, base); value != "" {
-			return value
-		}
-	}
-	return ""
 }
 
 // parseEnviron turns an os.Environ()-form slice into a lookup map, skipping

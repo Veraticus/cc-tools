@@ -11,7 +11,7 @@ func newGcloudDeps(t *testing.T, home string, override string) *Dependencies {
 	envReader := NewMockEnvReader()
 	envReader.vars["HOME"] = home
 	if override != "" {
-		envReader.vars["CLAUDE_STATUSLINE_GCLOUD"] = override
+		envReader.vars["STEWARD_STATUSLINE_GCLOUD"] = override
 	}
 	return &Dependencies{
 		FileReader:    &DefaultFileReader{},
@@ -79,6 +79,21 @@ func TestGetGcloudProject_OverrideDevNull(t *testing.T) {
 	s := CreateStatusline(newGcloudDeps(t, home, "/dev/null"))
 	if got := s.getGcloudProject(); got != "" {
 		t.Errorf("got %q, want empty (override should suppress)", got)
+	}
+}
+
+func TestGetGcloudProject_OldOverrideIgnored(t *testing.T) {
+	home := t.TempDir()
+	writeGcloudConfig(t, home, "default", "[core]\nproject = my-project\n")
+	deps := newGcloudDeps(t, home, "")
+	envReader, ok := deps.EnvReader.(*MockEnvReader)
+	if !ok {
+		t.Fatal("expected MockEnvReader")
+	}
+	envReader.vars["CLAUDE_STATUSLINE_GCLOUD"] = devNullOverride
+
+	if got := CreateStatusline(deps).getGcloudProject(); got != "my-project" {
+		t.Errorf("old override must be ignored, got %q", got)
 	}
 }
 

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Veraticus/cc-tools/internal/statusline"
+	"github.com/joshsymonds/steward/internal/statusline"
 )
 
 func TestRender_HappyPath(t *testing.T) {
@@ -91,7 +91,7 @@ func TestRender_WritesAgentsState(t *testing.T) {
 	if err := Render(strings.NewReader(in), &out, 1_000_000, mapEnvReader{}, dir); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	raw, err := os.ReadFile(filepath.Join(dir, "cc-tools-agents-abc-123.json"))
+	raw, err := os.ReadFile(filepath.Join(dir, "steward-agents-abc-123.json"))
 	if err != nil {
 		t.Fatalf("state file not written: %v", err)
 	}

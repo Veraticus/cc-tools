@@ -1,4 +1,4 @@
-// Package shared provides shared utilities for all cc-tools commands.
+// Package shared provides shared utilities for all steward commands.
 package shared
 
 import (

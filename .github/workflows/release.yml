@@ -35,17 +35,17 @@ jobs:
         body: |
           ## Changes in this release
 
-          Claude Code Tools - Go implementations of Claude Code utilities
+          Steward - Go implementations of Claude Code utilities
 
           ## Installation
 
           Download the appropriate binaries for your platform below and make them executable:
 
           ```bash
-          tar -xzf cc-tools-*.tar.gz
-          chmod +x cc-tools cc-tools-statusline
+          tar -xzf steward-*.tar.gz
+          chmod +x steward steward-statusline
           # Move to your PATH, e.g.:
-          mv cc-tools cc-tools-statusline ~/bin/
+          mv steward steward-statusline ~/bin/
           ```
 
   build-and-upload:
@@ -95,16 +95,16 @@ jobs:
         GOARCH: ${{ matrix.goarch }}
         GOARM: ${{ matrix.goarm }}
       run: |
-        go build -v -ldflags "-s -w -X main.version=${{ github.ref_name }}" -o cc-tools ./cmd/cc-tools
-        go build -v -ldflags "-s -w -X main.version=${{ github.ref_name }}" -o cc-tools-statusline ./cmd/cc-tools-statusline
+        go build -v -ldflags "-s -w -X main.version=${{ github.ref_name }}" -o steward ./cmd/steward
+        go build -v -ldflags "-s -w -X main.version=${{ github.ref_name }}" -o steward-statusline ./cmd/steward-statusline
 
     - name: Create archive
       run: |
-        tar -czf cc-tools-${{ matrix.suffix }}.tar.gz cc-tools cc-tools-statusline
+        tar -czf steward-${{ matrix.suffix }}.tar.gz steward steward-statusline
 
     - name: Generate checksums
       run: |
-        sha256sum cc-tools-${{ matrix.suffix }}.tar.gz > cc-tools-${{ matrix.suffix }}.tar.gz.sha256
+        sha256sum steward-${{ matrix.suffix }}.tar.gz > steward-${{ matrix.suffix }}.tar.gz.sha256
 
     - name: Upload Release Asset (Archive)
       uses: actions/upload-release-asset@v1
@@ -112,8 +112,8 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.release.outputs.upload_url }}
-        asset_path: ./cc-tools-${{ matrix.suffix }}.tar.gz
-        asset_name: cc-tools-${{ matrix.suffix }}.tar.gz
+        asset_path: ./steward-${{ matrix.suffix }}.tar.gz
+        asset_name: steward-${{ matrix.suffix }}.tar.gz
         asset_content_type: application/gzip
 
     - name: Upload Release Asset (Checksum)
@@ -122,6 +122,6 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.release.outputs.upload_url }}
-        asset_path: ./cc-tools-${{ matrix.suffix }}.tar.gz.sha256
-        asset_name: cc-tools-${{ matrix.suffix }}.tar.gz.sha256
+        asset_path: ./steward-${{ matrix.suffix }}.tar.gz.sha256
+        asset_name: steward-${{ matrix.suffix }}.tar.gz.sha256
         asset_content_type: text/plain

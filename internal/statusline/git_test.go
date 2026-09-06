@@ -244,7 +244,7 @@ func TestGitStatus_EmptyCacheDirSkipsDiskEntirely(t *testing.T) {
 // tests that need to inspect or manipulate the directory from outside
 // the root handle.
 func gitCacheSubdir(cacheDir string) string {
-	return filepath.Join(cacheDir, "cc-tools-"+strconv.Itoa(os.Getuid()))
+	return filepath.Join(cacheDir, "steward-"+strconv.Itoa(os.Getuid()))
 }
 
 func TestOpenCacheRoot_CreatesOwnedPrivateSubdir(t *testing.T) {
@@ -334,7 +334,7 @@ func TestWriteGitStatusCache_DirSwapCannotRedirectWrite(t *testing.T) {
 
 func TestGitStatus_UntrustedCacheDirStillReturnsFreshState(t *testing.T) {
 	cacheDir := t.TempDir()
-	planted := filepath.Join(cacheDir, "cc-tools-"+strconv.Itoa(os.Getuid()))
+	planted := filepath.Join(cacheDir, "steward-"+strconv.Itoa(os.Getuid()))
 	if err := os.Symlink(t.TempDir(), planted); err != nil {
 		t.Fatal(err)
 	}
@@ -369,8 +369,8 @@ func TestGitStatus_RealGitDirtyRepo(t *testing.T) {
 		t.Helper()
 		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
 		cmd.Env = append(os.Environ(),
-			"GIT_AUTHOR_NAME=cc-tools-test", "GIT_AUTHOR_EMAIL=test@cc-tools.invalid",
-			"GIT_COMMITTER_NAME=cc-tools-test", "GIT_COMMITTER_EMAIL=test@cc-tools.invalid",
+			"GIT_AUTHOR_NAME=steward-test", "GIT_AUTHOR_EMAIL=test@steward.invalid",
+			"GIT_COMMITTER_NAME=steward-test", "GIT_COMMITTER_EMAIL=test@steward.invalid",
 		)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, out)

@@ -45,5 +45,5 @@ func GetDebugLogPathForDir(dir string) string {
 	hash := sha256.Sum256([]byte(dir))
 	hashStr := hex.EncodeToString(hash[:4]) // Just first 4 bytes for brevity
 
-	return fmt.Sprintf("/tmp/cc-tools-%s-%s.debug", namePart, hashStr)
+	return fmt.Sprintf("/tmp/steward-%s-%s.debug", namePart, hashStr)
 }

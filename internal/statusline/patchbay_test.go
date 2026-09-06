@@ -476,7 +476,7 @@ func TestReadFreshCache_FutureMtimeMisses(t *testing.T) {
 	}
 
 	now := time.Now()
-	cachePath := filepath.Join(cacheDir, fmt.Sprintf("cc-tools-%d", os.Getuid()), cacheName)
+	cachePath := filepath.Join(cacheDir, fmt.Sprintf("steward-%d", os.Getuid()), cacheName)
 	if err := os.Chtimes(cachePath, now.Add(time.Minute), now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}

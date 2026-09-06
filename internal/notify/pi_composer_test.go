@@ -192,8 +192,8 @@ func TestNewPiComposer_DefaultsOverridesAndNoAliases(t *testing.T) {
 
 	t.Run("legacy aliases ignored", func(t *testing.T) {
 		environ := []string{
-			"CC_TOOLS_PI_HELPER=legacy-helper",
-			"CC_TOOLS_PI_MODEL=legacy-model",
+			"STEWARD_PI_HELPER=legacy-helper",
+			"STEWARD_PI_MODEL=legacy-model",
 			"ANTHROPIC_SMALL_FAST_MODEL=legacy-claude",
 		}
 		got, err := NewPiComposer(environ)

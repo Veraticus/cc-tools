@@ -11,10 +11,10 @@ import (
 // active configuration), then ~/.config/gcloud/configurations/config_<name>
 // (an INI file), then extracts `project` from the [core] section.
 //
-// CLAUDE_STATUSLINE_GCLOUD=/dev/null suppresses the chip entirely;
+// STEWARD_STATUSLINE_GCLOUD=/dev/null suppresses the chip entirely;
 // useful for tests and for users who don't want gcloud state shown.
 func (s *Statusline) getGcloudProject() string {
-	if override := s.deps.EnvReader.Get("CLAUDE_STATUSLINE_GCLOUD"); override == devNullOverride {
+	if override := s.deps.EnvReader.Get("STEWARD_STATUSLINE_GCLOUD"); override == devNullOverride {
 		return ""
 	}
 

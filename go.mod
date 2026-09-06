@@ -1,4 +1,4 @@
-module github.com/Veraticus/cc-tools
+module github.com/joshsymonds/steward
 
 go 1.25.0
 

@@ -94,7 +94,7 @@ test("bounded cleanup handles already-exited and spawn-failure children", async 
   assert.equal(exited.code, 0);
   await within(stopChild(alreadyExited), "already-exited child cleanup");
 
-  const spawnFailure = observeChild(spawn(join(tmpdir(), `missing-cc-tools-child-${process.pid}`), [], { stdio: "ignore" }));
+  const spawnFailure = observeChild(spawn(join(tmpdir(), `missing-steward-child-${process.pid}`), [], { stdio: "ignore" }));
   const failed = await within(spawnFailure.completion, "spawn-failure child observation");
   assert.notEqual(failed.code, 0);
   await within(stopChild(spawnFailure), "spawn-failure child cleanup");
@@ -165,11 +165,11 @@ test("real Pi lifecycle traverses CLI, notifyd, composer, and loopback sender", 
   });
 
   await Promise.all([mkdir(bin), mkdir(home), mkdir(runtime), mkdir(state)]);
-  const cli = join(bin, "cc-tools");
-  const build = spawnSync("go", ["build", "-o", cli, "./cmd/cc-tools"], { encoding: "utf8", timeout: 30_000 });
+  const cli = join(bin, "steward");
+  const build = spawnSync("go", ["build", "-o", cli, "./cmd/steward"], { encoding: "utf8", timeout: 30_000 });
   assert.equal(build.status, 0, build.stderr);
   const helper = join(bin, "fake-helper");
-  await writeFile(helper, `#!${process.execPath}\nconst fs=require("node:fs");let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>{const i=JSON.parse(s);fs.appendFileSync(process.env.HELPER_LOG,JSON.stringify({request:i,env:{token:process.env.CC_TOOLS_NTFY_TOKEN,tokenFile:process.env.CC_TOOLS_NTFY_TOKEN_FILE,hooks:process.env.CLAUDE_HOOKS_TEST,model:process.env.STEWARD_MODEL_ID,proxy:process.env.HTTPS_PROXY,credential:process.env.AWS_SECRET_ACCESS_KEY}})+"\\n");const r={version:1,ok:true,body:"GENERATED-BODY-"+i.input.assistant};if(i.label.refresh)r.label="Fresh Pi Session";process.stdout.write(JSON.stringify(r)+"\\n")});\n`);
+  await writeFile(helper, `#!${process.execPath}\nconst fs=require("node:fs");let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>{const i=JSON.parse(s);fs.appendFileSync(process.env.HELPER_LOG,JSON.stringify({request:i,env:{token:process.env.STEWARD_NTFY_TOKEN,tokenFile:process.env.STEWARD_NTFY_TOKEN_FILE,hooks:process.env.STEWARD_TEST,model:process.env.STEWARD_MODEL_ID,proxy:process.env.HTTPS_PROXY,credential:process.env.AWS_SECRET_ACCESS_KEY}})+"\\n");const r={version:1,ok:true,body:"GENERATED-BODY-"+i.input.assistant};if(i.label.refresh)r.label="Fresh Pi Session";process.stdout.write(JSON.stringify(r)+"\\n")});\n`);
   await chmod(helper, 0o755);
 
   /** @type {Array<{body: string, headers: import("node:http").IncomingHttpHeaders}>} */
@@ -200,9 +200,9 @@ test("real Pi lifecycle traverses CLI, notifyd, composer, and loopback sender", 
   assert.ok(address && typeof address === "object");
 
   Object.assign(process.env, {
-    CC_TOOLS_NTFY_TOKEN: "ambient-token-sentinel",
-    CC_TOOLS_NTFY_TOKEN_FILE: "/never-read-ambient-token-file",
-    CLAUDE_HOOKS_TEST: "ambient-hooks-sentinel",
+    STEWARD_NTFY_TOKEN: "ambient-token-sentinel",
+    STEWARD_NTFY_TOKEN_FILE: "/never-read-ambient-token-file",
+    STEWARD_TEST: "ambient-hooks-sentinel",
     STEWARD_MODEL_ID: "ambient-model-sentinel",
     HTTPS_PROXY: "http://ambient-proxy.invalid",
     AWS_SECRET_ACCESS_KEY: "ambient-credential-sentinel",
@@ -214,7 +214,7 @@ test("real Pi lifecycle traverses CLI, notifyd, composer, and loopback sender", 
     XDG_DATA_HOME: join(home, ".local", "share"),
     XDG_RUNTIME_DIR: runtime,
     PATH: bin,
-    CC_TOOLS_NTFY_URL: `http://127.0.0.1:${address.port}/topic`,
+    STEWARD_NTFY_URL: `http://127.0.0.1:${address.port}/topic`,
     STEWARD_HELPER_BIN: helper,
     HELPER_LOG: helperLog,
   };
@@ -222,7 +222,7 @@ test("real Pi lifecycle traverses CLI, notifyd, composer, and loopback sender", 
   Object.assign(process.env, isolatedEnv);
 
   const failedDaemon = observeChild(spawn(cli, ["notifyd", "--state-base", state], {
-    env: { ...isolatedEnv, CC_TOOLS_NTFY_URL: "" }, stdio: ["ignore", "ignore", "ignore"],
+    env: { ...isolatedEnv, STEWARD_NTFY_URL: "" }, stdio: ["ignore", "ignore", "ignore"],
   }));
   ownedChildren.push(failedDaemon);
   const failedExit = await within(failedDaemon.completion, "failed daemon startup");
@@ -236,7 +236,7 @@ test("real Pi lifecycle traverses CLI, notifyd, composer, and loopback sender", 
   let daemonError = "";
   daemon.child.stderr?.setEncoding("utf8").on("data", (chunk) => { daemonError += chunk; });
   await waitFor(async () => {
-    try { await stat(join(runtime, "cc-tools", "notifyd.sock")); return true; } catch { return false; }
+    try { await stat(join(runtime, "steward", "notifyd.sock")); return true; } catch { return false; }
   }, `notifyd socket (${daemonError})`);
 
   /** @type {Array<{payload: import("./pi-notify.mjs").PiNotificationPayload, promise: Promise<boolean>}>} */

@@ -535,7 +535,7 @@ func TestFitNarrowChain_DropBranchSecond(t *testing.T) {
 
 func TestFitNarrowChain_TruncateDirToLeaf(t *testing.T) {
 	chips := []narrowChip{
-		{Color: "lavender", Body: "~/Personal/cc-tools/long/path/segment", Kind: kindDir},
+		{Color: "lavender", Body: "~/Personal/steward/long/path/segment", Kind: kindDir},
 		{Color: "green", Body: "0%", Kind: kindContext},
 	}
 	got := fitNarrowChain(chips, 18)

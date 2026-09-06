@@ -954,7 +954,7 @@ func TestDaemonShutdownDrainRemainsBounded(t *testing.T) {
 	}
 }
 
-const listenHelperEnv = "CC_TOOLS_NOTIFY_LISTEN_HELPER"
+const listenHelperEnv = "STEWARD_NOTIFY_LISTEN_HELPER"
 
 func TestMain(m *testing.M) {
 	if os.Getenv(listenHelperEnv) == "1" {
@@ -1061,11 +1061,11 @@ func TestListenSystemdSocketActivation(t *testing.T) {
 
 func TestSocketPathResolution(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", "/run/user/1000")
-	if got := SocketPath(); got != filepath.Join("/run/user/1000", "cc-tools", "notifyd.sock") {
+	if got := SocketPath(); got != filepath.Join("/run/user/1000", "steward", "notifyd.sock") {
 		t.Fatalf("XDG SocketPath = %q", got)
 	}
 	t.Setenv("XDG_RUNTIME_DIR", "")
-	want := filepath.Join("/tmp", "cc-tools-"+strconv.Itoa(os.Getuid()), "notifyd.sock")
+	want := filepath.Join("/tmp", "steward-"+strconv.Itoa(os.Getuid()), "notifyd.sock")
 	if got := SocketPath(); got != want {
 		t.Fatalf("fallback SocketPath = %q", got)
 	}

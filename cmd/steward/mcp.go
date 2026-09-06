@@ -5,8 +5,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/Veraticus/cc-tools/internal/mcp"
-	"github.com/Veraticus/cc-tools/internal/output"
+	"github.com/joshsymonds/steward/internal/mcp"
+	"github.com/joshsymonds/steward/internal/output"
 )
 
 const (
@@ -112,10 +112,10 @@ func handleMCPDisableAll(ctx context.Context, out *output.Terminal, manager *mcp
 }
 
 func printMCPUsage(out *output.Terminal) {
-	out.RawError(`cc-tools mcp - Manage Claude MCP servers
+	out.RawError(`steward mcp - Manage Claude MCP servers
 
 Usage:
-  cc-tools mcp <subcommand> [arguments]
+  steward mcp <subcommand> [arguments]
 
 Subcommands:
   list          Show all MCP servers and their status
@@ -125,10 +125,10 @@ Subcommands:
   disable-all   Disable all MCP servers
 
 Examples:
-  cc-tools mcp list                  # Show current MCP status
-  cc-tools mcp enable jira           # Enable the Jira MCP
-  cc-tools mcp disable playwright    # Disable the Playwright MCP
-  cc-tools mcp disable-all           # Disable all MCPs
+  steward mcp list                  # Show current MCP status
+  steward mcp enable jira           # Enable the Jira MCP
+  steward mcp disable playwright    # Disable the Playwright MCP
+  steward mcp disable-all           # Disable all MCPs
 
 Notes:
   - MCP configurations are read from ~/.claude/settings.json

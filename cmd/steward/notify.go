@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Veraticus/cc-tools/internal/notify"
+	"github.com/joshsymonds/steward/internal/notify"
 )
 
 // notifyHookTimeout bounds the hook client, including its inline delivery
@@ -53,7 +53,7 @@ func runNotifyCommandWithIO(args []string, stdin io.Reader, stdout, stderr io.Wr
 	sender.Host = notify.ShortHostname()
 
 	if !senderOK && !*dryRun {
-		_, _ = fmt.Fprintln(stderr, "cc-tools notify: no ntfy URL configured, skipping")
+		_, _ = fmt.Fprintln(stderr, "steward notify: no ntfy URL configured, skipping")
 		return 0
 	}
 
@@ -65,7 +65,7 @@ func runNotifyCommandWithIO(args []string, stdin io.Reader, stdout, stderr io.Wr
 		// hook JSON to stdin. Normalize both before they reach dispatchNotify.
 		payload = strings.NewReader(flags.Arg(0))
 	} else if flags.NArg() > 1 {
-		_, _ = fmt.Fprintln(stderr, "cc-tools notify: expected at most one JSON payload argument")
+		_, _ = fmt.Fprintln(stderr, "steward notify: expected at most one JSON payload argument")
 		return 0
 	}
 
@@ -103,12 +103,12 @@ type notifyClientConfig struct {
 func dispatchNotify(ctx context.Context, cfg notifyClientConfig, stdin io.Reader, stdout, stderr io.Writer) {
 	input, err := notify.ParseHookInputForHarness(stdin, cfg.Harness)
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "cc-tools notify: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "steward notify: %v\n", err)
 		return
 	}
 	prepared, err := notify.PrepareEvent(input)
 	if err != nil {
-		_, _ = fmt.Fprintln(stderr, "cc-tools notify: invalid event")
+		_, _ = fmt.Fprintln(stderr, "steward notify: invalid event")
 		return
 	}
 
@@ -126,7 +126,7 @@ func dispatchNotify(ctx context.Context, cfg notifyClientConfig, stdin io.Reader
 		Workspace: workspace,
 	}
 	if runErr := pipeline.RunPrepared(ctx, prepared); runErr != nil {
-		_, _ = fmt.Fprintln(stderr, "cc-tools notify: invalid event")
+		_, _ = fmt.Fprintln(stderr, "steward notify: invalid event")
 	}
 }
 
@@ -166,17 +166,17 @@ func sendFrame(ctx context.Context, sockPath string, frame notify.Frame, timeout
 }
 
 // defaultNotifyStateBase resolves the default notify state directory:
-// ${XDG_STATE_HOME:-~/.local/state}/cc-tools/notify.
+// ${XDG_STATE_HOME:-~/.local/state}/steward/notify.
 func defaultNotifyStateBase() string {
 	base := os.Getenv("XDG_STATE_HOME")
 	if base == "" {
 		home, err := os.UserHomeDir()
 		if err != nil || home == "" {
-			return filepath.Join(os.TempDir(), "cc-tools", "notify")
+			return filepath.Join(os.TempDir(), "steward", "notify")
 		}
 		base = filepath.Join(home, ".local", "state")
 	}
-	return filepath.Join(base, "cc-tools", "notify")
+	return filepath.Join(base, "steward", "notify")
 }
 
 // notifydRequiresSender reports whether notifyd must refuse to start
@@ -234,7 +234,7 @@ func runNotifydCommand() {
 	sender.Host = notify.ShortHostname()
 
 	if notifydRequiresSender(senderOK, *dryRun) {
-		_, _ = fmt.Fprintln(os.Stderr, "cc-tools notifyd: no ntfy URL configured")
+		_, _ = fmt.Fprintln(os.Stderr, "steward notifyd: no ntfy URL configured")
 		os.Exit(1)
 	}
 
@@ -245,7 +245,7 @@ func runNotifydCommand() {
 	sockPath := notify.SocketPath()
 	ln, listenErr := notify.Listen(sockPath)
 	if listenErr != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "cc-tools notifyd: %v\n", listenErr)
+		_, _ = fmt.Fprintf(os.Stderr, "steward notifyd: %v\n", listenErr)
 		os.Exit(1)
 	}
 
@@ -253,7 +253,7 @@ func runNotifydCommand() {
 	defer stop()
 
 	if serveErr := d.Serve(ctx, ln); serveErr != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "cc-tools notifyd: %v\n", serveErr)
+		_, _ = fmt.Fprintf(os.Stderr, "steward notifyd: %v\n", serveErr)
 	}
 	_ = os.Remove(sockPath)
 }

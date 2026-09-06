@@ -7,8 +7,8 @@ import (
 	"io"
 	"os"
 
-	"github.com/Veraticus/cc-tools/internal/statusline"
-	"github.com/Veraticus/cc-tools/internal/subagentstatusline"
+	"github.com/joshsymonds/steward/internal/statusline"
+	"github.com/joshsymonds/steward/internal/subagentstatusline"
 )
 
 // runPreviewCommand renders every scenario in the shared statusline

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Veraticus/cc-tools/internal/output"
+	"github.com/joshsymonds/steward/internal/output"
 )
 
 // MockCommandExecutor is a mock implementation of CommandExecutor for testing.

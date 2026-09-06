@@ -248,7 +248,7 @@ test("footer renders cached output and coalesces width and branch refreshes", as
 
   assert.deepEqual(harness.component()?.render(100), [""]);
   await flush();
-  assert.equal(calls[0]?.command, "cc-tools");
+  assert.equal(calls[0]?.command, "steward");
   assert.equal(calls[0]?.args[0], "statusline");
   assert.equal(calls[0]?.options.cwd, "/work/project");
   assert.equal(calls[0]?.options.timeout, 5_000);

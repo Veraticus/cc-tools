@@ -1,4 +1,4 @@
-// Package subagentstatusline renders cc-tools' per-row chip chain for
+// Package subagentstatusline renders steward' per-row chip chain for
 // Claude Code's `subagentStatusLine` hook. Invoked once per tick by
 // Claude with the full task array on stdin; emits one JSON line per
 // task on stdout in the schema `{"id": string, "content": string}`.
@@ -18,7 +18,7 @@ const maxInputBytes = 1 << 20 // 1 MiB
 
 // Input is the top-level JSON blob Claude pipes on stdin.
 //
-// Only the fields cc-tools renders against are listed; the JSON
+// Only the fields steward renders against are listed; the JSON
 // decoder silently drops everything else (`session_id`, `agent_id`,
 // `transcript_path`, etc.).
 type Input struct {

@@ -1,6 +1,6 @@
 package statusline
 
-import "github.com/Veraticus/cc-tools/internal/aliases"
+import "github.com/joshsymonds/steward/internal/aliases"
 
 // Catppuccin Mocha color names, used as Component.Color / narrowChip.Color
 // values and as the lookup keys for getColorBG / getColorFG.

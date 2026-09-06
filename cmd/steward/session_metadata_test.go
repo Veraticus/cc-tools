@@ -19,8 +19,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/Veraticus/cc-tools/internal/output"
-	"github.com/Veraticus/cc-tools/internal/shared"
+	"github.com/joshsymonds/steward/internal/output"
+	"github.com/joshsymonds/steward/internal/shared"
 )
 
 const sessionMetadataTestFingerprint = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -205,7 +205,7 @@ func TestRunSessionMetadataEmitsCanonicalFullUint64Strings(t *testing.T) {
 func TestRunSessionMetadataUsesDefaultNotifyStateBase(t *testing.T) {
 	xdgStateHome := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", xdgStateHome)
-	stateBase := filepath.Join(xdgStateHome, "cc-tools", "notify")
+	stateBase := filepath.Join(xdgStateHome, "steward", "notify")
 	snapshot := validSessionMetadataSnapshot("claude-code", "default-state-session")
 	writeSessionMetadataSnapshot(t, stateBase, snapshot, 0, 0o600)
 
@@ -356,7 +356,7 @@ func TestRunSessionMetadataRejectsInvalidRequestsBeforeIO(t *testing.T) {
 			switch {
 			case tt.name == "missing all flags":
 				t.Setenv("XDG_STATE_HOME", stateParent)
-				stateBase = filepath.Join(stateParent, "cc-tools", "notify")
+				stateBase = filepath.Join(stateParent, "steward", "notify")
 			case strings.Contains(tt.name, "state base") || tt.name == "missing state value":
 			default:
 				args = append(args, "--state-base", stateBase)
@@ -405,7 +405,7 @@ func TestRunSessionMetadataHelpIsDedicatedAndDoesNotReadStdin(t *testing.T) {
 			t.Fatalf("help %s = %d/%q/reads%d", flag, exitCode, stderr, stdin.reads.Load())
 		}
 		for _, text := range []string{
-			"Usage:", "cc-tools session-metadata", "--harness", "claude-code", "codex", "pi",
+			"Usage:", "steward session-metadata", "--harness", "claude-code", "codex", "pi",
 			"--session-id", "--state-base",
 		} {
 			if !strings.Contains(stdout, text) {
@@ -521,7 +521,7 @@ func TestSessionMetadataCommandNeverInvokesHelperOrSenderAndNeverMutatesState(t 
 		senderCalls.Add(1)
 	}))
 	t.Cleanup(server.Close)
-	t.Setenv("CC_TOOLS_NTFY_URL", server.URL)
+	t.Setenv("STEWARD_NTFY_URL", server.URL)
 
 	for range 5 {
 		exitCode, _, stderr, _ := runSessionMetadataForTest(t, []string{
@@ -561,10 +561,10 @@ func TestSessionMetadataCommandNeverInvokesHelperOrSenderAndNeverMutatesState(t 
 }
 
 func TestSessionMetadataActualBinaryDispatchAndExitDoNotWaitForStdin(t *testing.T) {
-	binary := filepath.Join(t.TempDir(), "cc-tools")
+	binary := filepath.Join(t.TempDir(), "steward")
 	build := exec.Command("go", "build", "-o", binary, ".")
 	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("building cc-tools test binary: %v: %s", err, output)
+		t.Fatalf("building steward test binary: %v: %s", err, output)
 	}
 
 	tests := []struct {
@@ -594,7 +594,7 @@ func TestSessionMetadataActualBinaryDispatchAndExitDoNotWaitForStdin(t *testing.
 			name: "help dispatch",
 			args: []string{"session-metadata", "--help"},
 			wantOut: `Usage:
-  cc-tools session-metadata --harness <claude-code|codex|pi> --session-id <native-id> [--state-base <path>]
+  steward session-metadata --harness <claude-code|codex|pi> --session-id <native-id> [--state-base <path>]
 
 Read validated shared session naming metadata for one exact harness/session pair.
 The command never reads stdin or modifies notification state.
@@ -627,7 +627,7 @@ The command never reads stdin or modifies notification state.
 			command := exec.Command(binary, tt.args...)
 			command.Dir = workingDirectory
 			command.Env = []string{
-				"CC_TOOLS_DEBUG=1",
+				"STEWARD_DEBUG=1",
 				"HOME=" + home,
 				"XDG_STATE_HOME=" + filepath.Join(home, "state"),
 			}
@@ -696,10 +696,10 @@ The command never reads stdin or modifies notification state.
 }
 
 func TestSessionMetadataDebugExclusionPreservesOtherCommandLogging(t *testing.T) {
-	binary := filepath.Join(t.TempDir(), "cc-tools")
+	binary := filepath.Join(t.TempDir(), "steward")
 	build := exec.Command("go", "build", "-o", binary, ".")
 	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("building cc-tools test binary: %v: %s", err, output)
+		t.Fatalf("building steward test binary: %v: %s", err, output)
 	}
 
 	home := t.TempDir()
@@ -712,14 +712,14 @@ func TestSessionMetadataDebugExclusionPreservesOtherCommandLogging(t *testing.T)
 
 	command := exec.Command(binary, "version")
 	command.Dir = workingDirectory
-	command.Env = []string{"CC_TOOLS_DEBUG=1", "HOME=" + home}
+	command.Env = []string{"STEWARD_DEBUG=1", "HOME=" + home}
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
 	if err := command.Run(); err != nil {
 		t.Fatalf("running version command: %v", err)
 	}
-	if stdout.String() != "cc-tools dev\n" || stderr.Len() != 0 {
+	if stdout.String() != "steward dev\n" || stderr.Len() != 0 {
 		t.Fatalf("version result = %q/%q", stdout.String(), stderr.String())
 	}
 	debugLog, err := os.ReadFile(debugPath)

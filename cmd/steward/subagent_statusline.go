@@ -6,8 +6,8 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/Veraticus/cc-tools/internal/statusline"
-	"github.com/Veraticus/cc-tools/internal/subagentstatusline"
+	"github.com/joshsymonds/steward/internal/statusline"
+	"github.com/joshsymonds/steward/internal/subagentstatusline"
 )
 
 func runSubagentStatuslineCommand() {
@@ -21,7 +21,7 @@ func runSubagentStatuslineCommand() {
 // before the outer os.Exit (gocritic exitAfterDefer pattern).
 func subagentStatuslineMain() int {
 	contextWindow := subagentstatusline.DefaultContextWindow
-	if raw := os.Getenv("CC_TOOLS_SUBAGENT_CONTEXT_WINDOW"); raw != "" {
+	if raw := os.Getenv("STEWARD_SUBAGENT_CONTEXT_WINDOW"); raw != "" {
 		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
 			contextWindow = n
 		}

@@ -13,19 +13,30 @@ func TestDefaultTerminalWidth_GetWidth(t *testing.T) {
 		want     int
 	}{
 		{
-			name: "CLAUDE_STATUSLINE_WIDTH overrides everything",
+			name: "STEWARD_STATUSLINE_WIDTH overrides everything",
 			setupEnv: func(t *testing.T) {
 				t.Helper()
-				t.Setenv("CLAUDE_STATUSLINE_WIDTH", "120")
+				t.Setenv("STEWARD_STATUSLINE_WIDTH", "120")
+				t.Setenv("CLAUDE_STATUSLINE_WIDTH", "40")
 				t.Setenv("COLUMNS", "80")
 			},
 			want: 120,
 		},
 		{
+			name: "old override is ignored",
+			setupEnv: func(t *testing.T) {
+				t.Helper()
+				t.Setenv("STEWARD_STATUSLINE_WIDTH", "")
+				t.Setenv("CLAUDE_STATUSLINE_WIDTH", "120")
+				t.Setenv("COLUMNS", "80")
+			},
+			want: 80,
+		},
+		{
 			name: "COLUMNS used when test override absent",
 			setupEnv: func(t *testing.T) {
 				t.Helper()
-				t.Setenv("CLAUDE_STATUSLINE_WIDTH", "")
+				t.Setenv("STEWARD_STATUSLINE_WIDTH", "")
 				t.Setenv("COLUMNS", "100")
 			},
 			want: 100,
@@ -34,7 +45,7 @@ func TestDefaultTerminalWidth_GetWidth(t *testing.T) {
 			name: "COLUMNS=0 falls through to default",
 			setupEnv: func(t *testing.T) {
 				t.Helper()
-				t.Setenv("CLAUDE_STATUSLINE_WIDTH", "")
+				t.Setenv("STEWARD_STATUSLINE_WIDTH", "")
 				t.Setenv("COLUMNS", "0")
 			},
 			want: 200,
@@ -43,7 +54,7 @@ func TestDefaultTerminalWidth_GetWidth(t *testing.T) {
 			name: "garbage COLUMNS falls through to default",
 			setupEnv: func(t *testing.T) {
 				t.Helper()
-				t.Setenv("CLAUDE_STATUSLINE_WIDTH", "")
+				t.Setenv("STEWARD_STATUSLINE_WIDTH", "")
 				t.Setenv("COLUMNS", "not-a-number")
 			},
 			want: 200,
@@ -52,7 +63,7 @@ func TestDefaultTerminalWidth_GetWidth(t *testing.T) {
 			name: "no env vars yields default",
 			setupEnv: func(t *testing.T) {
 				t.Helper()
-				t.Setenv("CLAUDE_STATUSLINE_WIDTH", "")
+				t.Setenv("STEWARD_STATUSLINE_WIDTH", "")
 				t.Setenv("COLUMNS", "")
 			},
 			want: 200,

@@ -45,7 +45,7 @@ const cacheHashBytes = 8
 // caching for the call — the caller just computes fresh, exactly as
 // with CacheDir "". The caller must Close the returned root.
 func openCacheRoot(cacheDir string) (*os.Root, bool) {
-	dir := filepath.Join(cacheDir, fmt.Sprintf("cc-tools-%d", os.Getuid()))
+	dir := filepath.Join(cacheDir, fmt.Sprintf("steward-%d", os.Getuid()))
 	if err := os.MkdirAll(dir, cacheDirPerm); err != nil {
 		return nil, false
 	}

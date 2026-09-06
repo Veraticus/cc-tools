@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Veraticus/cc-tools/internal/statusline"
+	"github.com/joshsymonds/steward/internal/statusline"
 )
 
 func TestVisibleWidth_PlainASCII(t *testing.T) {

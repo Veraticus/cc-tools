@@ -3,7 +3,22 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestGetCacheDuration_UsesOnlyStewardEnvironment(t *testing.T) {
+	t.Setenv("DEBUG_CONTEXT", "")
+	t.Setenv("CLAUDE_STATUSLINE_CACHE_SECONDS", "1")
+	t.Setenv("STEWARD_STATUSLINE_CACHE_SECONDS", "")
+	if got := getCacheDuration(); got != 20*time.Second {
+		t.Errorf("old cache duration env = %v, want default", got)
+	}
+
+	t.Setenv("STEWARD_STATUSLINE_CACHE_SECONDS", "7")
+	if got := getCacheDuration(); got != 7*time.Second {
+		t.Errorf("canonical cache duration env = %v, want 7s", got)
+	}
+}
 
 func TestReadStatuslineInput(t *testing.T) {
 	tests := []struct {

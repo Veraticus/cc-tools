@@ -44,7 +44,7 @@ func formatPath(path string) string {
 	}
 
 	// If path is longer than 3 directories, truncate with `…/`.
-	// We intentionally drop the `~` prefix on truncation so the cc-tools
+	// We intentionally drop the `~` prefix on truncation so the steward
 	// statusline matches starship's directory module byte-for-byte
 	// (starship's truncation_length=2 + truncation_symbol="…/" yields the
 	// same shape). The slight info loss (you can't tell from the chip

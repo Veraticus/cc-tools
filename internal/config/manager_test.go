@@ -17,12 +17,12 @@ func TestNewManager(t *testing.T) {
 		{
 			name:        "uses XDG_CONFIG_HOME when set",
 			xdgHome:     "/custom/config",
-			wantPathEnd: "/custom/config/cc-tools/config.json",
+			wantPathEnd: "/custom/config/steward/config.json",
 		},
 		{
 			name:        "falls back to home directory",
 			xdgHome:     "",
-			wantPathEnd: "/.config/cc-tools/config.json",
+			wantPathEnd: "/.config/steward/config.json",
 		},
 	}
 
@@ -996,13 +996,13 @@ func TestConfigFilePath(t *testing.T) {
 		{
 			name:         "uses XDG_CONFIG_HOME",
 			xdgHome:      "/custom/xdg",
-			wantContains: "/custom/xdg/cc-tools/config.json",
+			wantContains: "/custom/xdg/steward/config.json",
 		},
 		{
 			name:         "falls back to HOME/.config",
 			xdgHome:      "",
 			homeDir:      "/home/user",
-			wantContains: "/.config/cc-tools/config.json",
+			wantContains: "/.config/steward/config.json",
 		},
 	}
 

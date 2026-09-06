@@ -21,7 +21,7 @@ const goldenDir = "testdata"
 
 // renderScenario exercises the exact production path: marshal the
 // scenario's parsed Input back to JSON, then feed it through
-// Statusline.Generate — the same JSON-in/ANSI-out path the cc-tools
+// Statusline.Generate — the same JSON-in/ANSI-out path the steward
 // statusline binary uses on every tick.
 func renderScenario(t *testing.T, sc Scenario) string {
 	t.Helper()

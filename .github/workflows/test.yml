@@ -116,19 +116,40 @@ jobs:
 
     - name: Build binaries
       run: |
-        GOOS=$(go env GOOS) GOARCH=${{ matrix.arch }} go build -v -o cc-tools-$(go env GOOS)-${{ matrix.arch }} ./cmd/cc-tools
-        GOOS=$(go env GOOS) GOARCH=${{ matrix.arch }} go build -v -o cc-tools-statusline-$(go env GOOS)-${{ matrix.arch }} ./cmd/cc-tools-statusline
+        GOOS=$(go env GOOS) GOARCH=${{ matrix.arch }} go build -v -o steward-$(go env GOOS)-${{ matrix.arch }} ./cmd/steward
+        GOOS=$(go env GOOS) GOARCH=${{ matrix.arch }} go build -v -o steward-statusline-$(go env GOOS)-${{ matrix.arch }} ./cmd/steward-statusline
 
     - name: Test binaries
-      if: matrix.arch == 'amd64'  # Only test on native architecture
       run: |
-        ./cc-tools-$(go env GOOS)-${{ matrix.arch }} version || true
-        ./cc-tools-statusline-$(go env GOOS)-${{ matrix.arch }} || true
+        if [[ "${{ matrix.arch }}" != "$(go env GOARCH)" ]]; then
+          echo "Skipping runtime smoke for non-native ${{ matrix.arch }} binary"
+          exit 0
+        fi
+
+        version_output="$(./steward-$(go env GOOS)-${{ matrix.arch }} version)"
+        [[ "$version_output" == steward* ]]
+
+        smoke_root="$(mktemp -d)"
+        trap 'rm -rf "$smoke_root"' EXIT
+        mkdir -p "$smoke_root/home" "$smoke_root/config" "$smoke_root/cache" \
+          "$smoke_root/state" "$smoke_root/bin"
+        statusline_output="$(
+          HOME="$smoke_root/home" \
+          XDG_CONFIG_HOME="$smoke_root/config" \
+          XDG_CACHE_HOME="$smoke_root/cache" \
+          XDG_STATE_HOME="$smoke_root/state" \
+          STEWARD_STATUSLINE_CACHE_DIR="$smoke_root/cache/statusline" \
+          PATH="$smoke_root/bin" \
+          ./steward-statusline-$(go env GOOS)-${{ matrix.arch }} <<JSON
+        {"cwd":"$smoke_root","model":{"display_name":"Synthetic"},"columns":80,"context_window":{"used_percentage":25,"context_window_size":200000}}
+        JSON
+        )"
+        [[ -n "$statusline_output" ]]
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: cc-tools-${{ runner.os }}-${{ matrix.arch }}
+        name: steward-${{ runner.os }}-${{ matrix.arch }}
         path: |
-          cc-tools-*
-          cc-tools-statusline-*
+          steward-*
+          steward-statusline-*

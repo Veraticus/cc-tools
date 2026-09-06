@@ -218,7 +218,7 @@ export function installFooter(pi, initialCtx) {
         activeController = controller;
         try {
           const result = await pi.exec(
-            "cc-tools",
+            "steward",
             ["statusline", statuslinePayload(refreshCtx, refreshColumns)],
             {
               cwd: refreshCtx.cwd,

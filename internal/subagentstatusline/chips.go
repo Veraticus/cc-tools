@@ -7,12 +7,12 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/Veraticus/cc-tools/internal/statusline"
+	"github.com/joshsymonds/steward/internal/statusline"
 )
 
 // EnvReader is the small interface every env-driven chip uses. The
 // production wiring plugs in statusline.DefaultEnvReader{} which
-// already overlays the cc-tools state file on top of process env for
+// already overlays the steward state file on top of process env for
 // AWS_PROFILE — meaning a Bash-tool export in a subagent reaches the
 // agent-view's chip via that file rather than via process inheritance.
 type EnvReader interface {

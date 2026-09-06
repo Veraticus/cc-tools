@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Veraticus/cc-tools/internal/aliases"
+	"github.com/joshsymonds/steward/internal/aliases"
 )
 
 func newTestResolver(t *testing.T, toml string) *aliases.Resolver {

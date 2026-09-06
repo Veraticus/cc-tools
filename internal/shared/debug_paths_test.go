@@ -17,49 +17,49 @@ func TestGetDebugLogPathForDir(t *testing.T) {
 			name:         "normal directory path",
 			dir:          "/home/user/projects/myapp",
 			wantContains: []string{"projects-myapp"},
-			wantPrefix:   "/tmp/cc-tools-",
+			wantPrefix:   "/tmp/steward-",
 			wantSuffix:   ".debug",
 		},
 		{
 			name:         "single directory",
 			dir:          "/tmp",
 			wantContains: []string{"-tmp-"},
-			wantPrefix:   "/tmp/cc-tools-",
+			wantPrefix:   "/tmp/steward-",
 			wantSuffix:   ".debug",
 		},
 		{
 			name:         "deep nested path",
 			dir:          "/very/deep/nested/directory/structure/here",
 			wantContains: []string{"structure-here"},
-			wantPrefix:   "/tmp/cc-tools-",
+			wantPrefix:   "/tmp/steward-",
 			wantSuffix:   ".debug",
 		},
 		{
 			name:         "path with spaces",
 			dir:          "/home/user/my projects/app name",
 			wantContains: []string{"my_projects-app_name"},
-			wantPrefix:   "/tmp/cc-tools-",
+			wantPrefix:   "/tmp/steward-",
 			wantSuffix:   ".debug",
 		},
 		{
 			name:         "root directory",
 			dir:          "/",
 			wantContains: []string{"root"},
-			wantPrefix:   "/tmp/cc-tools-",
+			wantPrefix:   "/tmp/steward-",
 			wantSuffix:   ".debug",
 		},
 		{
 			name:         "empty parts after root",
 			dir:          "//",
 			wantContains: []string{"root"},
-			wantPrefix:   "/tmp/cc-tools-",
+			wantPrefix:   "/tmp/steward-",
 			wantSuffix:   ".debug",
 		},
 		{
 			name:         "trailing slash",
 			dir:          "/home/user/project/",
 			wantContains: []string{"user-project"},
-			wantPrefix:   "/tmp/cc-tools-",
+			wantPrefix:   "/tmp/steward-",
 			wantSuffix:   ".debug",
 		},
 	}
@@ -131,8 +131,8 @@ func TestGetDebugLogPathForDirConsistency(t *testing.T) {
 func TestGetDebugLogPathForDirEdgeCases(t *testing.T) {
 	// Test with relative path (should still work)
 	path := GetDebugLogPathForDir("relative/path")
-	if !strings.HasPrefix(path, "/tmp/cc-tools-") || !strings.HasSuffix(path, ".debug") {
-		t.Errorf("GetDebugLogPathForDir() with relative path = %v, want /tmp/cc-tools-*.debug", path)
+	if !strings.HasPrefix(path, "/tmp/steward-") || !strings.HasSuffix(path, ".debug") {
+		t.Errorf("GetDebugLogPathForDir() with relative path = %v, want /tmp/steward-*.debug", path)
 	}
 
 	// Test with path containing multiple slashes
@@ -144,7 +144,7 @@ func TestGetDebugLogPathForDirEdgeCases(t *testing.T) {
 	// Test with very long directory name
 	longName := strings.Repeat("a", 100) + "/" + strings.Repeat("b", 100)
 	path3 := GetDebugLogPathForDir(longName)
-	if !strings.HasPrefix(path3, "/tmp/cc-tools-") || !strings.HasSuffix(path3, ".debug") {
-		t.Errorf("GetDebugLogPathForDir() with long name = %v, want /tmp/cc-tools-*.debug", path3)
+	if !strings.HasPrefix(path3, "/tmp/steward-") || !strings.HasSuffix(path3, ".debug") {
+		t.Errorf("GetDebugLogPathForDir() with long name = %v, want /tmp/steward-*.debug", path3)
 	}
 }

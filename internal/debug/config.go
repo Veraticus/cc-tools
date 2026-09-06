@@ -1,4 +1,4 @@
-// Package debug provides debug configuration management for cc-tools.
+// Package debug provides debug configuration management for steward.
 package debug
 
 import (
@@ -188,13 +188,17 @@ func GetLogFilePath(dir string) string {
 	}
 	safeName = strings.ReplaceAll(safeName, "/", "_")
 
-	return fmt.Sprintf("/tmp/cc-tools-%s-%s.log", safeName, hashStr)
+	return fmt.Sprintf("/tmp/steward-%s-%s.log", safeName, hashStr)
 }
 
 func getConfigDir() string {
+	if configDir := os.Getenv("XDG_CONFIG_HOME"); configDir != "" {
+		return filepath.Join(configDir, "steward")
+	}
+
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		return filepath.Join("/tmp", ".claude")
+		return filepath.Join("/tmp", "steward")
 	}
-	return filepath.Join(homeDir, ".claude")
+	return filepath.Join(homeDir, ".config", "steward")
 }

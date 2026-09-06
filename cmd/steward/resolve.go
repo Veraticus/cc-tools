@@ -7,8 +7,8 @@ import (
 	"io/fs"
 	"os"
 
-	"github.com/Veraticus/cc-tools/internal/aliases"
-	"github.com/Veraticus/cc-tools/internal/output"
+	"github.com/joshsymonds/steward/internal/aliases"
+	"github.com/joshsymonds/steward/internal/output"
 )
 
 // exitUsageError is the process exit code for invalid flags or arguments,
@@ -29,18 +29,18 @@ func runResolveCommand() {
 
 	kind, err := parseResolveKind(*kindStr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "cc-tools resolve: %v\n", err)
+		fmt.Fprintf(os.Stderr, "steward resolve: %v\n", err)
 		os.Exit(exitUsageError)
 	}
 
 	path := aliases.DefaultPath()
 	if _, statErr := os.Stat(path); errors.Is(statErr, fs.ErrNotExist) {
-		fmt.Fprintf(os.Stderr, "cc-tools resolve: %s missing, using built-in patterns\n", path)
+		fmt.Fprintf(os.Stderr, "steward resolve: %s missing, using built-in patterns\n", path)
 	}
 
 	r, err := aliases.NewResolver(path)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "cc-tools resolve: %v\n", err)
+		fmt.Fprintf(os.Stderr, "steward resolve: %v\n", err)
 		os.Exit(1)
 	}
 

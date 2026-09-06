@@ -12,11 +12,11 @@ type DefaultTerminalWidth struct{}
 // GetWidth returns the current terminal width.
 //
 // Precedence:
-//  1. CLAUDE_STATUSLINE_WIDTH — test override, used by integration harnesses.
+//  1. STEWARD_STATUSLINE_WIDTH — test override, used by integration harnesses.
 //  2. COLUMNS — populated by Claude Code per the 2.1.153 changelog.
 //  3. defaultWidth — fallback for unit tests and any pre-2.1.153 environment.
 func (t *DefaultTerminalWidth) GetWidth() int {
-	if w := readWidthEnv("CLAUDE_STATUSLINE_WIDTH"); w > 0 {
+	if w := readWidthEnv("STEWARD_STATUSLINE_WIDTH"); w > 0 {
 		return w
 	}
 	if w := readWidthEnv("COLUMNS"); w > 0 {

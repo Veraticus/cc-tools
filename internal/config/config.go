@@ -24,7 +24,7 @@ type NotificationsConfig struct {
 }
 
 // Load loads configuration from the config file.
-// It reads from ~/.config/cc-tools/config.json.
+// It reads from ~/.config/steward/config.json.
 func Load() (*Config, error) {
 	// Set defaults
 	cfg := &Config{}
@@ -74,15 +74,15 @@ func LoadFromManager(ctx context.Context) (*Config, error) {
 func getConfigPath() string {
 	// Check XDG_CONFIG_HOME first
 	if xdgConfig := os.Getenv("XDG_CONFIG_HOME"); xdgConfig != "" {
-		return filepath.Join(xdgConfig, "cc-tools", configFileName)
+		return filepath.Join(xdgConfig, "steward", configFileName)
 	}
 
-	// Default to ~/.config/cc-tools/config.json
+	// Default to ~/.config/steward/config.json
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		// Fallback to current directory if we can't get home
 		return configFileName
 	}
 
-	return filepath.Join(homeDir, ".config", "cc-tools", configFileName)
+	return filepath.Join(homeDir, ".config", "steward", configFileName)
 }

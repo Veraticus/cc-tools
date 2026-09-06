@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Veraticus/cc-tools/internal/notify"
+	"github.com/joshsymonds/steward/internal/notify"
 )
 
 func testNotifyClientConfig(t *testing.T, socketPath string) notifyClientConfig {
@@ -373,7 +373,7 @@ func TestDispatchNotifyInlineAndDryRunNeverInvokePiHelper(t *testing.T) {
 
 func TestRunNotifyCommandHarnessFlagPreparesRealCodexFrameAndWaitsForAck(t *testing.T) {
 	runtimeDirectory := t.TempDir()
-	socketPath := filepath.Join(runtimeDirectory, "cc-tools", "notifyd.sock")
+	socketPath := filepath.Join(runtimeDirectory, "steward", "notifyd.sock")
 	if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -396,7 +396,7 @@ func TestRunNotifyCommandHarnessFlagPreparesRealCodexFrameAndWaitsForAck(t *test
 		}
 	}()
 	t.Setenv("XDG_RUNTIME_DIR", runtimeDirectory)
-	t.Setenv("CC_TOOLS_NTFY_URL", "http://unused.invalid/topic")
+	t.Setenv("STEWARD_NTFY_URL", "http://unused.invalid/topic")
 	payload := `{"session_id":"thread","turn_id":"turn","hook_event_name":"Stop","cwd":"/tmp"}`
 	var stdout, stderr bytes.Buffer
 	if code := runNotifyCommandWithIO(
@@ -519,7 +519,7 @@ func TestNotifydRequiresSenderAndDefaultStateBase(t *testing.T) {
 		}
 	}
 	t.Setenv("XDG_STATE_HOME", "/state")
-	if got := defaultNotifyStateBase(); got != filepath.Join("/state", "cc-tools", "notify") {
+	if got := defaultNotifyStateBase(); got != filepath.Join("/state", "steward", "notify") {
 		t.Fatalf("defaultNotifyStateBase = %q", got)
 	}
 }

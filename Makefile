@@ -1,11 +1,11 @@
 .PHONY: build clean test lint
 
-# Build all cc-tools binaries
+# Build all steward binaries
 build:
-	@echo "Building cc-tools binaries..."
+	@echo "Building steward binaries..."
 	@mkdir -p build
-	go build -o build/cc-tools-statusline ./cmd/cc-tools-statusline/
-	go build -o build/cc-tools ./cmd/cc-tools/
+	go build -o build/steward-statusline ./cmd/steward-statusline/
+	go build -o build/steward ./cmd/steward/
 	@echo "Binaries built in build/"
 	@ls -la build/
 
@@ -28,18 +28,18 @@ lint:
 	golangci-lint run
 	deadcode -test ./...
 
-# Install all cc-tools binaries
+# Install all steward binaries
 install: build
-	@echo "Installing cc-tools binaries..."
+	@echo "Installing steward binaries..."
 	@mkdir -p ~/bin
-	cp build/cc-tools ~/bin/
-	cp build/cc-tools-statusline ~/bin/
-	@echo "cc-tools binaries installed to ~/bin/"
+	cp build/steward ~/bin/
+	cp build/steward-statusline ~/bin/
+	@echo "steward binaries installed to ~/bin/"
 	@echo "Make sure ~/bin is in your PATH"
 
 # Run statusline subcommand
 run-statusline: build
-	./build/cc-tools statusline
+	./build/steward statusline
 
 # Nix build
 nix-build:
@@ -58,8 +58,8 @@ test-nix:
 		CURRENT_SYSTEM=$$(nix eval --raw --impure --expr builtins.currentSystem); \
 		echo "Building for current system ($$CURRENT_SYSTEM)..."; \
 		nix build .#packages.$$CURRENT_SYSTEM.default -L --no-link || exit 1; \
-		echo "Testing cc-tools binary..."; \
-		nix build .#packages.$$CURRENT_SYSTEM.cc-tools -L --no-link || exit 1; \
+		echo "Testing steward binary..."; \
+		nix build .#packages.$$CURRENT_SYSTEM.steward -L --no-link || exit 1; \
 		echo "Nix build succeeded for $$CURRENT_SYSTEM!"; \
 	else \
 		echo "Nix not installed, skipping nix build test"; \
@@ -76,7 +76,7 @@ nix-shell:
 .PHONY: help nix-build test-nix nix-shell
 help:
 	@echo "Available targets:"
-	@echo "  build         - Build cc-tools binaries"
+	@echo "  build         - Build steward binaries"
 	@echo "  clean         - Remove build artifacts"
 	@echo "  test          - Run tests with coverage"
 	@echo "  lint          - Run linters"

@@ -101,7 +101,7 @@ export function sendPiNotification(payload, dependencies = {}) {
   let child;
   try {
     child = spawn(
-      "cc-tools",
+      "steward",
       ["notify", "--harness", "pi"],
       {
         cwd: payload.cwd,

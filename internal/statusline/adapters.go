@@ -65,7 +65,7 @@ func (c *DefaultCommandRunner) RunContext(ctx context.Context, command string, a
 // command in a fresh subshell — `export AWS_PROFILE=foo` inside one
 // Bash call dies when that subshell exits and never reaches Claude
 // Code's process env. The PostToolUse mirror hook (in nix-config) mirrors
-// the last seen export to ~/.cache/cc-tools/state.json so cc-tools can
+// the last seen export to ~/.cache/steward/state.json so steward can
 // reflect Claude's intent in the statusline.
 //
 // The file is authoritative when present, even an empty string (which
@@ -74,8 +74,8 @@ func (c *DefaultCommandRunner) RunContext(ctx context.Context, command string, a
 type DefaultEnvReader struct{}
 
 // Get retrieves an environment variable. For AWS_PROFILE specifically,
-// the state file at $CC_TOOLS_STATE_FILE (default
-// ~/.cache/cc-tools/state.json) takes precedence when present.
+// the state file at $STEWARD_STATE_FILE (default
+// ~/.cache/steward/state.json) takes precedence when present.
 func (e *DefaultEnvReader) Get(key string) string {
 	if key == "AWS_PROFILE" {
 		if v, ok := readStateFileAwsProfile(); ok {
@@ -86,13 +86,13 @@ func (e *DefaultEnvReader) Get(key string) string {
 }
 
 func readStateFileAwsProfile() (string, bool) {
-	path := os.Getenv("CC_TOOLS_STATE_FILE")
+	path := os.Getenv("STEWARD_STATE_FILE")
 	if path == "" {
 		home, err := os.UserHomeDir()
 		if err != nil || home == "" {
 			return "", false
 		}
-		path = filepath.Join(home, ".cache", "cc-tools", "state.json")
+		path = filepath.Join(home, ".cache", "steward", "state.json")
 	}
 
 	data, err := os.ReadFile(path) //nolint:gosec // Path comes from trusted source

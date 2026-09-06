@@ -9,7 +9,7 @@ import (
 
 // Scenario is one labeled point in the statusline rendering matrix: a
 // terminal width, a parsed Input, and the Dependencies needed to
-// render it deterministically. Both the `cc-tools preview` subcommand
+// render it deterministically. Both the `steward preview` subcommand
 // and the golden tests iterate Scenarios() and render each one through
 // the same production path (Generate), so this type is production
 // code, not test-only fixtures.

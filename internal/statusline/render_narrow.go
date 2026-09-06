@@ -7,8 +7,9 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/Veraticus/cc-tools/internal/aliases"
 	"github.com/mattn/go-runewidth"
+
+	"github.com/joshsymonds/steward/internal/aliases"
 )
 
 // narrowWidthThreshold is the upper bound for narrow-mode activation.

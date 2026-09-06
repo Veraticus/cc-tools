@@ -3,9 +3,9 @@ package main
 import (
 	"os"
 
-	"github.com/Veraticus/cc-tools/internal/aliases"
-	"github.com/Veraticus/cc-tools/internal/output"
-	"github.com/Veraticus/cc-tools/internal/statusline"
+	"github.com/joshsymonds/steward/internal/aliases"
+	"github.com/joshsymonds/steward/internal/output"
+	"github.com/joshsymonds/steward/internal/statusline"
 )
 
 // runRenderCloudsCommand prints the AWS/gcloud/k8s chip chain as raw
@@ -14,7 +14,7 @@ import (
 //
 //	[custom.cloud_section]
 //	when = "true"
-//	command = "cc-tools render-clouds"
+//	command = "steward render-clouds"
 //	format = "$output"
 //
 // Output always includes at least the closing right curve in sky (git's
@@ -26,7 +26,7 @@ func runRenderCloudsCommand() {
 		CommandRunner: &statusline.DefaultCommandRunner{},
 		EnvReader:     &statusline.DefaultEnvReader{},
 		TerminalWidth: &statusline.DefaultTerminalWidth{},
-		Resolver:      aliases.NewResolverFromDefaultPath(os.Stderr, "cc-tools render-clouds"),
+		Resolver:      aliases.NewResolverFromDefaultPath(os.Stderr, "steward render-clouds"),
 	}
 
 	output.NewTerminal(os.Stdout, os.Stderr).Raw(statusline.RenderClouds(deps))

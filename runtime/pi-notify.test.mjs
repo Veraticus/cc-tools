@@ -29,7 +29,7 @@ const SAMPLE_PAYLOAD = Object.freeze({
 /** @param {string} source */
 async function executable(source) {
   const root = await mkdtemp(join(tmpdir(), "steward-pi-notify-"));
-  const path = join(root, "cc-tools");
+  const path = join(root, "steward");
   await writeFile(path, `#!${process.execPath}\n${source}`, "utf8");
   await chmod(path, 0o755);
   return { root, path };
@@ -44,7 +44,7 @@ function spawnExecutable(path, environment = {}) {
   /** @type {NotifySpawn} */
   const spawnReplacement = (command, args, options) => {
     calls += 1;
-    assert.equal(command, "cc-tools");
+    assert.equal(command, "steward");
     assert.deepEqual(args, ["notify", "--harness", "pi"]);
     assert.equal(options.shell, false);
     assert.deepEqual(options.stdio, ["pipe", "ignore", "ignore"]);
@@ -103,7 +103,7 @@ function diagnosticRecorder() {
   return { diagnostics, report: (message) => diagnostics.push(message) };
 }
 
-test("sender invokes exactly cc-tools notify --harness pi and writes canonical JSON only to stdin", async (t) => {
+test("sender invokes exactly steward notify --harness pi and writes canonical JSON only to stdin", async (t) => {
   const outputRoot = await mkdtemp(join(tmpdir(), "steward-pi-notify-output-"));
   const output = join(outputRoot, "capture.json");
   const fake = await executable(`

@@ -9,6 +9,55 @@ import (
 	"testing"
 )
 
+func TestNewManager_UsesCanonicalConfigDirAndIgnoresLegacyConfig(t *testing.T) {
+	home := t.TempDir()
+	configHome := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	legacyPath := filepath.Join(home, ".claude", "debug-config.json")
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyPath, []byte(`{"enabled_dirs":{"/legacy":true}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewManager()
+	wantPath := filepath.Join(configHome, "steward", "debug-config.json")
+	if m.filepath != wantPath {
+		t.Fatalf("config path = %q, want %q", m.filepath, wantPath)
+	}
+	if err := os.MkdirAll(filepath.Dir(wantPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(wantPath, []byte(`{"enabled_dirs":{"/canonical-loaded":true}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Load(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !m.config.EnabledDirs["/canonical-loaded"] {
+		t.Error("canonical config must be loaded")
+	}
+	if m.config.EnabledDirs["/legacy"] {
+		t.Error("legacy config must remain unread")
+	}
+	m.config.EnabledDirs["/canonical"] = true
+	if err := m.Save(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(wantPath); err != nil {
+		t.Fatalf("canonical config was not saved: %v", err)
+	}
+	legacy, err := os.ReadFile(legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(legacy) != `{"enabled_dirs":{"/legacy":true}}` {
+		t.Errorf("legacy config was modified: %s", legacy)
+	}
+}
+
 func TestNewManager(t *testing.T) {
 	m := NewManager()
 
@@ -603,25 +652,25 @@ func TestGetLogFilePath(t *testing.T) {
 		{
 			name:         "generates path for normal directory",
 			inputDir:     "/home/user/project",
-			wantPrefix:   "/tmp/cc-tools-project-",
+			wantPrefix:   "/tmp/steward-project-",
 			wantContains: ".log",
 		},
 		{
 			name:         "handles root directory",
 			inputDir:     "/",
-			wantPrefix:   "/tmp/cc-tools-root-",
+			wantPrefix:   "/tmp/steward-root-",
 			wantContains: ".log",
 		},
 		{
 			name:         "handles relative path",
 			inputDir:     ".",
-			wantPrefix:   "/tmp/cc-tools-",
+			wantPrefix:   "/tmp/steward-",
 			wantContains: ".log",
 		},
 		{
 			name:         "sanitizes directory name",
 			inputDir:     "/path/with/many/levels",
-			wantPrefix:   "/tmp/cc-tools-levels-",
+			wantPrefix:   "/tmp/steward-levels-",
 			wantContains: ".log",
 		},
 	}
@@ -718,41 +767,33 @@ func TestManagerConcurrency(t *testing.T) {
 }
 
 func TestGetConfigDir(t *testing.T) {
-	tests := []struct {
-		name     string
-		homeDir  string
-		wantPath string
-	}{
-		{
-			name:     "uses home directory",
-			homeDir:  "/home/testuser",
-			wantPath: "/home/testuser/.claude",
-		},
-		{
-			name:     "falls back to /tmp when home not available",
-			homeDir:  "",
-			wantPath: "/tmp/.claude",
-		},
-	}
+	t.Run("uses XDG_CONFIG_HOME", func(t *testing.T) {
+		configHome := t.TempDir()
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("XDG_CONFIG_HOME", configHome)
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// os.UserHomeDir() treats HOME="" the same as HOME unset (both
-			// read as the empty string), so t.Setenv covers both cases and
-			// restores the previous value automatically after the subtest.
-			t.Setenv("HOME", tt.homeDir)
+		if got, want := getConfigDir(), filepath.Join(configHome, "steward"); got != want {
+			t.Errorf("getConfigDir() = %q, want %q", got, want)
+		}
+	})
 
-			configDir := getConfigDir()
+	t.Run("uses home config directory when XDG_CONFIG_HOME is absent", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("XDG_CONFIG_HOME", "")
 
-			// On systems where UserHomeDir works differently, just check it's not empty
-			if configDir == "" {
-				t.Error("getConfigDir() should not return empty string")
-			}
+		if got, want := getConfigDir(), filepath.Join(home, ".config", "steward"); got != want {
+			t.Errorf("getConfigDir() = %q, want %q", got, want)
+		}
+	})
 
-			// Check it ends with .claude
-			if !strings.HasSuffix(configDir, ".claude") {
-				t.Errorf("getConfigDir() = %s, should end with .claude", configDir)
-			}
-		})
-	}
+	t.Run("falls back to temporary directory when home is unavailable", func(t *testing.T) {
+		t.Setenv("HOME", "")
+		t.Setenv("USERPROFILE", "")
+		t.Setenv("XDG_CONFIG_HOME", "")
+
+		if got, want := getConfigDir(), filepath.Join("/tmp", "steward"); got != want {
+			t.Errorf("getConfigDir() = %q, want %q", got, want)
+		}
+	})
 }

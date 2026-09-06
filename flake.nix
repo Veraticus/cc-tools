@@ -1,5 +1,5 @@
 {
-  description = "CC-Tools - Go implementations of Claude Code utilities";
+  description = "Steward - Go implementations of Claude Code utilities";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -22,13 +22,13 @@
         # Update this hash after running: nix build . --no-link 2>&1 | grep 'got:' | cut -d: -f2 | xargs
         vendorHash = "sha256-Cbk/8dREiEvXGESrhZ9dg2N1gHzdaipeghWoIH8wSGs=";
 
-        cc-tools-main = pkgs.buildGoModule rec {
-          pname = "cc-tools";
+        steward-main = pkgs.buildGoModule rec {
+          pname = "steward";
           inherit version vendorHash;
 
           src = ./.;
 
-          subPackages = [ "cmd/cc-tools" ];
+          subPackages = [ "cmd/steward" ];
 
           ldflags = [
             "-s"
@@ -38,21 +38,21 @@
           ];
 
           meta = with pkgs.lib; {
-            description = "Claude Code Tools - main CLI";
-            homepage = "https://github.com/Veraticus/cc-tools";
+            description = "Steward - main CLI";
+            homepage = "https://github.com/joshsymonds/steward";
             license = licenses.mit;
             maintainers = with maintainers; [ ];
             platforms = platforms.unix;
           };
         };
 
-        cc-tools-statusline = pkgs.buildGoModule rec {
-          pname = "cc-tools-statusline";
+        steward-statusline = pkgs.buildGoModule rec {
+          pname = "steward-statusline";
           inherit version vendorHash;
 
           src = ./.;
 
-          subPackages = [ "cmd/cc-tools-statusline" ];
+          subPackages = [ "cmd/steward-statusline" ];
 
           ldflags = [
             "-s"
@@ -62,8 +62,8 @@
           ];
 
           meta = with pkgs.lib; {
-            description = "Claude Code Tools - statusline binary";
-            homepage = "https://github.com/Veraticus/cc-tools";
+            description = "Steward - statusline binary";
+            homepage = "https://github.com/joshsymonds/steward";
             license = licenses.mit;
             maintainers = with maintainers; [ ];
             platforms = platforms.unix;
@@ -71,12 +71,12 @@
         };
 
         # Combined package that includes all binaries
-        cc-tools = pkgs.symlinkJoin {
-          name = "cc-tools-${version}";
-          paths = [ cc-tools-main cc-tools-statusline ];
+        steward = pkgs.symlinkJoin {
+          name = "steward-${version}";
+          paths = [ steward-main steward-statusline ];
           meta = with pkgs.lib; {
-            description = "Claude Code Tools - all binaries";
-            homepage = "https://github.com/Veraticus/cc-tools";
+            description = "Steward - all binaries";
+            homepage = "https://github.com/joshsymonds/steward";
             license = licenses.mit;
             maintainers = with maintainers; [ ];
             platforms = platforms.unix;
@@ -87,8 +87,8 @@
       {
         # Packages
         packages = {
-          inherit cc-tools cc-tools-main cc-tools-statusline;
-          default = cc-tools;
+          inherit steward steward-main steward-statusline;
+          default = steward;
         };
 
         # Development shell
@@ -106,7 +106,7 @@
           ];
 
           shellHook = ''
-            echo "CC-Tools development environment"
+            echo "Steward development environment"
             echo "Available commands:"
             echo "  make build    - Build all tools"
             echo "  make test     - Run tests"
@@ -121,11 +121,11 @@
         apps = {
           default = {
             type = "app";
-            program = "${cc-tools-main}/bin/cc-tools";
+            program = "${steward-main}/bin/steward";
           };
           statusline = {
             type = "app";
-            program = "${cc-tools-statusline}/bin/cc-tools-statusline";
+            program = "${steward-statusline}/bin/steward-statusline";
           };
         };
       }

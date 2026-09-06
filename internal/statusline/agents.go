@@ -14,7 +14,7 @@ import (
 // Claude tells the subagentStatusLine hook which models the session's
 // agents run, but never tells the main statusLine hook anything about
 // agents — its payload is session-scoped on every screen, including
-// the agent view. So the subagent hook (which cc-tools also renders)
+// the agent view. So the subagent hook (which steward also renders)
 // writes a tiny per-session state file on every tick, and the main
 // statusline reads it back: when agents are running, the model chip
 // swaps from the session model to the running agents' models.
@@ -30,7 +30,7 @@ const (
 	// agentsStatePrefix namespaces the per-session state files inside
 	// the cache dir (default /dev/shm, shared with the git-status and
 	// cost caches).
-	agentsStatePrefix = "cc-tools-agents-"
+	agentsStatePrefix = "steward-agents-"
 
 	// agentsMaxGroups caps how many distinct model groups the summary
 	// renders before collapsing the rest into "+N".
@@ -228,15 +228,12 @@ func sanitizeAgentLabel(s string) string {
 }
 
 // ResolveCacheDir is the canonical cache-dir resolution for every
-// cc-tools binary: explicit env overrides first, then /dev/shm so the
+// steward binary: explicit env overrides first, then /dev/shm so the
 // hot-path caches (git status, costs, agents state) stay off disk.
 // Shared here because the statusline and subagent-statusline commands
 // must agree on the directory for the agents-state handoff to work.
 func ResolveCacheDir() string {
-	if dir := os.Getenv("CC_TOOLS_STATUSLINE_CACHE_DIR"); dir != "" {
-		return dir
-	}
-	if dir := os.Getenv("CLAUDE_STATUSLINE_CACHE_DIR"); dir != "" {
+	if dir := os.Getenv("STEWARD_STATUSLINE_CACHE_DIR"); dir != "" {
 		return dir
 	}
 	return "/dev/shm"

@@ -41,13 +41,28 @@ func TestDefaultCommandRunner_RunContext_TimeoutReapsChild(t *testing.T) {
 	}
 }
 
+func TestDefaultEnvReader_OldStateFileEnvIgnored(t *testing.T) {
+	oldState := filepath.Join(t.TempDir(), "old-state.json")
+	if err := os.WriteFile(oldState, []byte(`{"aws_profile":"old-profile"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CC_TOOLS_STATE_FILE", oldState)
+	t.Setenv("STEWARD_STATE_FILE", filepath.Join(t.TempDir(), "missing.json"))
+	t.Setenv("AWS_PROFILE", "canonical-process-env")
+
+	r := &DefaultEnvReader{}
+	if got := r.Get("AWS_PROFILE"); got != "canonical-process-env" {
+		t.Errorf("old state env must be ignored: got %q", got)
+	}
+}
+
 func TestDefaultEnvReader_AwsProfileFromFile(t *testing.T) {
 	dir := t.TempDir()
 	state := filepath.Join(dir, "state.json")
 	if err := os.WriteFile(state, []byte(`{"aws_profile":"foo-prod"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("CC_TOOLS_STATE_FILE", state)
+	t.Setenv("STEWARD_STATE_FILE", state)
 	t.Setenv("AWS_PROFILE", "other-profile")
 
 	r := &DefaultEnvReader{}
@@ -62,7 +77,7 @@ func TestDefaultEnvReader_AwsProfileEmptyStringFromFile(t *testing.T) {
 	if err := os.WriteFile(state, []byte(`{"aws_profile":""}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("CC_TOOLS_STATE_FILE", state)
+	t.Setenv("STEWARD_STATE_FILE", state)
 	t.Setenv("AWS_PROFILE", "fallback-shouldnt-win")
 
 	r := &DefaultEnvReader{}
@@ -72,7 +87,7 @@ func TestDefaultEnvReader_AwsProfileEmptyStringFromFile(t *testing.T) {
 }
 
 func TestDefaultEnvReader_AwsProfileFileMissing(t *testing.T) {
-	t.Setenv("CC_TOOLS_STATE_FILE", "/nonexistent/state.json")
+	t.Setenv("STEWARD_STATE_FILE", "/nonexistent/state.json")
 	t.Setenv("AWS_PROFILE", "from-env")
 
 	r := &DefaultEnvReader{}
@@ -87,7 +102,7 @@ func TestDefaultEnvReader_AwsProfileMalformedFile(t *testing.T) {
 	if err := os.WriteFile(state, []byte(`not json {`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("CC_TOOLS_STATE_FILE", state)
+	t.Setenv("STEWARD_STATE_FILE", state)
 	t.Setenv("AWS_PROFILE", "from-env")
 
 	r := &DefaultEnvReader{}
@@ -102,7 +117,7 @@ func TestDefaultEnvReader_AwsProfileKeyAbsentInFile(t *testing.T) {
 	if err := os.WriteFile(state, []byte(`{"something_else":"x"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("CC_TOOLS_STATE_FILE", state)
+	t.Setenv("STEWARD_STATE_FILE", state)
 	t.Setenv("AWS_PROFILE", "from-env")
 
 	r := &DefaultEnvReader{}
@@ -117,7 +132,7 @@ func TestDefaultEnvReader_NonAwsProfileUnchanged(t *testing.T) {
 	if err := os.WriteFile(state, []byte(`{"aws_profile":"foo-prod"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("CC_TOOLS_STATE_FILE", state)
+	t.Setenv("STEWARD_STATE_FILE", state)
 	t.Setenv("KUBECONFIG", "/some/path")
 
 	r := &DefaultEnvReader{}

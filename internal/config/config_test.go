@@ -15,14 +15,14 @@ func TestLoadFromJSON(t *testing.T) {
 	// Set XDG_CONFIG_HOME to use our temp directory
 	t.Setenv("XDG_CONFIG_HOME", tempDir)
 
-	// Create cc-tools directory
-	ccToolsDir := filepath.Join(tempDir, "cc-tools")
-	if err := os.MkdirAll(ccToolsDir, 0755); err != nil {
+	// Create steward directory
+	stewardDir := filepath.Join(tempDir, "steward")
+	if err := os.MkdirAll(stewardDir, 0755); err != nil {
 		t.Fatalf("Failed to create directory: %v", err)
 	}
 
 	// Write test JSON config
-	configPath := filepath.Join(ccToolsDir, "config.json")
+	configPath := filepath.Join(stewardDir, "config.json")
 	jsonContent := map[string]any{
 		"notifications": map[string]any{
 			"ntfy_topic": "test-topic",
@@ -47,6 +47,30 @@ func TestLoadFromJSON(t *testing.T) {
 	// Check values
 	if cfg.Notifications.NtfyTopic != "test-topic" {
 		t.Errorf("Expected ntfy_topic to be 'test-topic', got '%s'", cfg.Notifications.NtfyTopic)
+	}
+}
+
+func TestLoadIgnoresOldConfigDirectory(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tempDir)
+	oldDir := filepath.Join(tempDir, "cc-tools")
+	if err := os.MkdirAll(oldDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(oldDir, "config.json"),
+		[]byte(`{"notifications":{"ntfy_topic":"old-topic"}}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Notifications.NtfyTopic != "" {
+		t.Errorf("old config directory was loaded: topic = %q", cfg.Notifications.NtfyTopic)
 	}
 }
 
@@ -100,7 +124,7 @@ func TestGetConfigPath(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "/custom/config")
 
 	path := getConfigPath()
-	expected := "/custom/config/cc-tools/config.json"
+	expected := "/custom/config/steward/config.json"
 	if path != expected {
 		t.Errorf("Expected config path to be %s, got %s", expected, path)
 	}
@@ -109,7 +133,7 @@ func TestGetConfigPath(t *testing.T) {
 	os.Unsetenv("XDG_CONFIG_HOME")
 	path = getConfigPath()
 
-	// Should contain .config/cc-tools/config.json
+	// Should contain .config/steward/config.json
 	if !filepath.IsAbs(path) {
 		t.Errorf("Expected absolute path, got %s", path)
 	}

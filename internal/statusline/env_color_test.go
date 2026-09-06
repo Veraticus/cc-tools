@@ -3,7 +3,7 @@ package statusline
 import (
 	"testing"
 
-	"github.com/Veraticus/cc-tools/internal/aliases"
+	"github.com/joshsymonds/steward/internal/aliases"
 )
 
 func TestAwsBgColor(t *testing.T) {

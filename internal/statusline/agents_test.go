@@ -13,6 +13,19 @@ func agentsNow() time.Time { return time.Unix(1_787_200_000, 0) }
 
 const agentsTestSession = "39fdc97d-5534-4e4b-af38-8e1ae9d77939"
 
+func TestResolveCacheDir_UsesOnlyStewardEnvironment(t *testing.T) {
+	t.Setenv("CLAUDE_STATUSLINE_CACHE_DIR", "/old-cache")
+	t.Setenv("STEWARD_STATUSLINE_CACHE_DIR", "")
+	if got := ResolveCacheDir(); got != "/dev/shm" {
+		t.Errorf("old cache dir env = %q, want default", got)
+	}
+
+	t.Setenv("STEWARD_STATUSLINE_CACHE_DIR", "/steward-cache")
+	if got := ResolveCacheDir(); got != "/steward-cache" {
+		t.Errorf("canonical cache dir env = %q, want /steward-cache", got)
+	}
+}
+
 func TestAgentsState_WriteReadRoundtrip(t *testing.T) {
 	dir := t.TempDir()
 	labels := []string{"O5", "O5", "sol ×XH"}
@@ -134,7 +147,7 @@ func TestAgentsStatePath_Shape(t *testing.T) {
 	if !ok {
 		t.Fatal("valid inputs rejected")
 	}
-	if want := filepath.Join("/dev/shm", "cc-tools-agents-abc-123.json"); path != want {
+	if want := filepath.Join("/dev/shm", "steward-agents-abc-123.json"); path != want {
 		t.Errorf("path = %q, want %q", path, want)
 	}
 }

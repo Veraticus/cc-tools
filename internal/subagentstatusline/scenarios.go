@@ -8,7 +8,7 @@ import (
 // Scenario is one labeled point in the subagent statusline rendering
 // matrix: a terminal column budget, a chain of Tasks, the context
 // window, and the env snapshot needed to render it deterministically.
-// Both the `cc-tools preview` subcommand and the golden tests iterate
+// Both the `steward preview` subcommand and the golden tests iterate
 // Scenarios() and render each one through BuildContent — the same
 // per-task rendering path the production Render() entry point calls —
 // so this type is production code, not test-only fixtures.

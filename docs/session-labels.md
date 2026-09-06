@@ -26,7 +26,7 @@ A local consumer can inspect one exact harness/session scope without contacting
 `notifyd` or starting the Pi helper:
 
 ```bash
-cc-tools session-metadata --harness pi --session-id native-id
+steward session-metadata --harness pi --session-id native-id
 # For a non-default notify state root, add: --state-base /path/to/notify
 ```
 

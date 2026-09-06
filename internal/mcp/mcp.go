@@ -1,4 +1,4 @@
-// Package mcp provides MCP server management functionality for cc-tools.
+// Package mcp provides MCP server management functionality for steward.
 package mcp
 
 import (
@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Veraticus/cc-tools/internal/output"
+	"github.com/joshsymonds/steward/internal/output"
 )
 
 // MCPServer represents an MCP server configuration.

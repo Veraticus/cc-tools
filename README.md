@@ -1,9 +1,9 @@
-# cc-tools
+# steward
 
 High-performance Go utilities for terminal coding agents. Claude Code has the
 richest integration, and Codex CLI is supported for external turn-complete
-notifications. The historical `cc-tools` and `cc-tools-statusline` names are
-kept for compatibility.
+notifications. `steward` and `steward-statusline` are the canonical executable
+names.
 
 ## Features
 
@@ -27,8 +27,7 @@ kept for compatibility.
   agent-needs-input events deliver with blocked urgency without model latency
 - **Daemon-only Pi composition** - `notifyd` may improve a completion body using
   the configured Pi helper, but composition cannot veto delivery or change urgency
-- **Provider-neutral configuration** - `CC_TOOLS_NTFY_*` environment variables,
-  with the original `CLAUDE_HOOKS_NTFY_*` names retained as aliases
+- **Canonical configuration** - `STEWARD_NTFY_*` environment variables only
 
 ## Agent compatibility
 
@@ -38,29 +37,29 @@ kept for compatibility.
 | Root turn-complete ntfy delivery | Yes | Yes |
 | Permission/external approval delivery | Yes | Use Codex's built-in TUI notifications |
 | Daemon-side Pi body composition and shared session labels | Yes, using reliable transcript identity | Yes, using native turn identity |
-| Replace the in-app status line with `cc-tools-statusline` | Yes | No; Codex accepts built-in footer item identifiers only |
+| Replace the in-app status line with `steward-statusline` | Yes | No; Codex accepts built-in footer item identifiers only |
 
 ## Installation
 
 ### Claude Code Hooks
 
-cc-tools provides the statusline hook that you can use in Claude Code itself.
+steward provides the statusline hook that you can use in Claude Code itself.
 
-- **`cc-tools-statusline`** - Generates the rich statusline
+- **`steward-statusline`** - Generates the rich statusline
 
 ### Download Pre-built Binaries
 
-Download the latest release from [GitHub Releases](https://github.com/Veraticus/cc-tools/releases):
+Download the latest release from [GitHub Releases](https://github.com/joshsymonds/steward/releases):
 
 ```bash
 # Download and extract binaries
-wget https://github.com/Veraticus/cc-tools/releases/latest/download/cc-tools-linux-amd64.tar.gz
-tar -xzf cc-tools-linux-amd64.tar.gz
+wget https://github.com/joshsymonds/steward/releases/latest/download/steward-linux-amd64.tar.gz
+tar -xzf steward-linux-amd64.tar.gz
 
 # Move to ~/.claude/bin/ (or any directory in your PATH)
 mkdir -p ~/.claude/bin
-mv cc-tools-statusline ~/.claude/bin/
-chmod +x ~/.claude/bin/cc-tools-*
+mv steward-statusline ~/.claude/bin/
+chmod +x ~/.claude/bin/steward-statusline
 ```
 
 ### Build from Source (NixOS)
@@ -70,7 +69,7 @@ chmod +x ~/.claude/bin/cc-tools-*
 nix-build
 
 # Copy the required binaries
-cp ./result/bin/cc-tools-statusline ~/.claude/bin/
+cp ./result/bin/steward-statusline ~/.claude/bin/
 ```
 
 ### Build from Source (Go)
@@ -80,7 +79,7 @@ cp ./result/bin/cc-tools-statusline ~/.claude/bin/
 make build
 
 # Copy the required binaries
-cp build/cc-tools-statusline ~/.claude/bin/
+cp build/steward-statusline ~/.claude/bin/
 ```
 
 ### Claude Code Configuration
@@ -91,7 +90,7 @@ Add to your `~/.claude/settings.json`:
 {
   "statusLine": {
     "type": "command",
-    "command": "~/.claude/bin/cc-tools-statusline",
+    "command": "~/.claude/bin/steward-statusline",
     "padding": 0
   }
 }
@@ -99,36 +98,33 @@ Add to your `~/.claude/settings.json`:
 
 ### Codex notifications
 
-Codex's external notification command is a user-level setting. Add this at the
-top level of `~/.codex/config.toml` (use the absolute path to your installed
-binary):
+Native root `Stop` integration, including the exact user `trusted_hash`, is
+part of the coordinated nix-config cutover and is not deployed yet. Do not
+configure legacy `notify` or `SubagentStop` integration.
 
-```toml
-notify = ["/home/you/bin/cc-tools", "notify"]
-```
-
-Configure ntfy in the environment inherited by Codex:
+A synthetic canonical native-hook dry run can exercise the adapter without
+sending a notification:
 
 ```bash
-export CC_TOOLS_NTFY_URL="https://ntfy.sh/your-topic"
-# Optional for an authenticated topic:
-export CC_TOOLS_NTFY_TOKEN="your-token"
+steward notify --harness codex --dry-run <<'JSON'
+{
+  "session_id": "demo-session",
+  "turn_id": "demo-turn",
+  "transcript_path": "/tmp/demo-transcript.jsonl",
+  "cwd": "/tmp/project",
+  "hook_event_name": "Stop",
+  "last_assistant_message": "The requested work is complete."
+}
+JSON
 ```
 
-The `_FILE` variants are supported for secrets (`CC_TOOLS_NTFY_URL_FILE` and
-`CC_TOOLS_NTFY_TOKEN_FILE`). Set `CC_TOOLS_NTFY_DISABLED=true` to suppress
-delivery. The old `CLAUDE_HOOKS_NTFY_*` variables continue to work.
+### Shared notification configuration
 
-Root completion delivery is deterministic. When `notifyd` receives an eligible
-completion with a usable native identity pair (session ID and completion ID),
-it calls `steward-pi-helper` exactly once with the latest user and assistant
-text. The helper may supply a validated plain-text body and, when requested, a
-validated 3–4 word shared session label; it cannot suppress the notification or
-change its done urgency. Claude Stop uses the transcript's reliable final assistant UUID, then
-`message.id`; an unavailable or unreliable transcript never reuses a stale
-supplied ID. Active Claude `/goal` state remains a structural silence gate.
+The daemon uses `STEWARD_NTFY_URL` and optional `STEWARD_NTFY_TOKEN`.
+Their `_FILE` variants read runtime secret files; `STEWARD_NTFY_DISABLED=true`
+disables sending. Former environment namespaces are ignored.
 
-Pi configuration is centralized in the daemon environment:
+Sessionless Pi composition is configured centrally in the daemon environment:
 
 ```bash
 export STEWARD_HELPER_BIN="steward-pi-helper"
@@ -137,75 +133,34 @@ export STEWARD_MODEL_ID="gpt-5.6-luna"
 export STEWARD_MODEL_THINKING="low"
 ```
 
-Each default applies only when its setting is absent. An explicitly invalid
-setting, unavailable helper, authentication failure, malformed response, or
-timeout does not disable completion delivery: the decision log records only a
-safe error category and ntfy receives a deterministic plain-text tail of the
-final response. Fallback bodies are valid UTF-8, at most 160 bytes, and use
-`turn complete` when empty. Generated bodies are bounded to 200 bytes.
+Defaults apply only when absent. An invalid setting, unavailable helper,
+authentication failure, malformed result, or timeout retains deterministic
+notification delivery. Composition cannot veto completion or change urgency.
+See [the Pi helper protocol](docs/pi-helper.md) for bounds and failure behavior.
 
-The daemon requests a shared session label on the first completed exchange and
-again after each four additional completed exchanges with changed source
-material (normally exchanges 1, 5, and 9). A known label replaces the cwd
-project name in daemon notification titles; otherwise the cwd fallback and tmux
-workspace locator (or host fallback) remain. Minimal cadence/source metadata is
-stored atomically in the owner-only `<state-base>/session-labels` directory and
-survives daemon restarts. Local integrations can inspect one exact scope without
-writing state or invoking a model or sender:
+For an eligible native identity pair, the daemon requests a label on the first
+completed exchange and after four additional completed exchanges with changed
+material (normally 1, 5, 9).
+Minimal metadata persists in `session-labels`; a known label replaces the cwd
+project title. Inspect one scope without generation or notification:
 
 ```bash
-cc-tools session-metadata --harness pi --session-id native-id
+steward session-metadata --harness pi --session-id native-id
 ```
 
-The command reports validated naming metadata only; it does not prove model or
-notification completion and does not rename a session. See
-[shared session labels](docs/session-labels.md) for its strict response contract,
-generation meanings, failure and retry behavior, isolation, and future Pi
-resume/manual-name ownership guards.
+Metadata is not a delivery receipt. See [shared session labels](docs/session-labels.md)
+for generation, retry, and ownership semantics.
 
-If `notifyd` is unavailable, `cc-tools notify` uses the same model-free fallback
-inline. Dry runs are model-free as well; neither path starts the helper or
-attempts model authentication. Notification frames retain workspace routing but
-never copy the caller's whole environment into daemon IPC.
-
-The hook prepares each event once and waits up to 250 ms for a strict daemon
-acknowledgement. `accepted` and `duplicate` acknowledgements suppress inline
-work; a rejection, timeout, disconnect, or malformed acknowledgement runs one
-inline fallback from the same prepared snapshot, without rescanning a Claude
-transcript. Completion duplicate suppression is daemon-local and non-durable:
-it covers in-flight and successful IDs for 24 hours (up to 10,000 claims), but a
-daemon restart starts empty. Consequently an acknowledgement lost in transit
-can produce a duplicate, while a daemon crash after an observed acceptance can
-lose that notification. See [the notify protocol](docs/notify-protocol.md) for
-the exact framing, bounds, and outage semantics.
-
-You can exercise the Codex adapter without sending anything:
-
-```bash
-cc-tools notify --dry-run '{
-  "type":"agent-turn-complete",
-  "thread-id":"demo-thread",
-  "turn-id":"demo-turn",
-  "cwd":"/tmp/project",
-  "input-messages":["demo"],
-  "last-assistant-message":"The requested work is complete."
-}'
-```
-
-Codex currently invokes external `notify` commands for `agent-turn-complete`.
-Its built-in TUI notifications additionally understand events such as approval
-requests:
-
-```toml
-[tui]
-notifications = ["agent-turn-complete", "approval-requested"]
-notification_condition = "unfocused" # or "always"
-notification_method = "auto"         # or "osc9" / "bel"
-```
+Daemon acknowledgement is non-durable local admission: `accepted` or `duplicate`
+suppresses inline work. Rejection, timeout, or malformed acknowledgement uses
+one deterministic inline fallback from the same prepared snapshot. Claims cover native
+IDs for 24 hours, capped at 10,000; restarts clear them. Ambiguity can duplicate
+notifications, and crashes can lose accepted work. See [the notification
+protocol](docs/notify-protocol.md).
 
 ### Codex status line
 
-Codex cannot invoke `cc-tools-statusline` as its footer renderer. Unlike Claude
+Codex cannot invoke `steward-statusline` as its footer renderer. Unlike Claude
 Code's `statusLine.type = "command"` contract, Codex's `tui.status_line` is an
 ordered list of native item identifiers. A close native configuration is:
 
@@ -228,7 +183,7 @@ rendering in this repository cannot be injected into Codex's footer today.
 
 ## Control Commands
 
-The `cc-tools` binary provides control commands for managing your development workflow:
+The `steward` binary provides control commands for managing your development workflow:
 
 ### Debug Logging
 
@@ -236,19 +191,19 @@ Enable detailed debug logging to troubleshoot hook behavior:
 
 ```bash
 # Enable debug logging for current directory
-cc-tools debug enable
+steward debug enable
 
 # Check debug status
-cc-tools debug status
+steward debug status
 
 # View log file path
-cc-tools debug filename
+steward debug filename
 
 # List all directories with debug enabled
-cc-tools debug list
+steward debug list
 
 # Disable debug logging
-cc-tools debug disable
+steward debug disable
 ```
 
 ### MCP Server Management
@@ -257,18 +212,18 @@ Control which MCP (Model Context Protocol) servers are active per-project:
 
 ```bash
 # List all MCP servers and their status
-cc-tools mcp list
+steward mcp list
 
 # Enable specific MCP server
-cc-tools mcp enable jira
-cc-tools mcp enable playwright
+steward mcp enable jira
+steward mcp enable playwright
 
 # Disable specific MCP server
-cc-tools mcp disable targetprocess
+steward mcp disable targetprocess
 
 # Bulk operations
-cc-tools mcp enable-all    # Enable all configured MCPs
-cc-tools mcp disable-all   # Disable all MCPs (reduce context)
+steward mcp enable-all    # Enable all configured MCPs
+steward mcp disable-all   # Disable all MCPs (reduce context)
 ```
 
 MCP names support flexible matching (e.g., 'target' matches 'targetprocess').
@@ -307,18 +262,17 @@ MCP management reads your existing MCP configurations from `~/.claude/settings.j
 Generates a rich statusline for Claude Code prompts:
 
 ```bash
-echo '{"cwd": "/path/to/project", "model": {"display_name": "Claude 3.5"}, "cost": {"input_tokens": 1000}}' | cc-tools statusline
+echo '{"cwd": "/path/to/project", "model": {"display_name": "Claude 3.5"}, "cost": {"input_tokens": 1000}}' | steward statusline
 ```
 
 Example output: image
 
-The provider-neutral cache variables are
-`CC_TOOLS_STATUSLINE_CACHE_DIR` and `CC_TOOLS_STATUSLINE_CACHE_SECONDS`.
-Their original `CLAUDE_STATUSLINE_*` aliases remain supported.
+The cache variables are `STEWARD_STATUSLINE_CACHE_DIR` and
+`STEWARD_STATUSLINE_CACHE_SECONDS`.
 
 When `PATCHBAY_CALLER_KEY_FILE` is set, the statusline asks Patchbay's
 `/_patchbay/usage/summary` API for the local-midnight-to-now daily total. Set
-`CC_TOOLS_PATCHBAY_URL` to Patchbay's root URL, or omit it to use
+`STEWARD_PATCHBAY_URL` to Patchbay's root URL, or omit it to use
 `http://127.0.0.1:4100`; leave both variables unset to retain transcript-based
 cost display. The URL must use `https`, except `http` is allowed for
 `127.0.0.0/8`, `::1`, and `localhost`; URL userinfo is rejected. Costs stay integer nano-USD through half-even cent rounding. A
@@ -330,13 +284,13 @@ basis with the day summary.
 
 ## Configuration
 
-All configuration is managed through the `cc-tools config` command. Settings are stored in `~/.config/cc-tools/config.json` and are automatically created with defaults on first use.
+All configuration is managed through the `steward config` command. Settings are stored in `~/.config/steward/config.json` and are automatically created with defaults on first use.
 
 ### Viewing Configuration
 
 ```bash
 # List all settings with current values and defaults
-cc-tools config list
+steward config list
 
 # Example output:
 # Configuration:
@@ -346,30 +300,30 @@ cc-tools config list
 #     - statusline.workspace =  (default)
 
 # View the raw JSON config file
-cc-tools config show
+steward config show
 
 # Get a specific value
-cc-tools config get statusline.cache_seconds
+steward config get statusline.cache_seconds
 ```
 
 ### Setting Configuration
 
 ```bash
 # Set custom workspace label for statusline
-cc-tools config set statusline.workspace "my-project"
+steward config set statusline.workspace "my-project"
 
 # Set cache directory (e.g., for systems without /dev/shm)
-cc-tools config set statusline.cache_dir "/tmp"
+steward config set statusline.cache_dir "/tmp"
 ```
 
 ### Resetting to Defaults
 
 ```bash
 # Reset a specific setting to its default
-cc-tools config reset statusline.cache_seconds
+steward config reset statusline.cache_seconds
 
 # Reset all settings to defaults
-cc-tools config reset
+steward config reset
 ```
 
 ### Available Settings
@@ -422,4 +376,4 @@ MIT
 
 ## Author
 
-Josh Symonds ([@Veraticus](https://github.com/Veraticus))
+Josh Symonds ([@joshsymonds](https://github.com/joshsymonds))
