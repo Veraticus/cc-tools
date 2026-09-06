@@ -9,6 +9,12 @@
     "test": "node --test runtime/*.test.mjs",
     "typecheck": "tsc -p tsconfig.json"
   },
+  "pi": {
+    "extensions": [
+      "runtime/pi-subagents.mjs",
+      "runtime/pi-extension.mjs"
+    ]
+  },
   "dependencies": {
     "@earendil-works/pi-ai": "0.85.0",
     "@earendil-works/pi-coding-agent": "0.85.0",

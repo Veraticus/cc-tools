@@ -12,6 +12,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CHILD_CONTEXT_PATH = join(REPOSITORY_ROOT, "runtime", "pi-child-context.mjs");
 const CHILD_PROBE_PATH = join(REPOSITORY_ROOT, "runtime", "pi-child-probe.mjs");
+const OWNED_ADAPTER_PATH = join(REPOSITORY_ROOT, "runtime", "pi-extension.mjs");
 const SUBAGENTS_WRAPPER_PATH = join(REPOSITORY_ROOT, "runtime", "pi-subagents.mjs");
 const COUPLING_ERROR = "Steward cannot verify the pinned Pi child-context coupling";
 const EXPECTED_INDEX_SHA256 = "ee8cdc6e9b0dd95c47b5416be2f48089252db98edfcc6669f417c16a58b79ec5";
@@ -177,7 +178,7 @@ function packageRoot(packageName, base) {
  * @param {string | undefined} extensionPath
  * @returns {Promise<{ root: string, result: import("node:child_process").SpawnSyncReturns<string> }>}
  */
-async function runConstructionProbe(extensionPath) {
+async function runConstructionProbe(extensionPath, adapterPath = OWNED_ADAPTER_PATH) {
   const root = await mkdtemp(join(tmpdir(), "steward-child-construction-"));
   const home = join(root, "home");
   const agentDir = join(root, "agent");
@@ -192,7 +193,9 @@ async function runConstructionProbe(extensionPath) {
   ]);
   await writeFile(
     join(agentDir, "settings.json"),
-    `${JSON.stringify({ extensions: [SUBAGENTS_WRAPPER_PATH, extensionPath ?? CHILD_PROBE_PATH] })}\n`,
+    `${JSON.stringify({
+      extensions: [SUBAGENTS_WRAPPER_PATH, adapterPath, extensionPath ?? CHILD_PROBE_PATH],
+    })}\n`,
     "utf8",
   );
   await writeFile(join(projectSettings, "settings.json"), "{}\n", "utf8");
@@ -226,6 +229,22 @@ async function runConstructionProbe(extensionPath) {
 }
 
 /** @param {string} root @returns {Promise<string>} */
+async function createCopiedRootAdapter(root) {
+  const runtime = join(root, "copied-adapter");
+  await mkdir(runtime, { recursive: true });
+  await Promise.all([
+    copyFile(OWNED_ADAPTER_PATH, join(runtime, "pi-extension.mjs")),
+    copyFile(join(REPOSITORY_ROOT, "runtime", "pi-notify.mjs"), join(runtime, "pi-notify.mjs")),
+    writeFile(
+      join(runtime, "pi-child-context.mjs"),
+      "export function isPiChildSession() { return false; }\n",
+      "utf8",
+    ),
+  ]);
+  return join(runtime, "pi-extension.mjs");
+}
+
+/** @param {string} root */
 async function createIndependentProbeExtension(root) {
   const runtime = join(root, "independent-runtime");
   const independentPackageRoot = join(runtime, "node_modules", "@tintinweb", "pi-subagents");
@@ -421,9 +440,11 @@ test("real extension-enabled general-purpose child shares the pinned native cont
   assert.equal(booleanProperty(output, "proofMet"), true);
   const assertions = recordProperty(output.assertions, "assertions");
   const requiredAssertions = [
-    "rootLoadedWrapperAndProbe",
+    "rootLoadedWrapperAdapterAndProbe",
     "rootClassifierFalse",
     "childClassifierTrueBeforeAdmission",
+    "ownedAdapterRootRegistered",
+    "ownedAdapterChildSuppressedBeforeRegistration",
     "oneRootAndOneChildFactory",
     "extraProbeExtensionLoaded",
     "sameNativeAccessorAcrossFactories",
@@ -444,6 +465,19 @@ test("real extension-enabled general-purpose child shares the pinned native cont
   assert.equal(stringProperty(recordProperty(output.package, "package"), "subagentsVersion"), "0.19.0");
 });
 
+test("a copied adapter that bypasses classification registers in the real child", async (t) => {
+  const seedRoot = await mkdtemp(join(tmpdir(), "steward-copied-adapter-"));
+  t.after(() => rm(seedRoot, { force: true, recursive: true }));
+  const copiedAdapter = await createCopiedRootAdapter(seedRoot);
+  const { root, result } = await runConstructionProbe(undefined, copiedAdapter);
+  t.after(() => rm(root, { force: true, recursive: true }));
+  assert.equal(result.status, 1, result.stderr);
+  const output = recordProperty(JSON.parse(result.stdout), "copied adapter output");
+  const assertions = recordProperty(output.assertions, "copied adapter assertions");
+  assert.equal(booleanProperty(assertions, "ownedAdapterChildSuppressedBeforeRegistration"), false);
+  assert.equal(booleanProperty(assertions, "ownedAdapterRootRegistered"), true);
+});
+
 test("an independent accessor copy is a failing real-construction negative control", async (t) => {
   const seedRoot = await mkdtemp(join(tmpdir(), "steward-independent-accessor-"));
   t.after(() => rm(seedRoot, { force: true, recursive: true }));
@@ -458,6 +492,7 @@ test("an independent accessor copy is a failing real-construction negative contr
   assert.equal(booleanProperty(output, "proofMet"), false);
   const assertions = recordProperty(output.assertions, "negative assertions");
   assert.equal(booleanProperty(assertions, "childClassifierTrueBeforeAdmission"), false);
+  assert.equal(booleanProperty(assertions, "ownedAdapterChildSuppressedBeforeRegistration"), true);
   assert.equal(booleanProperty(assertions, "sameNativeAccessorAcrossFactories"), false);
   assert.equal(booleanProperty(assertions, "onePhysicalPinnedSubagentsPackage"), false);
   assert.equal(booleanProperty(assertions, "stoppedAtOnSessionCreated"), true);

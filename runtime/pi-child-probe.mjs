@@ -319,6 +319,8 @@ export async function runProbe() {
   /** @type {string[]} */
   let childActiveTools = [];
   let childProbeSource;
+  /** @type {ReturnType<AgentSession["resourceLoader"]["getExtensions"]> | undefined} */
+  let childLoad;
   const stopController = new AbortController();
 
   try {
@@ -346,6 +348,7 @@ export async function runProbe() {
           signal: stopController.signal,
           onSessionCreated(session) {
             childSession = session;
+            childLoad = session.resourceLoader.getExtensions();
             accessorAtOnSessionCreated = nativeChildContext.accessor();
             childMessagesAtCallback = session.messages.length;
             const allTools = session.getAllTools();
@@ -382,15 +385,22 @@ export async function runProbe() {
     const tuiFromSubagents = packageIdentity("@earendil-works/pi-tui", exactIndex);
     const rootFactories = factories.filter((factory) => factory.childAtFactory === false);
     const childFactories = factories.filter((factory) => factory.childAtFactory === true);
+    const rootAdapter = rootLoad.extensions.find((extension) => extension.path.endsWith("/pi-extension.mjs"));
+    const childAdapter = childLoad?.extensions.find((extension) => extension.path.endsWith("/pi-extension.mjs"));
     const accessorPaths = new Set(factories.map((factory) => realpathSync(factory.resolvedChildContext)));
     const accessors = new Set(factories.map((factory) => factory.accessor));
     const assertions = {
-      rootLoadedWrapperAndProbe:
+      rootLoadedWrapperAdapterAndProbe:
         rootLoad.errors.length === 0 &&
         rootLoad.extensions.some((extension) => extension.path.endsWith("/pi-subagents.mjs")) &&
+        rootLoad.extensions.some((extension) => extension.path.endsWith("/pi-extension.mjs")) &&
         rootLoad.extensions.some((extension) => extension.path.endsWith("/pi-child-probe.mjs")),
       rootClassifierFalse: factories[0]?.childAtFactory === false,
       childClassifierTrueBeforeAdmission: childFactories.length === 1,
+      ownedAdapterRootRegistered:
+        rootAdapter?.handlers.get("agent_settled")?.length === 1,
+      ownedAdapterChildSuppressedBeforeRegistration:
+        childAdapter !== undefined && childAdapter.handlers.size === 0,
       oneRootAndOneChildFactory: rootFactories.length === 1 && childFactories.length === 1,
       extraProbeExtensionLoaded:
         childAllTools.includes("steward_child_probe") &&
@@ -440,6 +450,8 @@ export async function runProbe() {
           resolvedChildContext: realpathSync(factory.resolvedChildContext),
         })),
         sessionStarts,
+        rootAdapterHandlers: rootAdapter === undefined ? [] : [...rootAdapter.handlers.keys()],
+        childAdapterHandlers: childAdapter === undefined ? [] : [...childAdapter.handlers.keys()],
         childProbeSource,
         childAllTools,
         childActiveTools,
