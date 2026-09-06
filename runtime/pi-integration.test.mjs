@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -165,9 +165,16 @@ test("real Pi lifecycle traverses CLI, notifyd, composer, and loopback sender", 
   });
 
   await Promise.all([mkdir(bin), mkdir(home), mkdir(runtime), mkdir(state)]);
-  const cli = join(bin, "steward");
-  const build = spawnSync("go", ["build", "-o", cli, "./cmd/steward"], { encoding: "utf8", timeout: 30_000 });
-  assert.equal(build.status, 0, build.stderr);
+  const suppliedCli = process.env.STEWARD_TEST_BIN;
+  const cli = suppliedCli === undefined ? join(bin, "steward") : suppliedCli;
+  if (suppliedCli === undefined) {
+    const build = spawnSync("go", ["build", "-o", cli, "./cmd/steward"], { encoding: "utf8", timeout: 30_000 });
+    assert.equal(build.status, 0, build.stderr);
+  } else {
+    const supplied = spawnSync(cli, ["--help"], { encoding: "utf8", timeout: 5_000 });
+    assert.equal(supplied.status, 0, supplied.stderr);
+    await symlink(cli, join(bin, "steward"));
+  }
   const helper = join(bin, "fake-helper");
   await writeFile(helper, `#!${process.execPath}\nconst fs=require("node:fs");let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>{const i=JSON.parse(s);fs.appendFileSync(process.env.HELPER_LOG,JSON.stringify({request:i,env:{token:process.env.STEWARD_NTFY_TOKEN,tokenFile:process.env.STEWARD_NTFY_TOKEN_FILE,hooks:process.env.STEWARD_TEST,model:process.env.STEWARD_MODEL_ID,proxy:process.env.HTTPS_PROXY,credential:process.env.AWS_SECRET_ACCESS_KEY}})+"\\n");const r={version:1,ok:true,body:"GENERATED-BODY-"+i.input.assistant};if(i.label.refresh)r.label="Fresh Pi Session";process.stdout.write(JSON.stringify(r)+"\\n")});\n`);
   await chmod(helper, 0o755);

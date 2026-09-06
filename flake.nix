@@ -70,10 +70,14 @@
           };
         };
 
+        steward-pi-runtime = pkgs.callPackage ./nix/pi-runtime.nix {
+          inherit version steward-main;
+        };
+
         # Combined package that includes all binaries
         steward = pkgs.symlinkJoin {
           name = "steward-${version}";
-          paths = [ steward-main steward-statusline ];
+          paths = [ steward-main steward-statusline steward-pi-runtime ];
           meta = with pkgs.lib; {
             description = "Steward - all binaries";
             homepage = "https://github.com/joshsymonds/steward";
@@ -87,7 +91,7 @@
       {
         # Packages
         packages = {
-          inherit steward steward-main steward-statusline;
+          inherit steward steward-main steward-statusline steward-pi-runtime;
           default = steward;
         };
 

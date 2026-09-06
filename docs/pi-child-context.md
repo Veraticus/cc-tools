@@ -35,7 +35,7 @@ An install performed with `npm ci --ignore-scripts` intentionally leaves the raw
 
 The construction regression verifies this actual prepared worktree graph before constructing a real extension-enabled `general-purpose` child. It does not copy the sources or assemble a substitute peer graph for its positive proof.
 
-The future Nix package must independently make the same binding to Pi TUI's physical 0.85.0 SDK/AI/TUI graph. It must install one compiled pi-subagents copy and point Pi at the owned wrapper. This task does not change current Nix consumers, so this is a prospective deployment requirement, not a claim about the currently deployed Nix graph.
+`packages.steward-pi-runtime` independently makes this binding in the packaged graph and installs one compiled pi-subagents copy with the owned wrapper. See [Nix packaging](packaging.md) for its evaluated paths and package smoke probe. Current Nix consumers are unchanged; consumer cutover remains a separate deployment step.
 
 Steward's sessionless composition and quota helpers run in separate processes and do not import this wrapper. Their package identity is independent of this in-process extension coupling.
 

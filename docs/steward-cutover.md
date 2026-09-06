@@ -50,9 +50,10 @@ service, environment, and secret-file wiring. The release must also update:
 - `home-manager/starship/default.nix`
 - `home-manager/statusline-aliases/default.nix`
 
-Packaging still must physically pin the helper and extension to the same Pi
-0.85.0 / subagents 0.19.0 peer dependency graph with a minimal `PATH`. Consumer
-cutover still needs native root Stop hook trust and its exact user
+Packaging now physically pins the helper and extension to the same Pi 0.85.0 /
+subagents 0.19.0 peer dependency graph with a minimal `PATH`; see
+[packaging](packaging.md). Consumer cutover still needs to replace its existing
+Pi package with this paired runtime, native root Stop hook trust, and its exact user
 `trusted_hash`, labels and quota production wiring, live verification, review,
 and release. Retire the old daemon only during that coordinated cutover; do not
 migrate or delete user state independently.
