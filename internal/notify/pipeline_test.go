@@ -397,8 +397,10 @@ func TestPipelineExplicitInputBypassesScanAndComposer(t *testing.T) {
 	}{
 		{notificationType: "permission_prompt", message: "allow command?", fallback: "needs permission"},
 		{notificationType: "elicitation_dialog", message: "choose a region", fallback: "needs input"},
+		{notificationType: "elicitation_url_dialog", message: "open the form", fallback: "needs input"},
 		{notificationType: "agent_needs_input", message: "answer the worker", fallback: "needs input"},
 		{notificationType: "permission_prompt", fallback: "needs permission"},
+		{notificationType: "elicitation_url_dialog", fallback: "needs input"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.notificationType+tt.message, func(t *testing.T) {

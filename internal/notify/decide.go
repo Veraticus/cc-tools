@@ -77,7 +77,7 @@ func decideNotification(in HookInput) Decision {
 			Outcome: OutcomeSend, Urgency: UrgencyBlocked,
 			Message: in.Message, Reason: "permission prompt",
 		}
-	case "elicitation_dialog":
+	case "elicitation_dialog", "elicitation_url_dialog":
 		return Decision{
 			Outcome: OutcomeSend, Urgency: UrgencyBlocked,
 			Message: in.Message, Reason: "elicitation dialog",

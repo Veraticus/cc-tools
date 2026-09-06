@@ -390,7 +390,7 @@ func inputFallbackLabel(notificationType string) string {
 	switch notificationType {
 	case "permission_prompt":
 		return "needs permission"
-	case "elicitation_dialog", notifTypeAgentNeedsInput:
+	case "elicitation_dialog", "elicitation_url_dialog", notifTypeAgentNeedsInput:
 		return "needs input"
 	default:
 		return "notification"

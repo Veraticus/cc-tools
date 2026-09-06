@@ -80,6 +80,8 @@ func TestDecideExplicitInputAndUnrelatedNotifications(t *testing.T) {
 		name             string
 		notificationType string
 		message          string
+		agentID          string
+		agentType        string
 		want             Decision
 	}{
 		{
@@ -95,6 +97,23 @@ func TestDecideExplicitInputAndUnrelatedNotifications(t *testing.T) {
 				Outcome: OutcomeSend, Urgency: UrgencyBlocked,
 				Message: "choose a region", Reason: "elicitation dialog",
 			},
+		},
+		{
+			name: "elicitation URL dialog", notificationType: "elicitation_url_dialog", message: "open the form",
+			want: Decision{
+				Outcome: OutcomeSend, Urgency: UrgencyBlocked,
+				Message: "open the form", Reason: "elicitation dialog",
+			},
+		},
+		{
+			name: "elicitation URL dialog AgentID child", notificationType: "elicitation_url_dialog",
+			message: "open the form", agentID: "child-1",
+			want: Decision{Outcome: OutcomeSilent, Reason: "agent context"},
+		},
+		{
+			name: "elicitation URL dialog AgentType child", notificationType: "elicitation_url_dialog",
+			message: "open the form", agentType: "worker",
+			want: Decision{Outcome: OutcomeSilent, Reason: "agent context"},
 		},
 		{
 			name: "agent needs input", notificationType: "agent_needs_input", message: "answer the worker",
@@ -126,6 +145,7 @@ func TestDecideExplicitInputAndUnrelatedNotifications(t *testing.T) {
 			in := HookInput{
 				Harness: harnessClaude, HookEventName: eventNotification,
 				NotificationType: tt.notificationType, Message: tt.message,
+				AgentID: tt.agentID, AgentType: tt.agentType,
 			}
 			if got := Decide(in, ScanResult{}); got != tt.want {
 				t.Fatalf("Decide() = %+v, want %+v", got, tt.want)
