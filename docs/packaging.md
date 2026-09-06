@@ -14,6 +14,16 @@ node runtime/package-smoke.mjs --package-root "$package" --runtime-root "$runtim
 
 The smoke probe requires the default package itself to provide the helper, Pi wrapper, runtime assets, and SDK/AI/TUI/subagents manifests. It compares their resolved file paths with the explicit paired runtime, then runs the default package's `bin/pi --version`. A test-only `NODE_OPTIONS --import` observer records the actual CLI entry and Node executable: the entry must be the runtime's unbundled `dist/cli.js`, never `dist/bundle/cli.js`, and the recorded Node must be version 24. That recorded packaged Node runs the physical graph identity check and the real generic-child construction probe with an isolated offline home and blocked network APIs.
 
-The real default helper wrapper is exercised separately with a test-only Node `registerHooks` model fixture. The fixture redirects only the coding-agent model runtime and records one controlled call. No model, authentication, ntfy, or deployment service is contacted.
+The real default packaged helper wrapper is exercised for both composition and
+quota with test-only Node `registerHooks` model fixtures. The composition fixture
+records one controlled model call and validates its exact result. The quota
+fixture drives one public `getAuth` resolution and one fixed usage `fetch`, then
+validates the strict result and that its synthetic credential sentinel is absent
+from helper argv and output. The package smoke does not create or inspect the
+quota cache; the source integration test separately proves the cache omits the
+credential sentinel. No live model, authentication, provider, ntfy, external
+network, or deployment service is contacted. Existing negative controls still
+prove copied/bypassed extensions and an independent SDK accessor fail
+physical-graph classification.
 
 Consumer configuration does not yet replace its existing Pi package. That coordinated cutover remains responsible for pointing Pi at the runtime's evaluated extension root and for user-level wiring.

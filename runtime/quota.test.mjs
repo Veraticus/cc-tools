@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import { quota, validateQuotaRequest } from './quota.mjs';
+import { normalizeUpstream, quota, validateQuotaRequest } from './quota.mjs';
 
 /** @typedef {import('./quota.mjs').QuotaRequest} QuotaRequest */
 /** @typedef {import('./quota.mjs').QuotaError} QuotaError */
@@ -180,6 +180,20 @@ test('validates the exact quota request, URL, field types, controls, and UTF-8 b
     { ...request, model: { ...request.model, base_url: `${exactUrl}x` } },
   ];
   for (const value of invalid) assert.equal(validateQuotaRequest(value), undefined);
+});
+
+test('exports the shared pure upstream normalization without auth or HTTP work', () => {
+  for (const value of [
+    canonicalBaseUrl,
+    `${canonicalBaseUrl}/`,
+    `${canonicalBaseUrl}/codex`,
+    `${canonicalBaseUrl}/codex/`,
+  ]) assert.equal(normalizeUpstream(value), canonicalBaseUrl);
+  for (const value of [
+    'https://gateway.example/backend-api',
+    'http://chatgpt.com/backend-api',
+    'https://chatgpt.com/backend-api?query=1',
+  ]) assert.equal(normalizeUpstream(value), undefined);
 });
 
 test('rejects non-Codex providers and request upstreams before runtime, auth, or HTTP', async () => {

@@ -25,9 +25,10 @@ fact is known.
 
 The helper lazily imports the public Pi SDK and calls
 `ModelRuntime.create({ signal, allowModelNetwork: false })`. It resolves exactly
-the requested model and asks Pi for that model's authentication with the same
-outer signal. Pi remains responsible for stored credentials, OAuth refresh, and
-refresh locking; the helper does not read or implement an OAuth store. A valid
+the requested model and uses the public `ModelRuntime.getAuth` flow. This remains
+the only credential-owning helper: Pi is responsible for stored credentials,
+OAuth refresh, and refresh locking, while the extension and cache never receive
+or read a bearer token. A valid
 bearer JWT must contain a bounded string claim at
 `https://api.openai.com/auth.chatgpt_account_id`. Only that claim is decoded.
 
@@ -87,3 +88,18 @@ Results contain no raw account ID, token, arbitrary headers, environment values,
 auth source, plan or billing metadata, response body, provider diagnostics, or
 stack trace. The production entrypoint waits for the stdout callback to confirm
 the single line is flushed and then exits explicitly.
+
+## Pi extension producer boundary
+
+`runtime/pi-quota-helper.mjs` is the extension-side transport for this existing
+protocol. It starts the packaged `steward-pi-helper` without a shell, sends the
+exact request only on stdin, accepts at most 4096 stdout bytes, requires fatal
+UTF-8 and one exact result, and succeeds only after both the stdin callback and
+child close. Its 15-second deadline and caller cancellation kill the child and
+destroy/unreference every owned handle. `STEWARD_HELPER_BIN` is used only when it
+is present; an explicitly empty value is not replaced by the default.
+
+`runtime/pi-quota.mjs` consumes only the normalized result. It retains
+`account_key` for local account-switch decisions, but passes only provider,
+canonical base URL, timestamps, freshness, and windows to the footer. The
+producer makes no additional provider call and introduces no new protocol.

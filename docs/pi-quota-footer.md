@@ -27,9 +27,9 @@ This differs from the existing Claude `rate_limits.*.resets_at` fields, which
 remain Unix timestamps in seconds and are otherwise unchanged.
 
 The namespace intentionally contains no account key, raw account ID, bearer
-token, authentication source, or environment-derived field. Account-aware
-producers will own immediate clearing after an account switch; this renderer
-does not claim to detect authentication or account changes.
+token, authentication source, or environment-derived field. The account-aware
+Pi producer owns immediate clearing after authentication metadata or account
+changes; this renderer does not claim to detect those changes itself.
 
 Inputs outside the exact scope, including an absent `steward_quota`, preserve
 the existing Claude/Patchbay/cost rendering path byte-for-byte.
@@ -79,6 +79,19 @@ percentages, reset clocks, and freshness meaningful at widths 40, 60, and 80;
 pathological smaller widths may fall back to an honest `quota` summary marker
 rather than display a clipped metric.
 
-Future producer work still needs to implement cache ownership, request
-coalescing, account-aware clearing, and Pi extension wiring. None of that is
-provided by this renderer integration.
+## Pi producer freshness and invalidation
+
+The root-TUI Pi extension now provides this renderer namespace. It refreshes at
+exactly five minutes while an applicable Codex model is active and marks retained
+same-account data stale from exactly five minutes through just before 15 minutes.
+At exactly 15 minutes it clears the snapshot. Future timestamps are unknown.
+Transient same-account failures may retain bounded stale data; unknown identity,
+authentication rejection/unavailability, non-applicability, and known account
+switches clear immediately.
+
+The producer watches the parent directory containing Pi's `auth.json`, so atomic
+replacement is observable. Every relevant auth event synchronously clears the
+last-good footer line, aborts helper and renderer work, and fences late async
+results before recovery. Model/session replacement and shutdown do the same.
+The renderer remains independently defensive: it still validates freshness and
+cannot receive account identity.

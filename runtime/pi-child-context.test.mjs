@@ -237,6 +237,10 @@ async function createCopiedRootAdapter(root) {
     copyFile(join(REPOSITORY_ROOT, "runtime", "pi-labels.mjs"), join(runtime, "pi-labels.mjs")),
     copyFile(join(REPOSITORY_ROOT, "runtime", "pi-metadata.mjs"), join(runtime, "pi-metadata.mjs")),
     copyFile(join(REPOSITORY_ROOT, "runtime", "pi-notify.mjs"), join(runtime, "pi-notify.mjs")),
+    copyFile(join(REPOSITORY_ROOT, "runtime", "pi-quota.mjs"), join(runtime, "pi-quota.mjs")),
+    copyFile(join(REPOSITORY_ROOT, "runtime", "pi-quota-cache.mjs"), join(runtime, "pi-quota-cache.mjs")),
+    copyFile(join(REPOSITORY_ROOT, "runtime", "pi-quota-helper.mjs"), join(runtime, "pi-quota-helper.mjs")),
+    copyFile(join(REPOSITORY_ROOT, "runtime", "quota.mjs"), join(runtime, "quota.mjs")),
     writeFile(
       join(runtime, "pi-child-context.mjs"),
       "export function isPiChildSession() { return false; }\n",

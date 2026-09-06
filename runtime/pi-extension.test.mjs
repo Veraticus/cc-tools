@@ -20,6 +20,7 @@ const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 /** @typedef {Parameters<typeof statuslinePayload>[0]} AdapterContext */
 /** @typedef {ReturnType<AdapterContext["sessionManager"]["getBranch"]>[number]} AdapterEntry */
 /** @typedef {Parameters<typeof installFooter>[0]} FooterExec */
+/** @typedef {import("./pi-quota.mjs").PiQuotaSnapshot} PiQuotaSnapshot */
 /** @typedef {Awaited<ReturnType<FooterExec["exec"]>>} FooterExecResult */
 /** @typedef {{promise: Promise<FooterExecResult>, resolve: (value: FooterExecResult) => void, reject: (error: Error) => void}} DeferredExec */
 /** @typedef {{promise: Promise<boolean>, resolve: (value: boolean) => void, reject: (error: Error) => void}} DeferredBoolean */
@@ -128,7 +129,7 @@ function makeUIHarness() {
  *   leafId?: string | null,
  *   branch?: AdapterEntry[],
  *   ui?: AdapterContext["ui"],
- *   model?: {id: string, name: string, provider: string, contextWindow: number} | undefined,
+ *   model?: {id: string, name: string, provider: string, contextWindow: number, api?: string, baseUrl?: string} | undefined,
  *   thinkingLevel?: string,
  *   contextUsage?: {tokens: number | null, contextWindow: number, percent: number | null} | undefined,
  * }} [overrides]
@@ -256,6 +257,22 @@ test("statusline payload preserves the existing schema and maps native Pi state"
   });
 });
 
+test("statusline payload includes only the renderer quota snapshot and never account identity", () => {
+  /** @type {PiQuotaSnapshot} */
+  const quota = {
+    provider: "openai-codex",
+    base_url: "https://chatgpt.com/backend-api",
+    fetched_at: 1_700_000_000_000,
+    stale: false,
+    windows: { five_hour: { remaining_percent: 75, reset_at: 1_700_003_600_000 }, weekly: null },
+  };
+  const payload = JSON.parse(statuslinePayload(makeContext(), 120, quota));
+  assert.deepEqual(payload.steward_quota, quota);
+  assert.doesNotMatch(JSON.stringify(payload), /account_key|bearer|credential/i);
+  const absent = JSON.parse(statuslinePayload(makeContext(), 120));
+  assert.equal(Object.hasOwn(absent, "steward_quota"), false);
+});
+
 test("footer renders cached output and coalesces width and branch refreshes", async () => {
   const harness = makeUIHarness();
   /** @type {Array<{command: string, args: string[], options: {cwd?: string, timeout?: number, signal?: AbortSignal}}>} */
@@ -345,6 +362,49 @@ test("footer rejects each context, width, and branch generation race", async (t)
       controller.dispose();
     });
   }
+});
+
+test("quota invalidation synchronously erases a last-good line and rejects an old renderer result", async () => {
+  const harness = makeUIHarness();
+  /** @type {DeferredExec} */
+  const oldAccountRender = deferred();
+  let calls = 0;
+  /** @type {FooterExec} */
+  const pi = {
+    exec(_command, args) {
+      calls += 1;
+      if (calls === 1) return Promise.resolve(execResult("old-account-quota\n"));
+      if (calls === 2) return oldAccountRender.promise;
+      const payload = JSON.parse(args[1] ?? "null");
+      assert.equal(payload.steward_quota.fetched_at, 0);
+      return Promise.resolve(execResult("explicit-unknown\n"));
+    },
+  };
+  const controller = installFooter(pi, makeContext({ ui: harness.ui }), {
+    provider: "openai-codex",
+    base_url: "https://chatgpt.com/backend-api",
+    fetched_at: 1_700_000_000_000,
+    stale: false,
+    windows: { five_hour: null, weekly: null },
+  });
+  harness.component()?.render(100);
+  await flush();
+  assert.deepEqual(harness.component()?.render(100), ["old-account-quota"]);
+
+  controller.update(makeContext({ ui: harness.ui }));
+  await Promise.resolve();
+  controller.updateQuota({
+    provider: "openai-codex",
+    base_url: "https://chatgpt.com/backend-api",
+    fetched_at: 0,
+    stale: false,
+    windows: { five_hour: null, weekly: null },
+  }, true);
+  assert.deepEqual(harness.component()?.render(100), [""]);
+  oldAccountRender.resolve(execResult("late-old-account-quota\n"));
+  await flush();
+  assert.deepEqual(harness.component()?.render(100), ["explicit-unknown"]);
+  controller.dispose();
 });
 
 test("footer keeps its last good line and retries after rejection and nonzero exit", async () => {
@@ -627,6 +687,76 @@ test("root lifecycle installs and notifies only in TUI and only on agent_settled
   assert.equal(payloads.length, 1);
   lifecycle.handlers.session_shutdown({ type: "session_shutdown", reason: "quit" }, ctx);
   assert.equal(harness.component(), undefined);
+});
+
+test("non-TUI lifecycle never constructs a quota producer", () => {
+  /** @type {Array<"rpc"|"json"|"print">} */
+  const modes = ["rpc", "json", "print"];
+  for (const mode of modes) {
+    let constructions = 0;
+    const lifecycle = createPiLifecycle(
+      { async exec() { return execResult(""); } },
+      {
+        createQuota() {
+          constructions += 1;
+          throw new Error("quota must remain TUI-only");
+        },
+        report() {},
+      },
+    );
+    lifecycle.handlers.session_start(
+      { type: "session_start", reason: "startup" },
+      makeContext({ mode }),
+    );
+    assert.equal(constructions, 0, mode);
+  }
+});
+
+test("root TUI quota lifecycle follows model and unique settled sources across fresh contexts", async () => {
+  const harness = makeUIHarness();
+  /** @type {Array<[string, string|undefined, string?]>} */
+  const calls = [];
+  let disposed = 0;
+  const lifecycle = createPiLifecycle(
+    { async exec() { return execResult("line\n"); } },
+    {
+      async sendNotification() { return true; },
+      createQuota(onChange) {
+        onChange(undefined, true);
+        return {
+          start(model) { calls.push(["start", model?.id]); return Promise.resolve(); },
+          model(model) { calls.push(["model", model?.id]); return Promise.resolve(); },
+          settled(model, source) { calls.push(["settled", model?.id, source]); return Promise.resolve(); },
+          dispose() { disposed += 1; },
+        };
+      },
+      report() {},
+    },
+  );
+  const model = {
+    id: "gpt-5.6-luna",
+    name: "GPT-5.6 Luna",
+    provider: "openai-codex",
+    api: "openai-codex-responses",
+    baseUrl: "https://chatgpt.com/backend-api",
+    contextWindow: 200_000,
+  };
+  const first = makeContext({ ui: harness.ui, model });
+  lifecycle.handlers.session_start({ type: "session_start", reason: "startup" }, first);
+  lifecycle.handlers.model_select({}, makeContext({ ui: harness.ui, model: { ...model } }));
+  lifecycle.handlers.agent_settled({}, makeContext({
+    ui: harness.ui,
+    model: { ...model },
+    branch: [user("quota question"), assistant(0, "quota answer", "quota-source")],
+  }));
+  await flush();
+  assert.deepEqual(calls, [
+    ["start", "gpt-5.6-luna"],
+    ["model", "gpt-5.6-luna"],
+    ["settled", "gpt-5.6-luna", "quota-source"],
+  ]);
+  lifecycle.handlers.session_shutdown({ type: "session_shutdown", reason: "quit" }, first);
+  assert.equal(disposed, 1);
 });
 
 test("real SessionManager lifecycle accepts fresh event contexts after agent activity and tree invalidation", async () => {

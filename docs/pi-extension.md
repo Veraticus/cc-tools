@@ -7,7 +7,10 @@ Steward's Pi 0.85 adapter is `runtime/pi-extension.mjs`. The package extension o
 
 The adapter calls the pinned native child-context accessor once, synchronously, when its factory is constructed. A child returns before registering events, installing a footer, or submitting a notification. Coupling errors remain visible and are never interpreted as a root session. See [Pi child-context coupling](pi-child-context.md) for the physical-package invariant and construction proof.
 
-This release owns settled notifications, shared root-TUI session labels, and the existing custom statusline footer. It does not add quota fetching, account lifecycle, authentication inspection, or provider calls.
+This release owns settled notifications, shared root-TUI session labels, the
+custom statusline footer, and its Codex quota producer. Quota remains root-TUI
+only and uses the existing isolated helper protocol; child sessions and non-TUI
+modes perform no quota path, auth, cache, watch, helper, timer, or network work.
 
 ## Settled notifications
 
@@ -104,6 +107,41 @@ handling lets tmux expose that value as pane `#T`; Steward does not rename tmux
 windows or make atomicity claims about unrelated out-of-band title commands.
 Non-TUI modes, child sessions, and other harness terminals do no label work.
 
+## Codex quota lifecycle
+
+For an exact `openai-codex` / `openai-codex-responses` model on the normalized
+ChatGPT backend, one root-local controller launches the bounded quota helper.
+Only that credential-owning helper uses Pi's public model/auth API and performs
+the single fixed usage fetch. The extension itself never reads auth content and
+never performs provider HTTP.
+
+Before statting auth, the controller installs a nonpersistent parent-directory
+watch for `auth.json`. This is intentional: Pi can atomically replace the file.
+The path must be an owner-only regular file. Relevant rename/change events,
+missing filenames, watch failures, unsafe metadata, parent replacement, model
+replacement, and disposal synchronously clear last-good quota, abort owned work,
+and advance generations. Auth metadata is checked before and after helper and
+cache awaits, including a final awaited stat fence, so an obsolete completion
+cannot publish or repopulate cache.
+
+Successful identity is only the helper's scoped `account_key`. A per-auth-path
+SHA-256 cache name under `${XDG_CACHE_HOME:-$HOME/.cache}/steward/pi-quota` avoids
+putting identity in filenames. The directory and canonical JSON file are
+owner-only, bounded, non-symlink regular paths; writes are serialized atomic
+replacement and generation-guarded on both sides of awaited filesystem work.
+Corrupt or unsafe cache state fails closed with a fixed diagnostic. Matching
+cache data can be used only after the helper establishes identity. Same-account
+transient failures can retain stale data, while unknown/rejected auth,
+non-applicability, and different accounts clear immediately.
+
+Native `agent_settled` assistant entry IDs deduplicate completion refreshes across
+fresh Pi contexts. Concurrent triggers coalesce to one pending rerun, and one
+periodic refresh is armed at exactly five minutes while applicable. Snapshot
+freshness changes at exactly five minutes and expires at exactly 15 minutes;
+timers also invalidate the footer even without another Pi event. Session/model
+replacement and shutdown close the auth watch, cancel timers, abort the helper,
+and prevent late cache or UI effects.
+
 ## Custom footer
 
 The footer invokes the existing command boundary:
@@ -112,9 +150,18 @@ The footer invokes the existing command boundary:
 steward statusline <canonical-statusline-json>
 ```
 
-Each call has a five-second timeout and receives an abort signal. The JSON retains the existing model ID/provider/display name, summed native assistant cost on the active branch, context percentage and window size, cwd/workspace fields, and thinking effort, with top-level `harness: "pi"`. It does not invent a quota or account namespace.
+Each call has a five-second timeout and receives an abort signal. The JSON retains the existing model ID/provider/display name, summed native assistant cost on the active branch, context percentage and window size, cwd/workspace fields, and thinking effort, with top-level `harness: "pi"`. When available it also includes
+the validated `steward_quota` renderer snapshot. It never includes account key,
+raw identity, auth data, or arbitrary helper fields.
 
-Rendering is cache-only. A width, branch, model, thinking, tool, turn, compaction, tree, or settled change schedules asynchronous refresh work. Concurrent changes coalesce, and a result is applied only if its context/branch/width generation is still current. A rejection, killed result (including a timeout reported as zero exit), nonzero exit, or output that is empty after trailing newline normalization keeps the last good line; a later lifecycle change retries.
+Rendering is cache-only. A width, branch, model, thinking, tool, turn,
+compaction, tree, settled, or quota change schedules asynchronous refresh work.
+Concurrent changes coalesce, and a result is applied only if its
+context/branch/width/quota generation is still current. Ordinary renderer
+rejection, killed result (including a timeout reported as zero exit), nonzero
+exit, or output empty after trailing-newline normalization keeps the last good
+line. Security-sensitive quota invalidation is different: it synchronously
+erases that line and aborts the old renderer before requesting replacement.
 
 Disposal is idempotent. It unsubscribes the branch listener once, aborts and clears an in-flight statusline process, restores Pi's built-in footer, and prevents late results or render requests. Session replacement and shutdown dispose the old footer before a replacement TUI can install another one.
 

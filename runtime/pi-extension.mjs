@@ -4,6 +4,7 @@ import {
   PI_NOTIFY_FAILURE,
   sendPiNotification,
 } from "./pi-notify.mjs";
+import { createPiQuotaController } from "./pi-quota.mjs";
 
 export const PI_IDENTITY_DIAGNOSTIC =
   "Steward skipped the Pi settled notification because native identity was unavailable";
@@ -29,6 +30,8 @@ const FOOTER_TIMEOUT_MS = 5_000;
  *   id: string,
  *   provider: string,
  *   name?: string,
+ *   api?: string,
+ *   baseUrl?: string,
  *   contextWindow: number,
  * }} AdapterModel
  */
@@ -64,13 +67,15 @@ const FOOTER_TIMEOUT_MS = 5_000;
  *   ): Promise<{stdout: string, stderr: string, code: number, killed: boolean}>,
  * }} FooterExec
  */
-/** @typedef {{update(ctx: AdapterContext): void, dispose(): void}} FooterController */
+/** @typedef {import("./pi-quota.mjs").PiQuotaFooterSnapshot} PiQuotaFooterSnapshot */
+/** @typedef {{update(ctx: AdapterContext): void, updateQuota(snapshot: PiQuotaFooterSnapshot, invalidateLastGood: boolean): void, dispose(): void}} FooterController */
 /**
  * @typedef {{
  *   sendNotification?: typeof sendPiNotification,
  *   report?: (diagnostic: string) => void,
  *   readMetadata?: (sessionID: string, options?: {signal?: AbortSignal}) => ReturnType<import("./pi-metadata.mjs").readPiMetadata>,
  *   labelSchedule?: (callback: () => void, delay: number) => (() => void),
+ *   createQuota?: (onChange: (snapshot: PiQuotaFooterSnapshot, invalidateLastGood: boolean) => void) => import("./pi-quota.mjs").PiQuotaController,
  * }} LifecycleDependencies
  */
 
@@ -148,9 +153,10 @@ function sessionCost(ctx) {
 /**
  * @param {AdapterContext} ctx
  * @param {number} columns
+ * @param {PiQuotaFooterSnapshot} [quota]
  * @returns {string}
  */
-export function statuslinePayload(ctx, columns) {
+export function statuslinePayload(ctx, columns, quota) {
   const model = ctx.model;
   const context = ctx.getContextUsage();
   return JSON.stringify({
@@ -174,16 +180,19 @@ export function statuslinePayload(ctx, columns) {
     },
     cwd: ctx.cwd,
     effort: ctx.thinkingLevel ? { level: ctx.thinkingLevel } : undefined,
+    steward_quota: quota,
   });
 }
 
 /**
  * @param {FooterExec} pi
  * @param {AdapterContext} initialCtx
+ * @param {PiQuotaFooterSnapshot} [initialQuota]
  * @returns {FooterController}
  */
-export function installFooter(pi, initialCtx) {
+export function installFooter(pi, initialCtx, initialQuota) {
   let ctx = initialCtx;
+  let quota = initialQuota;
   let columns = 0;
   let line = "";
   let generation = 0;
@@ -225,7 +234,7 @@ export function installFooter(pi, initialCtx) {
         try {
           const result = await pi.exec(
             "steward",
-            ["statusline", statuslinePayload(refreshCtx, refreshColumns)],
+            ["statusline", statuslinePayload(refreshCtx, refreshColumns, quota)],
             {
               cwd: refreshCtx.cwd,
               timeout: FOOTER_TIMEOUT_MS,
@@ -285,6 +294,17 @@ export function installFooter(pi, initialCtx) {
     update(nextCtx) {
       if (disposed) return;
       ctx = nextCtx;
+      scheduleRefresh();
+    },
+    updateQuota(nextQuota, invalidateLastGood) {
+      if (disposed) return;
+      quota = nextQuota;
+      if (invalidateLastGood) {
+        const hadLine = line !== "";
+        line = "";
+        activeController?.abort();
+        if (hadLine) requestRender?.();
+      }
       scheduleRefresh();
     },
     dispose() {
@@ -373,6 +393,8 @@ export function createPiLifecycle(pi, dependencies = {}) {
   const report = dependencies.report ?? defaultReport;
   /** @type {FooterController | undefined} */
   let footer;
+  /** @type {import("./pi-quota.mjs").PiQuotaController | undefined} */
+  let quota;
   const labels = createPiLabels(pi, {
     read: dependencies.readMetadata,
     schedule: dependencies.labelSchedule,
@@ -387,13 +409,22 @@ export function createPiLifecycle(pi, dependencies = {}) {
   const handlers = {
     /** @param {{type?: string, reason: string}} _event @param {AdapterContext} ctx */
     session_start(_event, ctx) {
+      quota?.dispose();
+      quota = undefined;
       footer?.dispose();
       footer = undefined;
-      if (ctx.mode === "tui") footer = installFooter(pi, ctx);
+      if (ctx.mode === "tui") {
+        footer = installFooter(pi, ctx);
+        const createQuota = dependencies.createQuota ?? ((onChange) => createPiQuotaController(onChange, { report }));
+        quota = createQuota((snapshot, invalidateLastGood) => footer?.updateQuota(snapshot, invalidateLastGood));
+        void quota.start(ctx.model);
+      }
       labels.start(ctx);
     },
     /** @param {{type?: string, reason: string}} _event @param {AdapterContext} _ctx */
     session_shutdown(_event, _ctx) {
+      quota?.dispose();
+      quota = undefined;
       footer?.dispose();
       footer = undefined;
       labels.dispose();
@@ -407,7 +438,7 @@ export function createPiLifecycle(pi, dependencies = {}) {
     /** @param {unknown} _event @param {AdapterContext} ctx */
     tool_execution_end(_event, ctx) { updateFooter(ctx); },
     /** @param {unknown} _event @param {AdapterContext} ctx */
-    model_select(_event, ctx) { updateFooter(ctx); },
+    model_select(_event, ctx) { void quota?.model(ctx.model); updateFooter(ctx); },
     /** @param {unknown} _event @param {AdapterContext} ctx */
     thinking_level_select(_event, ctx) { updateFooter(ctx); },
     /** @param {unknown} _event @param {AdapterContext} ctx */
@@ -431,6 +462,7 @@ export function createPiLifecycle(pi, dependencies = {}) {
         safeReport(report, PI_NOTIFY_FAILURE);
       }
       labels.settled(ctx, snapshot.payload.completion_id);
+      void quota?.settled(ctx.model, snapshot.payload.completion_id);
     },
   };
 

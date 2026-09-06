@@ -59,6 +59,11 @@ terminal title updates without changing the daemon protocol or cadence. Its
 source integration test uses a real local CLI/daemon and native `SessionManager`
 entries; this is not evidence that a consumer package has deployed it.
 
+The root-TUI quota producer is implemented here with the packaged public-Pi-auth
+helper, owner-only local cache, auth replacement watch, and statusline fencing.
+The consumer is not yet deployed and this branch performs no live auth, model,
+provider, ntfy, or external-network verification.
+
 Consumer cutover still needs to replace its existing Pi package with this paired
 runtime, native root Stop hook trust, and its exact user `trusted_hash`, labels
 and quota production wiring, live verification, review, and release. Retire the

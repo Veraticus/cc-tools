@@ -102,6 +102,10 @@ test("package smoke unit fixtures use the prepared source graph", async (t) => {
   assert.equal(await readlink(join(packageLib, "runtime")), join(runtimeLib, "runtime"));
   assert.equal(await readlink(join(packageLib, "node_modules")), join(runtimeLib, "node_modules"));
   assert.equal(await readlink(join(packageLib, "package.json")), join(runtimeLib, "package.json"));
+
+  const smoke = runSmoke(["--package-root", packageRoot, "--runtime-root", runtimeRoot]);
+  assert.equal(smoke.status, 0, smoke.stderr);
+  assert.equal(smoke.stderr, "");
 });
 
 test("package smoke rejects missing explicit packaged roots", () => {

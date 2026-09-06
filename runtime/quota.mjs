@@ -77,7 +77,7 @@ export function validateQuotaRequest(value) {
 }
 
 /** @param {string} value @returns {'https://chatgpt.com/backend-api'|undefined} */
-function normalizeUpstream(value) {
+export function normalizeUpstream(value) {
   if (!value || value !== value.trim() || controls.test(value)) return undefined;
   try {
     const url = new URL(value);

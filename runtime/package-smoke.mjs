@@ -8,6 +8,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const fixture = join(sourceRoot, "runtime", "package-smoke-model.mjs");
+const quotaFixture = join(sourceRoot, "runtime", "pi-quota-model.mjs");
+const quotaCredentialSentinel = "SYNTHETIC-QUOTA-CREDENTIAL-SENTINEL";
 const entryObserver = join(sourceRoot, "runtime", "package-smoke-entry.mjs");
 const request = JSON.stringify({
   version: 1,
@@ -15,6 +17,15 @@ const request = JSON.stringify({
   model: { provider: "openai-codex", id: "gpt-5.6-luna", thinking: "low" },
   input: { user: "Synthetic package user", assistant: "Synthetic package assistant" },
   label: { current: "", refresh: true },
+});
+const quotaRequest = JSON.stringify({
+  version: 1,
+  operation: "quota",
+  model: {
+    provider: "openai-codex",
+    id: "gpt-5.6-luna",
+    base_url: "https://chatgpt.com/backend-api",
+  },
 });
 
 /** @param {string} name */
@@ -96,6 +107,7 @@ function main() {
   try {
     const home = join(root, "home");
     const marker = join(root, "model.jsonl");
+    const quotaMarker = join(root, "quota.jsonl");
     const entryMarker = join(root, "entry.json");
     const environment = {
       HOME: home,
@@ -147,6 +159,41 @@ function main() {
     assert.equal(helperResult.stderr, "");
     assert.deepEqual(JSON.parse(helperResult.stdout), { version: 1, ok: true, body: "Synthetic package outcome", label: "Synthetic Package Label" });
     assert.equal(readFileSync(marker, "utf8").trim().split("\n").length, 1);
+
+    const quotaEnvironment = {
+      ...environment,
+      STEWARD_QUOTA_FIXTURE_MARKER: quotaMarker,
+      NODE_OPTIONS: `--import ${quotaFixture}`,
+    };
+    const quotaResult = spawnSync(defaultHelper, [], {
+      cwd: root,
+      input: quotaRequest,
+      encoding: "utf8",
+      env: quotaEnvironment,
+      timeout: 15_000,
+    });
+    assert.equal(quotaResult.status, 0, quotaResult.stderr);
+    assert.equal(quotaResult.stderr, "");
+    const quota = JSON.parse(quotaResult.stdout);
+    assert.doesNotMatch(quotaResult.stdout, new RegExp(quotaCredentialSentinel));
+    assert.equal(quota.version, 1);
+    assert.equal(quota.ok, true);
+    assert.equal(quota.provider, "openai-codex");
+    assert.equal(quota.base_url, "https://chatgpt.com/backend-api");
+    assert.match(quota.account_key, /^[a-f0-9]{64}$/);
+    assert.deepEqual({
+      five_hour: quota.windows.five_hour?.remaining_percent,
+      weekly: quota.windows.weekly?.remaining_percent,
+    }, { five_hour: 75, weekly: 20 });
+    const quotaObservation = JSON.parse(readFileSync(quotaMarker, "utf8"));
+    assert.deepEqual(quotaObservation, {
+      phase: "complete",
+      getAuthCalls: 1,
+      fetchCalls: 1,
+      authorizationMatches: true,
+      accountMatches: true,
+    });
+
     const invalid = spawnSync(defaultHelper, [], { cwd: root, input: "{}", encoding: "utf8", env: helperEnvironment, timeout: 15_000 });
     assert.equal(invalid.status, 1);
     assert.equal(invalid.stderr, "");
